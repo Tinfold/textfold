@@ -1,7 +1,7 @@
 //! What textfold knows about a language: how to colour it, how to comment it
 //! out, and what to run to get intelligence about it.
 //!
-//! A language is a table of facts, not code, which is the point. The thirteen
+//! A language is a table of facts, not code, which is the point. The languages
 //! textfold ships are written in `languages.json` beside this file and built
 //! into the binary; a file of the same name in `~/.config/textfold/` is read
 //! on top of it, and a table there naming a language textfold already has
@@ -289,6 +289,11 @@ pub fn names() -> Vec<(LangId, &'static str)> {
 /// The directory a language server should be told is the top of the project:
 /// the nearest ancestor of `from` holding one of `markers`.
 ///
+/// A marker is usually a file name, but `"*.sln"` is allowed and means any
+/// file with that extension — which is the only way to say what marks the top
+/// of a C# project, where the file is named after the solution rather than
+/// after the language.
+///
 /// Falling back to the file's own directory is deliberate. A server pointed at
 /// your home directory will try to index all of it.
 pub fn project_root(from: &Path, markers: &[String]) -> PathBuf {
@@ -298,11 +303,28 @@ pub fn project_root(from: &Path, markers: &[String]) -> PathBuf {
         from.parent().unwrap_or(Path::new("."))
     };
     for dir in start.ancestors() {
-        if markers.iter().any(|m| dir.join(m).exists()) {
+        if markers.iter().any(|m| marker_is_in(dir, m)) {
             return dir.to_path_buf();
         }
     }
     start.to_path_buf()
+}
+
+/// Whether `dir` holds `marker`, which is a file name or a `*.ext` pattern.
+fn marker_is_in(dir: &Path, marker: &str) -> bool {
+    let Some(ext) = marker.strip_prefix("*.") else {
+        return dir.join(marker).exists();
+    };
+    // Reading a directory is more work than asking after one file, so it is
+    // only done for the markers that need it, and only on the way up.
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return false;
+    };
+    entries.flatten().any(|e| {
+        e.path()
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case(ext))
+    })
 }
 
 impl Languages {
@@ -503,6 +525,12 @@ fn built_in_grammar(name: &str) -> Option<GrammarSource> {
     grammars! {
         "bash" => tree_sitter_bash::LANGUAGE, [tree_sitter_bash::HIGHLIGHT_QUERY],
         "c" => tree_sitter_c::LANGUAGE, [tree_sitter_c::HIGHLIGHT_QUERY],
+        // The grammar's own query opens with a catch-all that would swallow
+        // every identifier; ours goes first and says what they are.
+        "c-sharp" => tree_sitter_c_sharp::LANGUAGE, [
+            include_str!("queries/csharp.scm"),
+            tree_sitter_c_sharp::HIGHLIGHTS_QUERY,
+        ],
         "css" => tree_sitter_css::LANGUAGE, [tree_sitter_css::HIGHLIGHTS_QUERY],
         "go" => tree_sitter_go::LANGUAGE, [tree_sitter_go::HIGHLIGHTS_QUERY],
         "html" => tree_sitter_html::LANGUAGE, [tree_sitter_html::HIGHLIGHTS_QUERY],
@@ -615,9 +643,19 @@ mod tests {
         assert!(file.languages.contains_key("rust"));
         for (name, def) in &file.languages {
             if let Some(FileGrammar::BuiltIn { built_in }) = &def.grammar {
+                let Some(GrammarSource::BuiltIn {
+                    language,
+                    highlights,
+                }) = built_in_grammar(built_in)
+                else {
+                    panic!("{name} wants a grammar called {built_in:?} that is not compiled in");
+                };
+                // And that it is a grammar the queries beside it actually
+                // parse against — a highlight query written for last year's
+                // grammar compiles to nothing and shows up as no colours.
                 assert!(
-                    built_in_grammar(built_in).is_some(),
-                    "{name} wants a grammar called {built_in:?} that is not compiled in"
+                    crate::syntax::Grammar::new(language(), &highlights.join("\n")).is_some(),
+                    "{name}: the {built_in:?} highlight query would not compile"
                 );
             }
         }
@@ -670,6 +708,22 @@ mod tests {
     }
 
     #[test]
+    fn a_marker_can_name_an_extension_rather_than_a_file() {
+        // Which is what C# needs: the file that marks the top of a project is
+        // named after the solution, not after the language.
+        let dir = std::env::temp_dir().join(format!("textfold-sln-{}", std::process::id()));
+        let deep = dir.join("src/Widgets");
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::write(dir.join("Thing.sln"), "").unwrap();
+        let root = project_root(&deep.join("Widget.cs"), &["*.sln".into(), ".git".into()]);
+        assert_eq!(root, dir);
+        // And an extension nothing has still falls back rather than matching.
+        let root = project_root(&deep.join("Widget.cs"), &["*.nope".into()]);
+        assert_eq!(root, deep);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn the_project_root_is_the_nearest_marker_above_the_file() {
         let dir = std::env::temp_dir().join(format!("textfold-root-{}", std::process::id()));
         let deep = dir.join("crate/src/inner");
@@ -680,3 +734,4 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+

@@ -365,8 +365,15 @@ mod tests {
     }
 
     fn roles(text: &str) -> Vec<(String, Role)> {
+        roles_in("rust", text)
+    }
+
+    fn roles_in(language: &str, text: &str) -> Vec<(String, Role)> {
+        lang::init();
+        let id = lang::by_name(language).expect("shipped");
+        let grammar = lang::get(id).grammar().expect("compiled in");
         let rope = Rope::from_str(text);
-        let syntax = Syntax::new(rust_grammar(), &rope).expect("parses");
+        let syntax = Syntax::new(grammar, &rope).expect("parses");
         syntax
             .highlights(&rope, 0..rope.len_bytes())
             .into_iter()
@@ -419,6 +426,42 @@ mod tests {
         assert_eq!(by_text("let"), Some(Role::Keyword));
         assert_eq!(by_text("main"), Some(Role::Function));
         assert_eq!(by_text("u32"), Some(Role::Type));
+    }
+
+    #[test]
+    fn csharp_is_coloured_the_way_a_person_would_expect() {
+        // The grammar's own query opens with a catch-all `(identifier)
+        // @variable`, which under tree-sitter's precedence wins every
+        // identifier in the file unless something is put in front of it.
+        // queries/csharp.scm is what is put in front of it, and this is the
+        // test that says it worked.
+        let found = roles_in(
+            "csharp",
+            r#"namespace Widgets;
+[Obsolete]
+public class Widget : IThing {
+    const int MAX = 8;
+    public string Name { get; set; }
+    void Run(Widget other) { var s = "hi"; other.Stop(); }
+}"#,
+        );
+        let by_text = |want: &str| {
+            found
+                .iter()
+                .find(|(text, _)| text == want)
+                .map(|(_, role)| *role)
+        };
+        assert_eq!(by_text("class"), Some(Role::Keyword), "{found:?}");
+        assert_eq!(by_text("Widgets"), Some(Role::Namespace), "{found:?}");
+        assert_eq!(by_text("Widget"), Some(Role::Type), "{found:?}");
+        assert_eq!(by_text("IThing"), Some(Role::Type), "{found:?}");
+        assert_eq!(by_text("Obsolete"), Some(Role::Attribute), "{found:?}");
+        assert_eq!(by_text("MAX"), Some(Role::Constant), "{found:?}");
+        assert_eq!(by_text("Run"), Some(Role::Function), "{found:?}");
+        assert_eq!(by_text("Stop"), Some(Role::Function), "{found:?}");
+        assert_eq!(by_text("Name"), Some(Role::Property), "{found:?}");
+        assert_eq!(by_text("other"), Some(Role::Parameter), "{found:?}");
+        assert_eq!(by_text("\"hi\""), Some(Role::String), "{found:?}");
     }
 
     #[test]

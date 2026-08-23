@@ -357,6 +357,7 @@ because a code action said so is an editor nobody trusts twice.
 | TypeScript / JavaScript / TSX | `typescript-language-server` |
 | Go | `gopls` |
 | C / C++ | `clangd` |
+| C# | `OmniSharp -lsp` |
 | Bash | `bash-language-server` |
 | JSON | `vscode-json-language-server` |
 | TOML | `taplo` |
@@ -366,7 +367,11 @@ because a code action said so is an editor nobody trusts twice.
 | Dockerfile | `docker-langserver` |
 
 Install the ones you want the way you normally would — for Rust that is
-`rustup component add rust-analyzer`. A server that is not installed is
+`rustup component add rust-analyzer`. OmniSharp is the one whose name is worth
+checking: its own releases and most distributions call the binary `OmniSharp`,
+which is what textfold runs, but some package managers install it lowercase.
+`{ "languages": { "csharp": { "servers": [{ "command": "omnisharp", "args":
+["-lsp"] }] } } }` in your own `languages.json` is the whole fix. A server that is not installed is
 mentioned once and then left alone; the editor works exactly as well without
 it, minus the intelligence.
 
@@ -381,9 +386,11 @@ keystroke re-reads the few nodes that changed. Colours are worked out for the
 part of the file on screen and no further.
 
 Grammars built in: Rust, Python, JavaScript, TypeScript, TSX, Go, C (which C++
-borrows), Bash, JSON, TOML, YAML, Markdown, HTML, CSS. Rust's shipped highlight
-query has a typo in it upstream that stops every SCREAMING_CASE constant from
-being coloured as one; textfold reads its own correction on top of it.
+borrows), C#, Bash, JSON, TOML, YAML, Markdown, HTML, CSS. Two of the shipped
+highlight queries are wrong upstream and textfold reads its own correction on
+top of them: Rust's has a typo that stops every SCREAMING_CASE constant from
+being coloured as one, and C#'s opens with a catch-all that colours every class
+name, method name and type as a plain variable.
 
 A file that would take longer than a moment to parse — a minified bundle, a
 megabyte of something the grammar cannot make sense of — is opened without
@@ -571,7 +578,9 @@ Per language: `extensions`, `filenames` (for the many files with no extension),
 `roots` matters more than it looks. It is the marker files that say where a
 project starts; the nearest ancestor holding one is the directory the server is
 told about. A server given the wrong root indexes either far too much or
-nothing at all.
+nothing at all. A marker is usually a file name, but `"*.sln"` is allowed and
+means any file with that extension — for the projects whose marker file is
+named after the project rather than after the language.
 
 `textfold --list-languages` shows what is in force.
 

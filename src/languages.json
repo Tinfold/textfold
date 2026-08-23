@@ -134,6 +134,28 @@
       ]
     },
 
+    "csharp": {
+      "extensions": ["cs", "csx"],
+      "line_comment": "//",
+      "block_comment": ["/*", "*/"],
+      "grammar": { "built_in": "c-sharp" },
+      "servers": [
+        {
+          "command": "OmniSharp",
+          "args": ["-lsp"],
+          "roots": ["*.sln", "*.slnx", "*.csproj", "global.json", ".git"],
+          "settings": {
+            "omnisharp": {
+              "enableEditorConfigSupport": true,
+              "enableImportCompletion": true,
+              "organizeImportsOnFormat": true,
+              "enableRoslynAnalyzers": true
+            }
+          }
+        }
+      ]
+    },
+
     "bash": {
       "extensions": ["sh", "bash", "zsh", "ksh", "bashrc", "zshrc", "profile"],
       "filenames": [".bashrc", ".bash_profile", ".zshrc", ".profile", ".envrc"],
