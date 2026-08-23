@@ -1,0 +1,18 @@
+{
+  "name": "tokyonight",
+  "about": "Tokyo Night, from folke/tokyonight.nvim.",
+
+  "accent": "#7aa2f7",
+  "dim": "#565f89",
+  "text": "#c0caf5",
+  "muted": "#a9b1d6",
+  "good": "#9ece6a",
+  "warn": "#e0af68",
+  "bad": "#f7768e",
+  "dir": "#7dcfff",
+  "link": "#bb9af7",
+  "exec": "#9ece6a",
+  "info": "#2ac3de",
+  "bg": "#1a1b26",
+  "on_accent": "#1a1b26"
+}

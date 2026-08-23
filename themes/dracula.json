@@ -1,0 +1,18 @@
+{
+  "name": "dracula",
+  "about": "Dracula, from the specification at draculatheme.com.",
+
+  "accent": "#bd93f9",
+  "dim": "#6272a4",
+  "text": "#f8f8f2",
+  "muted": "#adb5cb",
+  "good": "#50fa7b",
+  "warn": "#f1fa8c",
+  "bad": "#ff5555",
+  "dir": "#8be9fd",
+  "link": "#ff79c6",
+  "exec": "#50fa7b",
+  "info": "#ffb86c",
+  "bg": "#282a36",
+  "on_accent": "#282a36"
+}

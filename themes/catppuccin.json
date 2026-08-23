@@ -1,0 +1,18 @@
+{
+  "name": "catppuccin",
+  "about": "Catppuccin Mocha.",
+
+  "accent": "#cba6f7",
+  "dim": "#6c7086",
+  "text": "#cdd6f4",
+  "muted": "#a6adc8",
+  "good": "#a6e3a1",
+  "warn": "#f9e2af",
+  "bad": "#f38ba8",
+  "dir": "#89b4fa",
+  "link": "#f5c2e7",
+  "exec": "#a6e3a1",
+  "info": "#94e2d5",
+  "bg": "#1e1e2e",
+  "on_accent": "#1e1e2e"
+}

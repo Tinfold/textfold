@@ -1,0 +1,18 @@
+{
+  "name": "latte",
+  "about": "Catppuccin Latte, the light one — the same palette as catppuccin, the other way up.",
+
+  "accent": "#8839ef",
+  "dim": "#9ca0b0",
+  "text": "#4c4f69",
+  "muted": "#6c6f85",
+  "good": "#40a02b",
+  "warn": "#df8e1d",
+  "bad": "#d20f39",
+  "dir": "#1e66f5",
+  "link": "#ea76cb",
+  "exec": "#40a02b",
+  "info": "#179299",
+  "bg": "#eff1f5",
+  "on_accent": "#eff1f5"
+}

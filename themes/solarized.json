@@ -1,0 +1,18 @@
+{
+  "name": "solarized",
+  "about": "Solarized Dark, from Ethan Schoonover's own sixteen values.",
+
+  "accent": "#2aa198",
+  "dim": "#586e75",
+  "text": "#93a1a1",
+  "muted": "#839496",
+  "good": "#859900",
+  "warn": "#b58900",
+  "bad": "#dc322f",
+  "dir": "#268bd2",
+  "link": "#d33682",
+  "exec": "#859900",
+  "info": "#6c71c4",
+  "bg": "#002b36",
+  "on_accent": "#002b36"
+}

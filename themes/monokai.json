@@ -1,0 +1,18 @@
+{
+  "name": "monokai",
+  "about": "Monokai, as everyone remembers it.",
+
+  "accent": "#66d9ef",
+  "dim": "#75715e",
+  "text": "#f8f8f2",
+  "muted": "#a59f85",
+  "good": "#a6e22e",
+  "warn": "#e6db74",
+  "bad": "#f92672",
+  "dir": "#ae81ff",
+  "link": "#fd971f",
+  "exec": "#a6e22e",
+  "info": "#ae81ff",
+  "bg": "#272822",
+  "on_accent": "#272822"
+}

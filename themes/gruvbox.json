@@ -1,0 +1,18 @@
+{
+  "name": "gruvbox",
+  "about": "Gruvbox dark, from morhetz/gruvbox.",
+
+  "accent": "#fabd2f",
+  "dim": "#928374",
+  "text": "#ebdbb2",
+  "muted": "#bdae93",
+  "good": "#b8bb26",
+  "warn": "#fe8019",
+  "bad": "#fb4934",
+  "dir": "#83a598",
+  "link": "#d3869b",
+  "exec": "#b8bb26",
+  "info": "#8ec07c",
+  "bg": "#282828",
+  "on_accent": "#282828"
+}

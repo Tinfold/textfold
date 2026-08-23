@@ -1,0 +1,213 @@
+{
+  "_about": [
+    "The languages textfold ships. A file of the same name in",
+    "~/.config/textfold/ is read on top of this one: a language named there",
+    "merges into the one here field by field, so changing a server or adding",
+    "an extension does not mean restating the rest. A language named there",
+    "that is not here is simply a new language.",
+    "",
+    "  grammar: {\"built_in\": \"rust\"}  one compiled into the binary",
+    "  grammar: {\"library\": \"~/.../zig.so\", \"highlights\": \"~/.../zig.scm\"}",
+    "  grammar: {}                     no colours for this language",
+    "",
+    "  servers: [{\"command\": \"…\", \"args\": [], \"roots\": [\"Cargo.toml\"],",
+    "             \"settings\": {}, \"init_options\": {}, \"env\": {}}]"
+  ],
+
+  "languages": {
+    "rust": {
+      "extensions": ["rs"],
+      "line_comment": "//",
+      "block_comment": ["/*", "*/"],
+      "grammar": { "built_in": "rust" },
+      "servers": [
+        {
+          "command": "rust-analyzer",
+          "roots": ["Cargo.toml", "rust-project.json", ".git"],
+          "settings": {
+            "rust-analyzer": {
+              "check": { "command": "clippy" },
+              "cargo": { "features": "all" },
+              "completion": {
+                "callable": { "snippets": "fill_arguments" },
+                "postfix": { "enable": true }
+              },
+              "inlayHints": {
+                "typeHints": { "enable": true },
+                "parameterHints": { "enable": true }
+              },
+              "procMacro": { "enable": true }
+            }
+          }
+        }
+      ]
+    },
+
+    "python": {
+      "extensions": ["py", "pyi", "pyw"],
+      "shebangs": ["python", "python3"],
+      "line_comment": "#",
+      "grammar": { "built_in": "python" },
+      "servers": [
+        {
+          "command": "pyright-langserver",
+          "args": ["--stdio"],
+          "roots": ["pyproject.toml", "setup.py", "setup.cfg", "requirements.txt", ".git"]
+        },
+        {
+          "command": "ruff",
+          "args": ["server"],
+          "roots": ["pyproject.toml", "ruff.toml", ".ruff.toml", ".git"]
+        }
+      ]
+    },
+
+    "javascript": {
+      "extensions": ["js", "mjs", "cjs", "jsx"],
+      "shebangs": ["node"],
+      "line_comment": "//",
+      "block_comment": ["/*", "*/"],
+      "grammar": { "built_in": "javascript" },
+      "servers": [
+        {
+          "command": "typescript-language-server",
+          "args": ["--stdio"],
+          "roots": ["package.json", "tsconfig.json", "jsconfig.json", ".git"]
+        }
+      ]
+    },
+
+    "typescript": {
+      "extensions": ["ts", "mts", "cts"],
+      "line_comment": "//",
+      "block_comment": ["/*", "*/"],
+      "grammar": { "built_in": "typescript" },
+      "servers": [
+        {
+          "command": "typescript-language-server",
+          "args": ["--stdio"],
+          "roots": ["package.json", "tsconfig.json", ".git"]
+        }
+      ]
+    },
+
+    "tsx": {
+      "lsp_id": "typescriptreact",
+      "extensions": ["tsx"],
+      "line_comment": "//",
+      "block_comment": ["/*", "*/"],
+      "grammar": { "built_in": "tsx" },
+      "servers": [
+        {
+          "command": "typescript-language-server",
+          "args": ["--stdio"],
+          "roots": ["package.json", "tsconfig.json", ".git"]
+        }
+      ]
+    },
+
+    "go": {
+      "extensions": ["go"],
+      "line_comment": "//",
+      "block_comment": ["/*", "*/"],
+      "grammar": { "built_in": "go" },
+      "servers": [{ "command": "gopls", "roots": ["go.mod", "go.work", ".git"] }]
+    },
+
+    "c": {
+      "extensions": ["c", "h"],
+      "line_comment": "//",
+      "block_comment": ["/*", "*/"],
+      "grammar": { "built_in": "c" },
+      "servers": [
+        { "command": "clangd", "roots": ["compile_commands.json", "compile_flags.txt", ".git"] }
+      ]
+    },
+
+    "cpp": {
+      "extensions": ["cc", "cpp", "cxx", "hpp", "hh", "hxx"],
+      "line_comment": "//",
+      "block_comment": ["/*", "*/"],
+      "grammar": { "built_in": "c" },
+      "servers": [
+        { "command": "clangd", "roots": ["compile_commands.json", "compile_flags.txt", ".git"] }
+      ]
+    },
+
+    "bash": {
+      "extensions": ["sh", "bash", "zsh", "ksh", "bashrc", "zshrc", "profile"],
+      "filenames": [".bashrc", ".bash_profile", ".zshrc", ".profile", ".envrc"],
+      "shebangs": ["sh", "bash", "zsh", "dash"],
+      "line_comment": "#",
+      "grammar": { "built_in": "bash" },
+      "servers": [{ "command": "bash-language-server", "args": ["start"] }]
+    },
+
+    "json": {
+      "extensions": ["json", "jsonc", "json5"],
+      "line_comment": "//",
+      "grammar": { "built_in": "json" },
+      "servers": [
+        { "command": "vscode-json-language-server", "args": ["--stdio"] }
+      ]
+    },
+
+    "toml": {
+      "extensions": ["toml"],
+      "filenames": ["Cargo.lock"],
+      "line_comment": "#",
+      "grammar": { "built_in": "toml" },
+      "servers": [{ "command": "taplo", "args": ["lsp", "stdio"] }]
+    },
+
+    "yaml": {
+      "extensions": ["yaml", "yml"],
+      "line_comment": "#",
+      "grammar": { "built_in": "yaml" },
+      "servers": [{ "command": "yaml-language-server", "args": ["--stdio"] }]
+    },
+
+    "markdown": {
+      "extensions": ["md", "markdown", "mdx"],
+      "block_comment": ["<!--", "-->"],
+      "grammar": { "built_in": "markdown" },
+      "servers": [{ "command": "marksman", "args": ["server"] }]
+    },
+
+    "html": {
+      "extensions": ["html", "htm", "xhtml"],
+      "block_comment": ["<!--", "-->"],
+      "grammar": { "built_in": "html" },
+      "servers": [
+        { "command": "vscode-html-language-server", "args": ["--stdio"] }
+      ]
+    },
+
+    "css": {
+      "extensions": ["css", "scss", "less"],
+      "block_comment": ["/*", "*/"],
+      "grammar": { "built_in": "css" },
+      "servers": [
+        { "command": "vscode-css-language-server", "args": ["--stdio"] }
+      ]
+    },
+
+    "dockerfile": {
+      "filenames": ["Dockerfile", "Containerfile"],
+      "extensions": ["dockerfile"],
+      "line_comment": "#",
+      "servers": [{ "command": "docker-langserver", "args": ["--stdio"] }]
+    },
+
+    "make": {
+      "filenames": ["Makefile", "makefile", "GNUmakefile"],
+      "extensions": ["mk", "mak"],
+      "line_comment": "#"
+    },
+
+    "git": {
+      "filenames": ["COMMIT_EDITMSG", "MERGE_MSG", ".gitignore", ".gitattributes"],
+      "line_comment": "#"
+    }
+  }
+}

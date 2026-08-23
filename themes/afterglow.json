@@ -1,0 +1,18 @@
+{
+  "name": "afterglow",
+  "about": "Afterglow, from YabataDesign's theme for Sublime Text.",
+
+  "accent": "#cc7832",
+  "dim": "#797979",
+  "text": "#d6d6d6",
+  "muted": "#cccccc",
+  "good": "#b4c973",
+  "warn": "#e5b567",
+  "bad": "#c45837",
+  "dir": "#6c99bb",
+  "link": "#a1617a",
+  "exec": "#b4c973",
+  "info": "#d0d0ff",
+  "bg": "#2e2e2e",
+  "on_accent": "#2e2e2e"
+}

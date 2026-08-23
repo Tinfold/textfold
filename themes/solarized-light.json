@@ -1,0 +1,18 @@
+{
+  "name": "solarized-light",
+  "about": "Solarized Light: the same eight accents, on the light half of the palette.",
+
+  "accent": "#2aa198",
+  "dim": "#93a1a1",
+  "text": "#586e75",
+  "muted": "#657b83",
+  "good": "#859900",
+  "warn": "#b58900",
+  "bad": "#dc322f",
+  "dir": "#268bd2",
+  "link": "#d33682",
+  "exec": "#859900",
+  "info": "#6c71c4",
+  "bg": "#fdf6e3",
+  "on_accent": "#002b36"
+}

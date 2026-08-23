@@ -1,0 +1,18 @@
+{
+  "name": "rosepine",
+  "about": "Rosé Pine, from rose-pine/palette — six hues and three greys, no more.",
+
+  "accent": "#ebbcba",
+  "dim": "#6e6a86",
+  "text": "#e0def4",
+  "muted": "#908caa",
+  "good": "#9ccfd8",
+  "warn": "#f6c177",
+  "bad": "#eb6f92",
+  "dir": "#9ccfd8",
+  "link": "#c4a7e7",
+  "exec": "#f6c177",
+  "info": "#c4a7e7",
+  "bg": "#191724",
+  "on_accent": "#191724"
+}

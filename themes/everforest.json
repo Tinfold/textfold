@@ -1,0 +1,18 @@
+{
+  "name": "everforest",
+  "about": "Everforest dark medium, from sainnhe/everforest.",
+
+  "accent": "#83c092",
+  "dim": "#7a8478",
+  "text": "#d3c6aa",
+  "muted": "#9da9a0",
+  "good": "#a7c080",
+  "warn": "#dbbc7f",
+  "bad": "#e67e80",
+  "dir": "#7fbbb3",
+  "link": "#d699b6",
+  "exec": "#a7c080",
+  "info": "#e69875",
+  "bg": "#2d353b",
+  "on_accent": "#2d353b"
+}

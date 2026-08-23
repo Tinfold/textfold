@@ -1,0 +1,44 @@
+{
+  "name": "ayu",
+  "about": "Ayu Dark, from dempfi/ayu. Spells its code colours out rather than taking the derived ones.",
+
+  "accent": "#ffb454",
+  "dim": "#5c6773",
+  "text": "#bfbdb6",
+  "muted": "#8a9199",
+  "good": "#aad94c",
+  "warn": "#ffb454",
+  "bad": "#f07178",
+  "dir": "#59c2ff",
+  "link": "#d2a6ff",
+  "exec": "#aad94c",
+  "info": "#39bae6",
+  "bg": "#0b0e14",
+  "on_accent": "#0b0e14",
+
+  "selection": "#1f2430",
+  "cursorline": "#131721",
+
+  "syntax": {
+    "keyword": "#ff8f40",
+    "function": "#ffb454",
+    "type": "#59c2ff",
+    "constructor": "#59c2ff",
+    "string": "#aad94c",
+    "escape": "#95e6cb",
+    "number": "#d2a6ff",
+    "boolean": "#d2a6ff",
+    "comment": "#565b66",
+    "constant": "#d2a6ff",
+    "variable": "#bfbdb6",
+    "parameter": "#bfbdb6",
+    "property": "#59c2ff",
+    "operator": "#f29668",
+    "punctuation": "#6c7380",
+    "attribute": "#e6b673",
+    "namespace": "#39bae6",
+    "tag": "#39bae6",
+    "label": "#d2a6ff",
+    "error": "#f07178"
+  }
+}

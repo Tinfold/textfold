@@ -1,0 +1,18 @@
+{
+  "name": "nord",
+  "about": "Nord, from nordtheme.com. Its own sixteen, except for dim: that is the lighter comment colour Nord's own editor themes use, since nord3 against nord0 is too close to read a hint in.",
+
+  "accent": "#88c0d0",
+  "dim": "#616e88",
+  "text": "#eceff4",
+  "muted": "#d8dee9",
+  "good": "#a3be8c",
+  "warn": "#ebcb8b",
+  "bad": "#bf616a",
+  "dir": "#81a1c1",
+  "link": "#b48ead",
+  "exec": "#a3be8c",
+  "info": "#8fbcbb",
+  "bg": "#2e3440",
+  "on_accent": "#2e3440"
+}
