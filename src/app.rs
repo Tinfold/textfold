@@ -28,11 +28,11 @@ use crate::config::{Config, LineNumbers};
 use crate::doc::{Diagnostic, DocId, Document, Indent, Severity};
 use crate::edit::{self, Motion};
 use crate::keys::{Key, Keys};
-use crate::lang;
+use crate::lang::{self, LangId};
 use crate::lsp::{Ask, Goto, Incoming, ServerId, Servers};
 use crate::picker::{Choice, Kind, Picker, Row};
 use crate::text::{self, Range, Selections};
-use crate::theme::{Theme, Themes};
+use crate::theme::{Role, Theme, Themes};
 use crate::view::{self, View};
 
 /// Everything that can happen.
@@ -88,6 +88,10 @@ pub struct Prompt {
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PromptKind {
     GotoLine,
+    /// A path, typed or pasted in full. The fuzzy list is the nicer way to
+    /// open a file by hand; this is the way to open one you already know the
+    /// name of, and the way another program can say which.
+    OpenPath,
     SaveAs,
     Rename,
     /// Search this file, moving as you type.
@@ -102,6 +106,7 @@ impl PromptKind {
     pub fn label(&self) -> &'static str {
         match self {
             PromptKind::GotoLine => "Go to line",
+            PromptKind::OpenPath => "Open",
             PromptKind::SaveAs => "Save as",
             PromptKind::Rename => "Rename to",
             PromptKind::Find => "Find",
@@ -233,7 +238,7 @@ fn subsequence(haystack: &str, needle: &str) -> bool {
 /// A box of text floating over the editor: what something is, or what
 /// arguments it takes.
 pub struct Popup {
-    pub lines: Vec<String>,
+    pub lines: Vec<DocLine>,
     /// Where in the document it is about, so it can be drawn beside it and
     /// closed when you move away.
     pub at: usize,
@@ -672,7 +677,13 @@ impl App {
             Event::Lsp(id, message) => self.on_lsp(id, message),
             Event::Files(files) => {
                 self.files_walking = false;
-                if let Overlay::Picker(picker) = &mut self.overlay
+                // A walk that found exactly what the last one did leaves the
+                // box alone. Rebuilding the rows would be the same rows, and
+                // it would put the list back to the top under somebody who is
+                // in the middle of using it.
+                let same = self.files.as_ref().is_some_and(|had| *had == files);
+                if !same
+                    && let Overlay::Picker(picker) = &mut self.overlay
                     && picker.kind == Kind::Files
                 {
                     let rows = file_rows(&files, &self.project);
@@ -700,6 +711,20 @@ impl App {
             return;
         }
         let key = Key::from_event(event);
+
+        // One key that means the same thing whatever is on top of the editor.
+        // It is not really for people — they have Ctrl-P — but for whatever is
+        // driving the terminal: a file manager in the pane next door, sshman
+        // sending a file over. None of them can see what is on the screen, so
+        // a key they would have to get out of a box first is a key that types
+        // a path into somebody's file.
+        //
+        // Only where it would not otherwise type a character: somebody who has
+        // bound this to a plain letter meant that letter in the text, not in
+        // the middle of a search box.
+        if key.as_typed().is_none() && self.keys.lookup(key) == Some(Cmd::OpenPath) {
+            return self.open_prompt(PromptKind::OpenPath);
+        }
 
         match &mut self.overlay {
             Overlay::Picker(_) => return self.picker_key(key),
@@ -1065,6 +1090,7 @@ impl App {
                 self.show(id);
             }
             Cmd::Open => self.open_files_picker(),
+            Cmd::OpenPath => self.open_prompt(PromptKind::OpenPath),
             Cmd::Save => self.save(None),
             Cmd::SaveAs => self.open_prompt(PromptKind::SaveAs),
             Cmd::SaveAll => self.save_all(),
@@ -1844,6 +1870,16 @@ impl App {
                     _ => self.say_bad("that is not a line number"),
                 }
             }
+            PromptKind::OpenPath => {
+                self.overlay = Overlay::None;
+                if input.is_empty() {
+                    return;
+                }
+                // Relative to the project, the way every path you would type
+                // is. `join` leaves an absolute path alone, so both work.
+                let path = self.project.join(expand_path(&input));
+                self.open_path(&path);
+            }
             PromptKind::SaveAs => {
                 self.overlay = Overlay::None;
                 if input.is_empty() {
@@ -1946,13 +1982,16 @@ impl App {
     // ---- The lists ----
 
     fn open_files_picker(&mut self) {
+        // What was found last time, so the box has something in it straight
+        // away, and a fresh walk every time regardless: a project is not a
+        // fixed thing. A build writes files, a checkout brings some and takes
+        // others, and a list from when textfold started is a list of the files
+        // that existed then rather than the ones that are there now.
         let rows = match &self.files {
             Some(files) => file_rows(files, &self.project),
-            None => {
-                self.start_walk();
-                Vec::new()
-            }
+            None => Vec::new(),
         };
+        self.start_walk();
         self.overlay = Overlay::Picker(Picker::new(Kind::Files, rows));
     }
 
@@ -3178,7 +3217,8 @@ impl App {
         if self.view().doc != doc {
             return;
         }
-        let lines = markup_lines(value.get("contents"));
+        let here = self.doc(doc).map(|d| d.language).unwrap_or(LangId::PLAIN);
+        let lines = markup_lines(value.get("contents"), here);
         if lines.is_empty() {
             return;
         }
@@ -3209,8 +3249,13 @@ impl App {
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_string();
-        let mut lines = vec![label];
-        lines.extend(markup_lines(signature.get("documentation")).into_iter().take(4));
+        let here = self.doc(doc).map(|d| d.language).unwrap_or(LangId::PLAIN);
+        let mut lines = vec![DocLine::prose(label)];
+        lines.extend(
+            markup_lines(signature.get("documentation"), here)
+                .into_iter()
+                .take(4),
+        );
         self.signature = Some(Popup {
             lines,
             at,
@@ -3544,64 +3589,230 @@ impl App {
 /// A line that is nothing but this is a horizontal rule, to be drawn as one.
 pub const RULE: &str = "\u{2500}";
 
+/// Coloured stretches of a line, as byte ranges into it, in order and not
+/// overlapping.
+pub type Spans = Vec<(std::ops::Range<usize>, Role)>;
+
+/// One line of a popup: the text, and where the colours go in it.
+///
+/// Prose has no spans and is drawn in one colour. A line lifted out of a
+/// fenced code block has the same spans the editor itself would give that
+/// code, so a docstring's example reads as code rather than as a paragraph
+/// that happens to contain brackets.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DocLine {
+    pub text: String,
+    /// Empty for anything that is not code, which is drawn in one colour.
+    pub spans: Spans,
+}
+
+impl DocLine {
+    fn prose(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            spans: Vec::new(),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.text.is_empty()
+    }
+}
+
 /// A `MarkupContent`, a `MarkedString`, or a list of either, as lines a
 /// terminal can show.
 ///
 /// Markdown is flattened rather than rendered: fences go, headings lose their
 /// hashes, and what is left is the sentences and the code, which is what
 /// anybody was reading it for.
-fn markup_lines(value: Option<&Value>) -> Vec<String> {
-    fn text_of(value: &Value, out: &mut Vec<String>) {
+///
+/// The code keeps its colours. A docstring is mostly an example, and an
+/// example in the same colours as the file it came from is the difference
+/// between reading it and deciphering it. `here` is the language of the file
+/// being looked at, used for a fence that does not say — servers write plain
+/// ```` ``` ```` around a signature constantly, and it is never another
+/// language.
+fn markup_lines(value: Option<&Value>, here: LangId) -> Vec<DocLine> {
+    /// One `MarkupContent` or `MarkedString` before its markdown is read.
+    struct Block {
+        text: String,
+        /// `Some` where the server said outright that the whole of this is
+        /// code, which is what the old `MarkedString` form does. The language
+        /// inside is the one it named, or `None` for one nothing here can
+        /// parse — it is still code either way, and must not be read as
+        /// markdown: `#include` is not a heading.
+        code: Option<Option<LangId>>,
+    }
+
+    fn text_of(value: &Value, out: &mut Vec<Block>) {
         match value {
-            Value::String(s) => out.push(s.clone()),
+            Value::String(s) => out.push(Block {
+                text: s.clone(),
+                code: None,
+            }),
             Value::Array(items) => items.iter().for_each(|item| text_of(item, out)),
             Value::Object(map) => {
                 if let Some(Value::String(s)) = map.get("value") {
-                    out.push(s.clone());
+                    out.push(Block {
+                        text: s.clone(),
+                        code: map
+                            .get("language")
+                            .and_then(Value::as_str)
+                            .map(lang::by_tag),
+                    });
                 }
             }
             _ => {}
         }
     }
+
     let Some(value) = value else {
         return Vec::new();
     };
     let mut blocks = Vec::new();
     text_of(value, &mut blocks);
 
-    let mut lines: Vec<String> = Vec::new();
+    let mut lines: Vec<DocLine> = Vec::new();
     for block in blocks {
-        for line in block.lines() {
-            let line = line.trim_end();
-            if line.trim_start().starts_with("```") {
-                // The fence itself says nothing a reader needs.
-                continue;
-            }
-            // A markdown rule is a rule, not three hyphens. Left as one
-            // character for the drawing to stretch, since only the drawing
-            // knows how wide the box turned out.
-            let bare = line.trim();
-            let line = if bare.len() >= 3
-                && bare.chars().all(|c| c == '-' || c == '_' || c == '*')
-            {
-                RULE
-            } else {
-                line.trim_start_matches('#').trim_start_matches(' ')
-            };
-            // Two blank lines in a row are one blank line.
-            if line.is_empty() && lines.last().is_some_and(|l: &String| l.is_empty()) {
-                continue;
-            }
-            lines.push(line.to_string());
+        match block.code {
+            Some(lang) => push_code(&mut lines, &block.text, lang),
+            None => push_markdown(&mut lines, &block.text, here),
         }
-        if !lines.last().is_some_and(String::is_empty) {
-            lines.push(String::new());
+        if !lines.last().is_some_and(DocLine::is_empty) {
+            lines.push(DocLine::prose(""));
         }
     }
-    while lines.last().is_some_and(String::is_empty) {
+    while lines.last().is_some_and(DocLine::is_empty) {
         lines.pop();
     }
     lines
+}
+
+/// Read one block of markdown, keeping the fenced code apart from the prose.
+fn push_markdown(lines: &mut Vec<DocLine>, text: &str, here: LangId) {
+    let mut code = String::new();
+    let mut fenced: Option<Option<LangId>> = None;
+
+    for line in text.lines() {
+        let bare = line.trim_start();
+        if bare.starts_with("```") || bare.starts_with("~~~") {
+            match fenced.take() {
+                // The end of a block: colour all of it at once, which is the
+                // only way to get it right. A line at a time cannot tell a
+                // string that runs over two lines from two strings.
+                Some(lang) => {
+                    push_code(lines, &code, lang);
+                    code.clear();
+                }
+                None => {
+                    // ```rust, ```rust,no_run, ```python title=x: the tag is
+                    // the first word, and the rest is for a renderer we are
+                    // not.
+                    let info = bare.trim_start_matches(['`', '~']);
+                    let tag = info
+                        .split([',', ' ', '\t', '{'])
+                        .next()
+                        .unwrap_or_default()
+                        .trim();
+                    let lang = match tag.is_empty() {
+                        true => (here != LangId::PLAIN).then_some(here),
+                        false => lang::by_tag(tag),
+                    };
+                    fenced = Some(lang);
+                }
+            }
+            // The fence itself says nothing a reader needs.
+            continue;
+        }
+        if fenced.is_some() {
+            code.push_str(line);
+            code.push('\n');
+            continue;
+        }
+
+        let line = line.trim_end();
+        // A markdown rule is a rule, not three hyphens. Left as one
+        // character for the drawing to stretch, since only the drawing
+        // knows how wide the box turned out.
+        let bare = line.trim();
+        let line = if bare.len() >= 3 && bare.chars().all(|c| c == '-' || c == '_' || c == '*') {
+            RULE
+        } else {
+            line.trim_start_matches('#').trim_start_matches(' ')
+        };
+        // Two blank lines in a row are one blank line.
+        if line.is_empty() && lines.last().is_some_and(DocLine::is_empty) {
+            continue;
+        }
+        lines.push(DocLine::prose(line));
+    }
+
+    // A fence nobody closed. Servers truncate documentation, so this happens.
+    if let Some(lang) = fenced
+        && !code.is_empty()
+    {
+        push_code(lines, &code, lang);
+    }
+}
+
+/// Add a fenced block, coloured if there is a grammar for it.
+///
+/// Code is kept as it was written: no headings to strip, no rules to find, and
+/// blank lines left alone, because in code they are the shape of the thing.
+fn push_code(lines: &mut Vec<DocLine>, code: &str, lang: Option<LangId>) {
+    let spans = lang.and_then(|lang| code_spans(code, lang));
+    for (at, line) in code.lines().enumerate() {
+        let text = line.trim_end().to_string();
+        // Trailing whitespace went, so anything coloured past the new end goes
+        // with it.
+        let mut spans: Vec<_> = spans
+            .as_ref()
+            .and_then(|rows| rows.get(at))
+            .cloned()
+            .unwrap_or_default();
+        spans.retain_mut(|(range, _)| {
+            range.end = range.end.min(text.len());
+            range.start < range.end
+        });
+        lines.push(DocLine { text, spans });
+    }
+}
+
+/// Colour a whole fenced block, as spans within each of its lines.
+///
+/// `None` where the language has no grammar or the parser would not take it,
+/// which is the ordinary case for most of the languages a docstring quotes and
+/// means the code is drawn in one colour.
+fn code_spans(code: &str, lang: LangId) -> Option<Vec<Spans>> {
+    let grammar = lang::get(lang).grammar()?;
+    let rope = ropey::Rope::from_str(code);
+    let syntax = crate::syntax::Syntax::new(grammar, &rope)?;
+    let spans = syntax.highlights(&rope, 0..rope.len_bytes());
+
+    let mut rows = Vec::new();
+    // Where this line starts in the block, and the first span that might still
+    // reach it — a span can cover several lines, so the pointer only moves
+    // past one once it has ended.
+    let mut at = 0;
+    let mut first = 0;
+    for line in code.lines() {
+        let end = at + line.len();
+        while first < spans.len() && spans[first].0.end <= at {
+            first += 1;
+        }
+        let mut row = Vec::new();
+        for (range, role) in spans[first..].iter().take_while(|(r, _)| r.start < end) {
+            let from = range.start.max(at) - at;
+            let to = range.end.min(end) - at;
+            if from < to {
+                row.push((from..to, *role));
+            }
+        }
+        rows.push(row);
+        // Past the newline that `lines` took off.
+        at = end + 1;
+    }
+    Some(rows)
 }
 
 /// `Location`, `Location[]`, or `LocationLink[]`, as places.
@@ -3699,9 +3910,10 @@ fn suggestion_from(item: &Value, doc: &Document, at: usize) -> Option<Suggestion
             .and_then(Value::as_str)
             .unwrap_or(&label)
             .to_string(),
-        about: markup_lines(item.get("documentation"))
-            .first()
-            .cloned()
+        about: markup_lines(item.get("documentation"), LangId::PLAIN)
+            .into_iter()
+            .next()
+            .map(|line| line.text)
             .filter(|s| !s.is_empty()),
         replace,
         insert,
@@ -4282,6 +4494,195 @@ mod tests {
                 app.type_char(c);
             }
         }
+    }
+
+    /// The keystroke another program sends to say "open this", as bytes on the
+    /// way in rather than as a call to `open_path`.
+    fn keyed(app: &mut App, key: &str) {
+        let key = Key::parse(key).expect("a key");
+        app.on_key(KeyEvent::new(key.code, key.mods));
+    }
+
+    #[test]
+    fn a_path_can_be_opened_by_typing_it_rather_than_finding_it() {
+        let (mut app, _rx) = editor();
+        let path = scratch("typed-path.txt");
+        std::fs::write(&path, "already here\n").expect("written");
+
+        keyed(&mut app, "alt-e");
+        typed_into_prompt(&mut app, &path.display().to_string());
+        app.accept_prompt();
+
+        assert_eq!(app.here().path.as_deref(), Some(path.as_path()));
+        assert_eq!(app.here().rope.to_string(), "already here\n");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn the_key_that_opens_a_path_works_with_something_else_already_open() {
+        // The program sending it cannot see the screen, so a list, a prompt or
+        // a question in the way has to give up the key rather than eat it.
+        let (mut app, _rx) = editor();
+        for opened in [Cmd::Open, Cmd::Find, Cmd::CommandPalette] {
+            app.run(opened);
+            keyed(&mut app, "alt-e");
+            assert!(
+                matches!(&app.overlay, Overlay::Prompt(p) if p.kind == PromptKind::OpenPath),
+                "{opened:?} swallowed it"
+            );
+            app.overlay = Overlay::None;
+        }
+    }
+
+    #[test]
+    fn a_key_bound_to_opening_a_path_still_types_where_typing_is_meant() {
+        // Bound to a plain letter, it is a letter first: a global key that
+        // stole `e` from every search box would be worse than no global key.
+        let mut config = Config::default();
+        config.keys.insert("open-path".into(), vec!["e".into()]);
+        let (tx, _rx) = mpsc::channel();
+        let mut app = App::new(config, tx);
+        app.screen = Rect::new(0, 0, 100, 30);
+        app.run(Cmd::Find);
+        keyed(&mut app, "e");
+        match &app.overlay {
+            Overlay::Prompt(prompt) => assert_eq!(prompt.input, "e"),
+            _ => panic!("the search box closed"),
+        }
+    }
+
+    fn typed_into_prompt(app: &mut App, text: &str) {
+        for c in text.chars() {
+            app.on_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+    }
+
+    #[test]
+    fn opening_the_file_list_goes_and_looks_again() {
+        // A file written since textfold started is a file you can open. The
+        // list from last time is shown at once, and a fresh walk is under way
+        // behind it.
+        let (mut app, rx) = editor();
+        let dir = scratch("walk").parent().unwrap().to_path_buf();
+        app.project = dir.clone();
+        // What a walk found before the file existed, which is the state
+        // textfold is in for the rest of an afternoon.
+        app.files = Some(vec![dir.join("old.txt")]);
+        std::fs::write(dir.join("new.txt"), "made just now\n").expect("written");
+
+        app.run(Cmd::Open);
+        assert!(matches!(&app.overlay, Overlay::Picker(p) if p.kind == Kind::Files));
+        let shown = match &app.overlay {
+            Overlay::Picker(picker) => picker.len(),
+            _ => 0,
+        };
+        assert_eq!(shown, 1, "the list from last time shows first");
+
+        // The walking thread reports what is there now, and the box follows.
+        let found = loop {
+            match rx.recv().expect("the walk answers") {
+                Event::Files(found) => break found,
+                _ => continue,
+            }
+        };
+        assert!(
+            found.iter().any(|p| p.ends_with("new.txt")),
+            "the fresh walk missed a file written after startup: {found:?}"
+        );
+        app.handle(Event::Files(found));
+        assert!(matches!(&app.overlay, Overlay::Picker(p)
+            if p.visible().any(|(row, _)| row.label == "new.txt")));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_docstring_is_coloured_the_way_the_code_in_it_would_be() {
+        lang::init();
+        let rust = lang::by_tag("rust").expect("shipped");
+        let hover = serde_json::json!({
+            "kind": "markdown",
+            "value": "Adds two numbers.\n\n```rust\nfn add(a: u32) -> u32\n```\n",
+        });
+        let lines = markup_lines(Some(&hover), rust);
+
+        let prose = lines.iter().find(|l| l.text == "Adds two numbers.");
+        assert!(prose.is_some_and(|l| l.spans.is_empty()), "{lines:?}");
+
+        let code = lines
+            .iter()
+            .find(|l| l.text == "fn add(a: u32) -> u32")
+            .expect("the example survived the fence");
+        let coloured = |want: &str| {
+            code.spans
+                .iter()
+                .find(|(range, _)| &code.text[range.clone()] == want)
+                .map(|(_, role)| *role)
+        };
+        assert_eq!(coloured("fn"), Some(Role::Keyword));
+        assert_eq!(coloured("add"), Some(Role::Function));
+        assert_eq!(coloured("u32"), Some(Role::Type));
+    }
+
+    #[test]
+    fn a_fence_that_says_nothing_is_the_language_you_are_looking_at() {
+        lang::init();
+        let rust = lang::by_tag("rust").expect("shipped");
+        let hover = serde_json::json!({ "value": "```\nlet x = 1;\n```" });
+        let lines = markup_lines(Some(&hover), rust);
+        let code = lines.iter().find(|l| l.text == "let x = 1;").expect("kept");
+        assert!(
+            code.spans.iter().any(|(_, role)| *role == Role::Keyword),
+            "{code:?}"
+        );
+
+        // And a fence naming a language nothing here can parse is left plain
+        // rather than coloured as whatever file you happened to be in.
+        let hover = serde_json::json!({ "value": "```brainfuck\nlet x = 1;\n```" });
+        let lines = markup_lines(Some(&hover), rust);
+        let code = lines.iter().find(|l| l.text == "let x = 1;").expect("kept");
+        assert!(code.spans.is_empty(), "{code:?}");
+    }
+
+    #[test]
+    fn a_block_the_server_calls_code_is_not_read_as_markdown() {
+        lang::init();
+        // The old `MarkedString` form, naming a language nothing here parses.
+        // It is still code: its hashes are not headings and its dashes are not
+        // a rule.
+        let hover = serde_json::json!({
+            "language": "cmake",
+            "value": "#include <stdio.h>\n---\n",
+        });
+        let lines = markup_lines(Some(&hover), LangId::PLAIN);
+        let texts: Vec<&str> = lines.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(texts, ["#include <stdio.h>", "---"]);
+    }
+
+    #[test]
+    fn colouring_a_block_does_not_colour_past_the_end_of_a_line() {
+        lang::init();
+        let python = lang::by_tag("py").expect("shipped");
+        // A string over two lines: one span in the tree, two lines on screen,
+        // and neither of them may reach outside itself.
+        let hover = serde_json::json!({
+            "value": "```python\nx = \"\"\"one\ntwo\"\"\"\n```",
+        });
+        let lines = markup_lines(Some(&hover), python);
+        for line in &lines {
+            for (range, _) in &line.spans {
+                assert!(
+                    range.end <= line.text.len() && range.start < range.end,
+                    "{line:?}"
+                );
+            }
+        }
+        assert!(
+            lines.iter().any(|l| l
+                .spans
+                .iter()
+                .any(|(_, role)| *role == Role::String)),
+            "{lines:?}"
+        );
     }
 
     #[test]

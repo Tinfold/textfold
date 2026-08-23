@@ -89,6 +89,7 @@ something already reachable, so a plain `xterm` over `ssh` loses nothing.
 | Ctrl-S | save |
 | Alt-S | save as |
 | Ctrl-P / Ctrl-O | open a file |
+| Alt-E / F4 | open a file by typing its path |
 | Ctrl-N | new buffer |
 | Ctrl-W | close this buffer |
 | Ctrl-B | pick from the open buffers |
@@ -268,6 +269,23 @@ Esc puts back the one you had.
 Typing a name that matches nothing in the file picker and pressing Enter makes
 that file.
 
+The list is walked afresh every time you open it. A file written since textfold
+started — by a build, by a checkout, by whoever you are working with — is a
+file you can open, and what was found last time is shown straight away so the
+box is never empty while it looks.
+
+### Opening a path you already know
+
+**Alt-E** (or **F4**) is the other door: a box for one path, taken exactly as
+typed rather than fuzzily. `~` and a path relative to the project both work.
+
+It is the one key that opens over anything else on the screen — a list, a
+search box, a question. That is for the benefit of programs driving the
+terminal rather than people: sshman sends
+a file to the editor pane by typing keys at it, and it cannot see what is on
+the screen when it does. sshman knows these keys, so a file picked over there
+opens in the textfold running here.
+
 ---
 
 ## Several cursors
@@ -308,6 +326,13 @@ margin, and the one under the cursor spelled out in the status bar), hover,
 go to definition / type definition / implementation, find all uses, document
 and workspace symbols, rename across files, code actions, signature help, and
 formatting.
+
+Documentation from a server is markdown, and what a docstring is mostly made of
+is an example. The fences come off, and the code inside them is coloured by the
+same parser that colours the file — a fence saying `rust`, `py` or `sh` is
+taken at its word, and one saying nothing is read as the language you are
+looking at. A language with no grammar here is left in one colour rather than
+guessed at.
 
 A rename or a quick fix that touches nine files opens all nine as tabs and
 leaves them modified rather than writing them behind your back. Actions that

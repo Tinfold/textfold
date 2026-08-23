@@ -80,6 +80,7 @@ commands! {
     // ---- Files and buffers ----
     New => "new", File, "Start an empty buffer";
     Open => "open", File, "Open a file by name, fuzzily";
+    OpenPath => "open-path", File, "Open a file by typing its path, exactly";
     Save => "save", File, "Write this file to disk";
     SaveAs => "save-as", File, "Write this file somewhere else";
     SaveAll => "save-all", File, "Write every changed file";

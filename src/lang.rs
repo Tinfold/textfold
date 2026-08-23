@@ -238,6 +238,32 @@ pub fn detect(path: &Path, rope: &Rope) -> LangId {
     LangId::PLAIN
 }
 
+/// The language a markdown fence means: ```` ```rust ````, ```` ```py ````,
+/// ```` ```sh ````.
+///
+/// Whoever wrote the fence was writing for a reader, not for us, so the tag is
+/// matched against everything a language answers to — its name, what a
+/// language server calls it, and its extensions. `None` where nothing matches,
+/// which is not a problem: an unrecognised fence is code drawn in one colour,
+/// the way it was before anything was coloured at all.
+pub fn by_tag(tag: &str) -> Option<LangId> {
+    let wanted = tag.trim().to_lowercase();
+    if wanted.is_empty() {
+        return None;
+    }
+    let langs = all();
+    langs
+        .langs
+        .iter()
+        .find(|l| {
+            l.name.to_lowercase() == wanted
+                || l.lsp_id.to_lowercase() == wanted
+                || l.extensions.iter().any(|e| e.to_lowercase() == wanted)
+        })
+        .map(|l| l.id)
+        .filter(|id| *id != LangId::PLAIN)
+}
+
 /// A language by name. Nothing in the editor asks by name — a picker holds
 /// the id it is offering — but the tests do, constantly, and a lookup that
 /// only the tests use is still a lookup worth having in one place.

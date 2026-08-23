@@ -1000,7 +1000,7 @@ fn draw_hover(frame: &mut Frame, app: &mut App, at: Position, ground: Color) {
     let widest = hover
         .lines
         .iter()
-        .map(|line| text::str_width(line))
+        .map(|line| text::str_width(&line.text))
         .max()
         .unwrap_or(20);
     // Wide enough to read, no wider than the screen, and no wider than a
@@ -1026,26 +1026,59 @@ fn draw_hover(frame: &mut Frame, app: &mut App, at: Position, ground: Color) {
         .take(inside.height as usize)
         .enumerate()
     {
-        let (shown, style) = if line == crate::app::RULE {
-            (
+        let y = inside.y + row as u16;
+        if line.text == crate::app::RULE {
+            buf.set_stringn(
+                inside.x,
+                y,
                 crate::app::RULE.repeat(inside.width as usize),
+                inside.width as usize,
                 box_style(&theme, ground).fg(theme.faint()),
-            )
-        } else {
-            (
-                text::truncate(line, inside.width as usize),
+            );
+            continue;
+        }
+        if line.spans.is_empty() {
+            buf.set_stringn(
+                inside.x,
+                y,
+                text::truncate(&line.text, inside.width as usize),
+                inside.width as usize,
                 box_style(&theme, ground).fg(theme.text),
-            )
-        };
-        buf.set_stringn(
-            inside.x,
-            inside.y + row as u16,
-            &shown,
-            inside.width as usize,
-            style,
-        );
+            );
+            continue;
+        }
+        // Code out of a fence, in the colours it would have in the editor.
+        // Written a piece at a time because each piece has its own colour, and
+        // the pieces between the coloured ones are ordinary text.
+        let mut x = inside.x;
+        let mut left = inside.width as usize;
+        let mut at = 0;
+        for (range, role) in line.spans.iter().chain(std::iter::once(&TAIL)) {
+            let plain = line.text.get(at..range.start.min(line.text.len()));
+            let coloured = line.text.get(range.clone());
+            for (piece, colour) in [(plain, theme.text), (coloured, theme.role(*role))] {
+                let Some(piece) = piece.filter(|p| !p.is_empty()) else {
+                    continue;
+                };
+                if left == 0 {
+                    break;
+                }
+                let shown = text::truncate(piece, left);
+                buf.set_stringn(x, y, &shown, left, box_style(&theme, ground).fg(colour));
+                let used = text::str_width(&shown).min(left);
+                x += used as u16;
+                left -= used;
+            }
+            at = range.end;
+        }
     }
 }
+
+/// Stands in for the span after the last one, so that the text past the end of
+/// the colouring is written by the same loop rather than after it. Its range
+/// is empty, so it draws nothing of its own.
+static TAIL: (std::ops::Range<usize>, crate::theme::Role) =
+    (usize::MAX..usize::MAX, crate::theme::Role::Variable);
 
 fn draw_signature(frame: &mut Frame, app: &mut App, at: Position, ground: Color) {
     let Some(signature) = &app.signature else {
@@ -1056,7 +1089,7 @@ fn draw_signature(frame: &mut Frame, app: &mut App, at: Position, ground: Color)
     let Some(label) = signature.lines.first() else {
         return;
     };
-    let shown = format!(" {} ", text::truncate(label, screen.width as usize - 4));
+    let shown = format!(" {} ", text::truncate(&label.text, screen.width as usize - 4));
     let width = text::str_width(&shown) as u16;
     // Always above: the thing being typed is below, and covering it would
     // defeat the purpose.

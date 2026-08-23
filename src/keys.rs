@@ -200,6 +200,10 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::Close, &["ctrl-w"]),
     (Cmd::New, &["ctrl-n"]),
     (Cmd::Open, &["ctrl-p", "ctrl-o"]),
+    // Two keys because this one is also typed by other programs rather than
+    // by people: `alt-e` is short, and F4 is one self-contained escape
+    // sequence, which is the safer thing to write down a pipe.
+    (Cmd::OpenPath, &["alt-e", "f4"]),
     (Cmd::Buffers, &["ctrl-b"]),
     (Cmd::NextBuffer, &["alt-."]),
     (Cmd::PrevBuffer, &["alt-,"]),
