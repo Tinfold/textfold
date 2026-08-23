@@ -465,6 +465,56 @@ public class Widget : IThing {
     }
 
     #[test]
+    fn java_is_coloured_the_way_a_person_would_expect() {
+        // Same catch-all `(identifier) @variable` at the top of the grammar's
+        // own query as C# has, with the same effect on everything under it.
+        // queries/java.scm is what is put in front of it, and this is the test
+        // that says it worked.
+        let found = roles_in(
+            "java",
+            r#"package com.example.widgets;
+import java.util.List;
+
+@Deprecated
+public class Widget extends Base {
+    public static final int MAX_SIZE = 8;
+    private String name;
+
+    public Widget(String name) { this.name = name; }
+
+    void run(Widget other, int count) {
+        var s = "hi";
+        other.stop();
+        outer: for (String t : tags) { break outer; }
+    }
+
+    enum Colour { RED }
+}"#,
+        );
+        let by_text = |want: &str| {
+            found
+                .iter()
+                .find(|(text, _)| text == want)
+                .map(|(_, role)| *role)
+        };
+        assert_eq!(by_text("class"), Some(Role::Keyword), "{found:?}");
+        assert_eq!(by_text("example"), Some(Role::Namespace), "{found:?}");
+        // The tail of an import is the class it names, not more of the path.
+        assert_eq!(by_text("List"), Some(Role::Type), "{found:?}");
+        assert_eq!(by_text("Widget"), Some(Role::Type), "{found:?}");
+        assert_eq!(by_text("Base"), Some(Role::Type), "{found:?}");
+        assert_eq!(by_text("Deprecated"), Some(Role::Attribute), "{found:?}");
+        assert_eq!(by_text("MAX_SIZE"), Some(Role::Constant), "{found:?}");
+        assert_eq!(by_text("RED"), Some(Role::Constant), "{found:?}");
+        assert_eq!(by_text("run"), Some(Role::Function), "{found:?}");
+        assert_eq!(by_text("stop"), Some(Role::Function), "{found:?}");
+        assert_eq!(by_text("name"), Some(Role::Property), "{found:?}");
+        assert_eq!(by_text("other"), Some(Role::Parameter), "{found:?}");
+        assert_eq!(by_text("outer"), Some(Role::Label), "{found:?}");
+        assert_eq!(by_text("\"hi\""), Some(Role::String), "{found:?}");
+    }
+
+    #[test]
     fn a_specific_pattern_beats_the_catch_all_below_it() {
         // The rust query ends with a generic identifier rule; a name in
         // capitals has to come out a constant regardless.

@@ -156,6 +156,33 @@
       ]
     },
 
+    "java": {
+      "extensions": ["java"],
+      "line_comment": "//",
+      "block_comment": ["/*", "*/"],
+      "grammar": { "built_in": "java" },
+      "servers": [
+        {
+          "command": "jdtls",
+          "roots": ["pom.xml", "build.gradle", "build.gradle.kts", "settings.gradle", "settings.gradle.kts", ".git"],
+          "settings": {
+            "java": {
+              "configuration": { "updateBuildConfiguration": "automatic" },
+              "completion": {
+                "importOrder": ["java", "javax", "com", "org"],
+                "guessMethodArguments": true
+              },
+              "signatureHelp": { "enabled": true },
+              "implementationsCodeLens": { "enabled": false },
+              "referencesCodeLens": { "enabled": false },
+              "inlayHints": { "parameterNames": { "enabled": "literals" } },
+              "format": { "enabled": true }
+            }
+          }
+        }
+      ]
+    },
+
     "bash": {
       "extensions": ["sh", "bash", "zsh", "ksh", "bashrc", "zshrc", "profile"],
       "filenames": [".bashrc", ".bash_profile", ".zshrc", ".profile", ".envrc"],

@@ -33,6 +33,7 @@ libloading = "0.9.0"
 tree-sitter-typescript = "0.23.2"
 base64 = "0.23.1"
 tree-sitter-c-sharp = "0.23.5"
+tree-sitter-java = "0.23.5"
 
 # Dependencies are built with optimisation even in a debug build. Half of
 # textfold's work happens inside tree-sitter's C, and at -O0 that is slow

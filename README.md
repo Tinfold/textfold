@@ -358,6 +358,7 @@ because a code action said so is an editor nobody trusts twice.
 | Go | `gopls` |
 | C / C++ | `clangd` |
 | C# | `OmniSharp -lsp` |
+| Java | `jdtls` |
 | Bash | `bash-language-server` |
 | JSON | `vscode-json-language-server` |
 | TOML | `taplo` |
@@ -371,7 +372,10 @@ Install the ones you want the way you normally would — for Rust that is
 checking: its own releases and most distributions call the binary `OmniSharp`,
 which is what textfold runs, but some package managers install it lowercase.
 `{ "languages": { "csharp": { "servers": [{ "command": "omnisharp", "args":
-["-lsp"] }] } } }` in your own `languages.json` is the whole fix. A server that is not installed is
+["-lsp"] }] } } }` in your own `languages.json` is the whole fix. jdtls wants a
+JDK 21 or newer on `JAVA_HOME` even to edit an older project, and writes its
+index into a workspace directory it picks itself; the first file you open in a
+large project is slow once and quick afterwards. A server that is not installed is
 mentioned once and then left alone; the editor works exactly as well without
 it, minus the intelligence.
 
@@ -386,11 +390,13 @@ keystroke re-reads the few nodes that changed. Colours are worked out for the
 part of the file on screen and no further.
 
 Grammars built in: Rust, Python, JavaScript, TypeScript, TSX, Go, C (which C++
-borrows), C#, Bash, JSON, TOML, YAML, Markdown, HTML, CSS. Two of the shipped
-highlight queries are wrong upstream and textfold reads its own correction on
-top of them: Rust's has a typo that stops every SCREAMING_CASE constant from
-being coloured as one, and C#'s opens with a catch-all that colours every class
-name, method name and type as a plain variable.
+borrows), C#, Java, Bash, JSON, TOML, YAML, Markdown, HTML, CSS. Three of the
+shipped highlight queries are wrong upstream and textfold reads its own
+correction on top of them: Rust's has a typo that stops every SCREAMING_CASE
+constant from being coloured as one, and C#'s and Java's each open with a
+catch-all that takes every identifier in the file before their own rules get a
+look in — which in Java's case leaves the types coloured, because those are a
+node of their own, and everything else a plain variable.
 
 A file that would take longer than a moment to parse — a minified bundle, a
 megabyte of something the grammar cannot make sense of — is opened without

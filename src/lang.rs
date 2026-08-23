@@ -534,6 +534,12 @@ fn built_in_grammar(name: &str) -> Option<GrammarSource> {
         "css" => tree_sitter_css::LANGUAGE, [tree_sitter_css::HIGHLIGHTS_QUERY],
         "go" => tree_sitter_go::LANGUAGE, [tree_sitter_go::HIGHLIGHTS_QUERY],
         "html" => tree_sitter_html::LANGUAGE, [tree_sitter_html::HIGHLIGHTS_QUERY],
+        // Same as C#: the grammar's file opens with a catch-all that takes
+        // every identifier before its own rules get a look in.
+        "java" => tree_sitter_java::LANGUAGE, [
+            include_str!("queries/java.scm"),
+            tree_sitter_java::HIGHLIGHTS_QUERY,
+        ],
         "javascript" => tree_sitter_javascript::LANGUAGE, [
             tree_sitter_javascript::HIGHLIGHT_QUERY,
             tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
