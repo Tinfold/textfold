@@ -247,8 +247,14 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::SelectAll, &["ctrl-a"]),
     (Cmd::SelectLine, &["ctrl-l"]),
     (Cmd::ExpandSelection, &["alt-="]),
-    (Cmd::AddCursorAbove, &["ctrl-alt-up"]),
-    (Cmd::AddCursorBelow, &["ctrl-alt-down"]),
+    // Alt-Shift first, and Ctrl-Alt-arrow second, because a desktop is allowed
+    // to take a key before the terminal ever sees it and GNOME takes exactly
+    // this one: Ctrl-Alt-Up and Ctrl-Alt-Down switch workspace, so on a stock
+    // Fedora or Ubuntu they never arrive. They stay bound for the desktops
+    // that leave them alone; the letters are what the help screen shows,
+    // because a key in the help that does nothing is worse than no help.
+    (Cmd::AddCursorAbove, &["alt-shift-k", "ctrl-alt-up"]),
+    (Cmd::AddCursorBelow, &["alt-shift-j", "ctrl-alt-down"]),
     (Cmd::AddCursorNextMatch, &["ctrl-d"]),
     (Cmd::SelectAllMatches, &["ctrl-shift-l"]),
     (Cmd::CursorsToLineEnds, &["alt-shift-i"]),
@@ -418,6 +424,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn nothing_is_reachable_only_by_a_key_the_desktop_takes() {
+        // A compositor gets a keystroke before the terminal running under it
+        // does, and both GNOME and KDE bind Ctrl-Alt with an arrow to
+        // switching workspace. Shipping one of those is fine — plenty of
+        // people have turned it off. Shipping one as the *only* way to reach a
+        // command means shipping a command that, on a stock desktop, does
+        // nothing at all and gives no sign of why.
+        let taken = |key: &Key| {
+            key.mods.contains(KeyModifiers::CONTROL)
+                && key.mods.contains(KeyModifiers::ALT)
+                && matches!(
+                    key.code,
+                    KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
+                )
+        };
+        let keys = Keys::default();
+        for cmd in crate::cmd::ALL {
+            let bound = keys.keys_for(*cmd);
+            assert!(
+                bound.is_empty() || !bound.iter().all(taken),
+                "{} can only be reached by a key the desktop takes first",
+                cmd.name()
+            );
+        }
+    }
+
+    #[test]
+    fn the_key_shown_for_a_command_is_one_that_arrives() {
+        // The help screen and the palette show the first binding, so the first
+        // binding has to be the one that works.
+        let keys = Keys::default();
+        assert_eq!(keys.shortcut(Cmd::AddCursorAbove).as_deref(), Some("Alt-Shift-k"));
+        assert_eq!(keys.shortcut(Cmd::AddCursorBelow).as_deref(), Some("Alt-Shift-j"));
+        // Still bound, for a desktop that leaves them alone.
+        let press = |code, mods| keys.lookup(Key::from_event(KeyEvent::new(code, mods)));
+        let ctrl_alt = KeyModifiers::CONTROL | KeyModifiers::ALT;
+        assert_eq!(press(KeyCode::Up, ctrl_alt), Some(Cmd::AddCursorAbove));
+        assert_eq!(press(KeyCode::Down, ctrl_alt), Some(Cmd::AddCursorBelow));
     }
 
     #[test]

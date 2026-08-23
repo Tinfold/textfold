@@ -80,7 +80,9 @@ language, the position, the colours. Every one of those is also a button.
 
 Nothing in the default scheme needs a terminal that can tell Ctrl-Shift-P from
 Ctrl-P. Where a binding like that is offered it is a second way to reach
-something already reachable, so a plain `xterm` over `ssh` loses nothing.
+something already reachable, so a plain `xterm` over `ssh` loses nothing. The
+same goes for the keys a desktop is known to take for itself: they are offered,
+never the only way in.
 
 ### Files
 
@@ -122,7 +124,8 @@ Shift with any movement extends the selection, as everywhere else.
 | Alt-= | grow the selection to the syntax around it |
 | Ctrl-D | add a cursor at the next copy of this word |
 | Ctrl-Shift-L | a cursor at every copy of this word |
-| Ctrl-Alt-↑ / ↓ | add a cursor on the line above / below |
+| Alt-Shift-K / J | add a cursor on the line above / below |
+| Ctrl-Alt-↑ / ↓ | the same, where your desktop has not taken them |
 | Alt-Shift-I | a cursor at the end of every selected line |
 | Esc | back to one cursor |
 
@@ -297,8 +300,14 @@ typing a character that could behave differently.
 
 The usual way in is **Ctrl-D**: it selects the word under the cursor, and each
 press after that adds a cursor at the next copy of it. **Ctrl-Shift-L** takes
-all of them at once. **Ctrl-Alt-↑/↓** adds a cursor straight up or down, and
+all of them at once. **Alt-Shift-K/J** adds a cursor straight up or down, and
 **Alt-click** puts one wherever you like.
+
+Ctrl-Alt-↑/↓ does the same, where it reaches textfold at all. GNOME and KDE
+both bind it to switching workspace, and a desktop gets a keystroke before the
+terminal under it does — which is why the letters are the ones written down
+here. `gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-up
+"[]"` (and `-down`) takes it back if you would rather have the arrows.
 
 **Alt-Shift-I** turns "these twenty lines are selected" into "there is a cursor
 at the end of all twenty", which is how you add a comma to twenty lines.
