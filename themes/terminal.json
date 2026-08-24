@@ -1,24 +1,62 @@
 {
   "name": "terminal",
-  "about": "The terminal's own sixteen, so textfold matches whatever the rest of your terminal is set to.",
+  "about": "The terminal's own sixteen, so textfold matches whatever the rest of your terminal is set to. The one theme that names no background: yours shows through.",
 
-  "accent": "cyan",
-  "dim": "darkgray",
-  "text": "white",
-  "muted": "gray",
-  "good": "green",
-  "warn": "yellow",
-  "bad": "red",
-  "dir": "blue",
-  "link": "magenta",
-  "exec": "green",
-  "info": "blue",
-  "bg": "default",
-  "ansi": [
-    "black", "red", "green", "yellow",
-    "blue", "magenta", "cyan", "gray",
-    "darkgray", "lightred", "lightgreen", "lightyellow",
-    "lightblue", "lightmagenta", "lightcyan", "white"
-  ],
-  "on_accent": "black"
+  "ui": {
+    "background": "default",
+    "foreground": "white",
+    "muted":      "gray",
+    "faint":      "darkgray",
+    "accent":     "cyan",
+    "on_accent":  "black",
+    "success":    "green",
+    "warning":    "yellow",
+    "error":      "red",
+    "info":       "blue"
+  },
+
+  "editor": {
+    "selection":      "darkgray",
+    "current_line":   "default",
+    "gutter":         "darkgray",
+    "gutter_current": "white",
+    "cursor":         "cyan",
+    "bracket_match":  "cyan",
+    "whitespace":     "darkgray",
+    "ruler":          "darkgray"
+  },
+
+  "syntax": {
+    "keyword":          "magenta",
+    "keyword_control":  "lightmagenta",
+    "function":         "cyan",
+    "function_builtin": "lightcyan",
+    "method":           "cyan",
+    "macro":            "lightmagenta",
+    "type":             "blue",
+    "type_builtin":     "lightblue",
+    "constructor":      "lightblue",
+    "string":           "green",
+    "string_escape":    "lightgreen",
+    "string_special":   "lightgreen",
+    "character":        "green",
+    "number":           "yellow",
+    "boolean":          "lightyellow",
+    "comment":          "darkgray",
+    "comment_doc":      "gray",
+    "constant":         "lightyellow",
+    "variable":         "white",
+    "variable_builtin": "lightred",
+    "parameter":        "gray",
+    "property":         "blue",
+    "operator":         "gray",
+    "punctuation":      "gray",
+    "bracket":          "gray",
+    "delimiter":        "gray",
+    "attribute":        "yellow",
+    "namespace":        "blue",
+    "tag":              "red",
+    "label":            "magenta",
+    "error":            "red"
+  }
 }

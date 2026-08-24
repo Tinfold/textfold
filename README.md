@@ -124,10 +124,11 @@ Shift with any movement extends the selection, as everywhere else.
 | Alt-= | grow the selection to the syntax around it |
 | Ctrl-D | add a cursor at the next copy of this word |
 | Ctrl-Shift-L | a cursor at every copy of this word |
-| Alt-Shift-K / J | add a cursor on the line above / below |
+| Ctrl-Shift-↑ / ↓ | add a cursor on the line above / below |
 | Ctrl-Alt-↑ / ↓ | the same, where your desktop has not taken them |
 | Alt-Shift-I | a cursor at the end of every selected line |
-| Esc | back to one cursor |
+| Alt-Shift-C | back to one cursor |
+| Esc | back to one cursor, and close whatever is open |
 
 ### Editing
 
@@ -230,6 +231,8 @@ them wrong.
 | wheel | scroll the pane the pointer is over |
 | hover | what the language server knows about the word under the pointer |
 | click a tab | switch to it — the × closes it |
+| wheel over the tabs | walk along them, when there are more open than fit |
+| click a ‹ or › | the next tab that way |
 | drag the scroll bar | move through the file |
 | click the status bar | the language, the position, the problems and the colours are buttons |
 
@@ -300,14 +303,16 @@ typing a character that could behave differently.
 
 The usual way in is **Ctrl-D**: it selects the word under the cursor, and each
 press after that adds a cursor at the next copy of it. **Ctrl-Shift-L** takes
-all of them at once. **Alt-Shift-K/J** adds a cursor straight up or down, and
+all of them at once. **Ctrl-Shift-↑/↓** adds a cursor straight up or down, and
 **Alt-click** puts one wherever you like.
 
-Ctrl-Alt-↑/↓ does the same, where it reaches textfold at all. GNOME and KDE
-both bind it to switching workspace, and a desktop gets a keystroke before the
-terminal under it does — which is why the letters are the ones written down
-here. `gsettings set org.gnome.desktop.wm.keybindings switch-to-workspace-up
-"[]"` (and `-down`) takes it back if you would rather have the arrows.
+Ctrl-Alt-↑/↓ does the same, and it is what every other editor uses, but GNOME
+and KDE both bind it to switching workspace and a desktop gets a keystroke
+before the terminal under it does. It stays bound for the desktops that leave
+it alone; Ctrl-Shift-↑/↓ is the one written down here because it is the one
+that arrives. (`gsettings set org.gnome.desktop.wm.keybindings
+switch-to-workspace-up "[]"`, and `-down`, takes the other back if you would
+rather have it.)
 
 **Alt-Shift-I** turns "these twenty lines are selected" into "there is a cursor
 at the end of all twenty", which is how you add a comma to twenty lines.
@@ -459,43 +464,65 @@ writes it back for you.
 
 ## Colours
 
-A theme is a small JSON file naming twelve roles. The eighteen textfold ships
-are built into the binary; any file dropped in `~/.config/textfold/themes/` is
-loaded beside them, and one taking a name textfold already uses replaces it —
-which is how you rewrite one of ours without forking anything.
+A theme is a small JSON file in three parts, and the parts are the three things
+textfold puts on a screen. The eighteen it ships are built into the binary; any
+file dropped in `~/.config/textfold/themes/` is loaded beside them, and one
+taking a name textfold already uses replaces it — which is how you rewrite one
+of ours without forking anything.
+
+`ui` is the chrome: the tab row, the status bar, the borders of a picker, the
+words in a dialog. Ten roles, about *tone* rather than about colour.
 
 ```json
 {
   "name": "mine",
   "about": "Where these colours came from.",
 
-  "accent": "#7aa2f7",
-  "dim":    "#565f89",
-  "text":   "#c0caf5",
-  "muted":  "#a9b1d6",
-  "good":   "#9ece6a",
-  "warn":   "#e0af68",
-  "bad":    "#f7768e",
-  "dir":    "#7dcfff",
-  "link":   "#bb9af7",
-  "exec":   "#9ece6a",
-  "info":   "#2ac3de",
-  "bg":     "#1a1b26",
-  "on_accent": "#1a1b26"
+  "ui": {
+    "background": "#1a1b26",
+    "foreground": "#c0caf5",
+    "muted":      "#a9b1d6",
+    "faint":      "#565f89",
+    "accent":     "#7aa2f7",
+    "on_accent":  "#1a1b26",
+    "success":    "#9ece6a",
+    "warning":    "#e0af68",
+    "error":      "#f7768e",
+    "info":       "#2ac3de"
+  }
 }
 ```
 
-That is a whole theme. Nothing about code is mentioned, and code is coloured
-anyway: every kind of code has a meaning one of the twelve already carries.
-Strings are the colour of things that worked. Comments are the colour of things
-deliberately in the background. Keywords are the colour reserved for the
-notable. Types are the colour of information. It is not a fudge, and it works
-across every theme here.
+That is a whole theme. Nothing about code is mentioned and code is coloured
+anyway: every kind of code has a tone that already means it. Strings are the
+colour of things that worked. Comments are the colour of things deliberately in
+the background. Numbers and types are the colour of something worth noticing.
 
-**These are the same twelve roles, under the same names, that sshman uses — so a
-theme file written for one drops into the other unchanged.**
+`editor` is the pane the text is in. Eight roles, all worked out from `ui` if
+you leave them out:
 
-If you want to be precise about code, say only the parts you disagree with:
+`selection`, `current_line`, `gutter`, `gutter_current`, `cursor` (the block an
+extra cursor is drawn as), `bracket_match`, `whitespace` (the dots and arrows,
+when they are being shown) and `ruler`.
+
+`syntax` is the code, and there are thirty-one of them:
+
+`keyword`, `keyword_control`, `function`, `function_builtin`, `method`,
+`macro`, `type`, `type_builtin`, `constructor`, `string`, `string_escape`,
+`string_special`, `character`, `number`, `boolean`, `comment`, `comment_doc`,
+`constant`, `variable`, `variable_builtin`, `parameter`, `property`,
+`operator`, `punctuation`, `bracket`, `delimiter`, `attribute`, `namespace`,
+`tag`, `label`, `error`.
+
+They are tree-sitter's own capture names, so a grammar that is more specific
+than textfold is falls back along the dots: `@function.method.builtin` lands on
+`method` without anyone saying so. **Every theme textfold ships names all
+thirty-one**, because code is what you look at all day and the ten tones,
+stretched over thirty-one jobs, are only ever "close enough".
+
+A theme of your own can say as little as it likes. Anything left out comes from
+the theme named in `base`, so being precise about one thing does not mean
+restating the rest:
 
 ```json
 {
@@ -508,17 +535,16 @@ If you want to be precise about code, say only the parts you disagree with:
 }
 ```
 
-The code roles are `keyword`, `function`, `type`, `constructor`, `string`,
-`escape`, `number`, `boolean`, `comment`, `constant`, `variable`, `parameter`,
-`property`, `operator`, `punctuation`, `attribute`, `namespace`, `tag`,
-`label`, `error`. There are four more for the pane itself — `selection`,
-`cursorline`, `gutter`, `gutter_active` — all of which are worked out from the
-twelve if you leave them out.
-
 Colours are written as `#7aa2f7`, `#f0c`, a number for a slot in the
 256-colour cube, or a name (`cyan`, `bright-red`, `default` for the terminal's
-own). A theme naming no `bg` leaves your terminal's background showing through,
+own). A theme naming no background leaves your terminal's own showing through,
 which is what `terminal` is.
+
+A theme file written for sshman, whose twelve roles are flat at the top level
+and named for a file manager's job, still reads: `text`,
+`bg`, `dim`, `good`, `warn` and `bad` land where they belong, and `dir`, `link`,
+`exec` and `ansi` are accepted and ignored, because textfold draws neither a
+file listing nor a terminal. The names above win where a file uses both.
 
 `textfold --list-themes` lists them. `Alt-T` tries them on.
 

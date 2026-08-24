@@ -337,6 +337,14 @@ pub struct App {
     /// frame, so a click is answered by what is actually on the screen rather
     /// than by working out where it ought to be.
     pub tab_hits: Vec<(Rect, DocId, bool)>,
+    /// How far along the row of tabs the visible part starts, in columns. More
+    /// files than fit across a terminal is the ordinary case once you have
+    /// been working for an hour, so the row scrolls.
+    pub tab_scroll: u16,
+    /// The ‹ › at the ends of the tab row, and where each one scrolls to.
+    /// Answered before [`App::tab_hits`], since an arrow sits on top of the
+    /// tab it borrowed its column from.
+    pub tab_nudges: Vec<(Rect, u16)>,
     /// The same for the status bar, whose parts are buttons.
     pub status_hits: Vec<(Rect, Cmd)>,
 
@@ -391,6 +399,8 @@ impl App {
             mouse_on: config.mouse(),
             screen: Rect::new(0, 0, 80, 24),
             tab_hits: Vec::new(),
+            tab_scroll: 0,
+            tab_nudges: Vec::new(),
             status_hits: Vec::new(),
             drag: None,
             last_click: None,
@@ -451,7 +461,7 @@ impl App {
         self.doc(id).expect("a pane always shows a document")
     }
 
-    fn here_mut(&mut self) -> &mut Document {
+    pub(crate) fn here_mut(&mut self) -> &mut Document {
         let id = self.view().doc;
         self.doc_mut(id).expect("a pane always shows a document")
     }
@@ -4101,8 +4111,8 @@ impl App {
             MouseEventKind::Up(_) => self.drag = None,
             MouseEventKind::ScrollUp => self.wheel(column, row, -3),
             MouseEventKind::ScrollDown => self.wheel(column, row, 3),
-            MouseEventKind::ScrollLeft => self.pan(-4),
-            MouseEventKind::ScrollRight => self.pan(4),
+            MouseEventKind::ScrollLeft => self.pan(column, row, -4),
+            MouseEventKind::ScrollRight => self.pan(column, row, 4),
             MouseEventKind::Moved => {
                 // Sitting still over a word is a question. Moving is not.
                 match self.resting {
@@ -4178,7 +4188,18 @@ impl App {
             return;
         }
 
-        // The tabs.
+        // The tabs. The ‹ › at the ends first: each one is drawn over a column
+        // that belongs to the tab beneath it, and the arrow is what is on the
+        // screen there.
+        if let Some(to) = self
+            .tab_nudges
+            .iter()
+            .find(|(area, _)| hits(*area, column, row))
+            .map(|(_, to)| *to)
+        {
+            self.tab_scroll = to;
+            return;
+        }
         if let Some((id, close)) = self
             .tab_hits
             .iter()
@@ -4374,6 +4395,12 @@ impl App {
             }
             _ => {}
         }
+        // The wheel over the tabs walks along them. A vertical wheel is what
+        // most mice have, and "there are more tabs that way" is the only thing
+        // scrolling can mean on a row one line tall.
+        if self.tab_row(column, row) {
+            return self.scroll_tabs(by * 2);
+        }
         if let Some(completion) = &mut self.completion
             && hits(completion.area, column, row)
         {
@@ -4396,12 +4423,32 @@ impl App {
         view::scroll_by(&mut panes[pane], &docs[index], tab_width, by);
     }
 
-    fn pan(&mut self, by: isize) {
+    fn pan(&mut self, column: u16, row: u16, by: isize) {
+        if self.tab_row(column, row) {
+            return self.scroll_tabs(by);
+        }
         if self.view().wrap {
             return;
         }
         let left = self.view().left as isize + by;
         self.view_mut().left = left.max(0) as usize;
+    }
+
+    /// Whether a point is on the row of tabs. The wheel there scrolls the tabs
+    /// rather than the file, because there is nothing else it could sensibly
+    /// mean and twenty open files need scrolling somehow.
+    fn tab_row(&self, column: u16, row: u16) -> bool {
+        row == self.screen.y
+            && column >= self.screen.x
+            && column < self.screen.x + self.screen.width
+    }
+
+    /// Move the row of tabs sideways. The far end is worked out by the drawing,
+    /// which is the only thing that knows how wide the tabs came out, so this
+    /// only has to keep it from going negative.
+    fn scroll_tabs(&mut self, by: isize) {
+        let at = self.tab_scroll as isize + by;
+        self.tab_scroll = at.clamp(0, u16::MAX as isize) as u16;
     }
 
     /// Move the view to where the scroll bar was grabbed.
@@ -4620,7 +4667,7 @@ mod tests {
         };
         assert_eq!(coloured("fn"), Some(Role::Keyword));
         assert_eq!(coloured("add"), Some(Role::Function));
-        assert_eq!(coloured("u32"), Some(Role::Type));
+        assert_eq!(coloured("u32"), Some(Role::TypeBuiltin));
     }
 
     #[test]

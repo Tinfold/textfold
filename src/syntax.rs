@@ -49,6 +49,11 @@ pub struct Grammar {
     /// capture name textfold has no colour for, which is not an error: a
     /// grammar is allowed to be more specific than we are.
     roles: Vec<Option<Role>>,
+    /// How specific each capture name is, by capture index — the number of
+    /// dots in it. `@comment.documentation` is more specific than `@comment`,
+    /// and where two patterns claim exactly the same bytes that is what
+    /// settles which one is being more precise about them.
+    specificity: Vec<u8>,
 }
 
 impl Grammar {
@@ -59,10 +64,16 @@ impl Grammar {
     pub fn new(language: Language, highlights: &str) -> Option<Self> {
         let query = Query::new(&language, highlights).ok()?;
         let roles = query.capture_names().iter().map(|n| role_for(n)).collect();
+        let specificity = query
+            .capture_names()
+            .iter()
+            .map(|n| n.matches('.').count().min(u8::MAX as usize) as u8)
+            .collect();
         Some(Self {
             language,
             query,
             roles,
+            specificity,
         })
     }
 }
@@ -162,7 +173,8 @@ impl Syntax {
 
         let mut cursor = QueryCursor::new();
         cursor.set_byte_range(range.clone());
-        let mut found: Vec<(usize, usize, usize, Role)> = Vec::new();
+        // Start, end, how specific the capture name was, which pattern, what.
+        let mut found: Vec<(usize, usize, u8, usize, Role)> = Vec::new();
         let mut captures = cursor.captures(
             &self.grammar.query,
             self.tree.root_node(),
@@ -174,28 +186,47 @@ impl Syntax {
                 continue;
             };
             let node = capture.node;
+            let specificity = self
+                .grammar
+                .specificity
+                .get(capture.index as usize)
+                .copied()
+                .unwrap_or(0);
             found.push((
                 node.start_byte(),
                 node.end_byte(),
+                specificity,
                 matched.pattern_index,
                 *role,
             ));
         }
 
         // Paint from least specific to most, so that what ends up on top is
-        // what tree-sitter's conventions say should be: an inner node over the
-        // node containing it, and among patterns on one node, the earliest
-        // written. Sorting wide-first and late-pattern-first puts the winner
-        // last, so a straight sweep leaves it showing.
+        // what tree-sitter's conventions say should be. Three rules, in order,
+        // and each is a sort that leaves the winner last for a straight sweep
+        // to finish on:
+        //
+        // An inner node beats the node containing it, so wider first.
+        //
+        // Then a more specific capture name beats a plainer one over the same
+        // bytes: `(line_comment (doc_comment)) @comment.documentation` and
+        // `(line_comment) @comment` both claim the whole of a `///` line, and
+        // the one that went to the trouble of saying `.documentation` is the
+        // one being precise about it. Fewer dots first.
+        //
+        // Then, still tied, the earliest pattern written wins, which is
+        // tree-sitter's own rule and how a grammar puts a specific case in
+        // front of a catch-all. Later patterns first.
         found.sort_by(|a, b| {
             a.0.cmp(&b.0)
                 .then(b.1.cmp(&a.1))
-                .then(b.2.cmp(&a.2))
+                .then(a.2.cmp(&b.2))
+                .then(b.3.cmp(&a.3))
         });
 
         let width = range.len();
         let mut painted: Vec<Option<Role>> = vec![None; width];
-        for (start, end, _, role) in found {
+        for (start, end, _, _, role) in found {
             let from = (start.max(range.start) - range.start).min(width);
             let to = end.min(range.end).saturating_sub(range.start).min(width);
             for cell in &mut painted[from..to] {
@@ -406,10 +437,15 @@ mod tests {
     #[test]
     fn capture_names_fall_back_along_their_dots() {
         assert_eq!(role_for("keyword"), Some(Role::Keyword));
-        assert_eq!(role_for("keyword.control.repeat"), Some(Role::Keyword));
+        // `keyword.control` has a colour of its own, so a name below it lands
+        // there rather than on plain `keyword`.
+        assert_eq!(role_for("keyword.control.repeat"), Some(Role::KeywordControl));
+        // And a name below one that does not falls the rest of the way.
+        assert_eq!(role_for("keyword.operator.overload"), Some(Role::Keyword));
         // A more specific name with its own meaning keeps it.
         assert_eq!(role_for("variable.parameter"), Some(Role::Parameter));
         assert_eq!(role_for("constant.builtin"), Some(Role::Boolean));
+        assert_eq!(role_for("punctuation.bracket"), Some(Role::Bracket));
         assert_eq!(role_for("nothing.like.this"), None);
     }
 
@@ -425,7 +461,48 @@ mod tests {
         assert_eq!(by_text("fn"), Some(Role::Keyword));
         assert_eq!(by_text("let"), Some(Role::Keyword));
         assert_eq!(by_text("main"), Some(Role::Function));
-        assert_eq!(by_text("u32"), Some(Role::Type));
+        // A primitive is a type the language has always had, which is its own
+        // colour in most schemes.
+        assert_eq!(by_text("u32"), Some(Role::TypeBuiltin));
+    }
+
+    #[test]
+    fn the_finer_kinds_of_code_reach_their_own_colours() {
+        // The roles a grammar's own query is more specific about than a
+        // ten-colour scheme could be. Each of these arrives as a dotted
+        // capture name, and each has to land on its own role rather than
+        // sliding back up to the general one.
+        let found = roles(concat!(
+            "/// what it does\n",
+            "// an aside\n",
+            "impl S {\n",
+            "    fn go(&self) -> String { self.name.trim().into() }\n",
+            "}\n",
+            "fn shout() { println!(\"hi\"); }\n",
+        ));
+        // A comment node runs to the end of its line, newline and all.
+        let by_text = |want: &str| {
+            found
+                .iter()
+                .find(|(text, _)| text.trim_end() == want)
+                .map(|(_, role)| *role)
+        };
+        // `(line_comment) @comment` and `(line_comment (doc_comment))
+        // @comment.documentation` both claim the whole of the first line, and
+        // the grammar writes the general one first. The specific one still has
+        // to win, or a doc comment is just a comment.
+        assert_eq!(by_text("/// what it does"), Some(Role::CommentDoc));
+        assert_eq!(by_text("// an aside"), Some(Role::Comment));
+        // Rust says `@function.method` for a call through a value and plain
+        // `@function` for the definition, which is the grammar's business
+        // rather than ours.
+        assert_eq!(by_text("go"), Some(Role::Function));
+        assert_eq!(by_text("trim"), Some(Role::Method));
+        assert_eq!(by_text("println!"), Some(Role::Macro));
+        assert_eq!(by_text("String"), Some(Role::Type));
+        assert_eq!(by_text("self"), Some(Role::VariableBuiltin));
+        assert_eq!(by_text("{"), Some(Role::Bracket));
+        assert_eq!(by_text("."), Some(Role::Delimiter));
     }
 
     #[test]
@@ -506,8 +583,10 @@ public class Widget extends Base {
         assert_eq!(by_text("Deprecated"), Some(Role::Attribute), "{found:?}");
         assert_eq!(by_text("MAX_SIZE"), Some(Role::Constant), "{found:?}");
         assert_eq!(by_text("RED"), Some(Role::Constant), "{found:?}");
-        assert_eq!(by_text("run"), Some(Role::Function), "{found:?}");
-        assert_eq!(by_text("stop"), Some(Role::Function), "{found:?}");
+        // Java's query calls a method a method, and textfold now has a
+        // colour for one.
+        assert_eq!(by_text("run"), Some(Role::Method), "{found:?}");
+        assert_eq!(by_text("stop"), Some(Role::Method), "{found:?}");
         assert_eq!(by_text("name"), Some(Role::Property), "{found:?}");
         assert_eq!(by_text("other"), Some(Role::Parameter), "{found:?}");
         assert_eq!(by_text("outer"), Some(Role::Label), "{found:?}");

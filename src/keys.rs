@@ -10,7 +10,10 @@
 //! Nothing in the default scheme needs a terminal that can tell Ctrl-Shift-P
 //! from Ctrl-P. Where a binding like that is offered it is a second way to
 //! reach something already reachable, so a plain `xterm` over `ssh` loses
-//! nothing.
+//! nothing. A *modified arrow* is a different matter and is used: an arrow
+//! goes down the wire as an escape sequence with a number in it saying which
+//! modifiers were held, so Ctrl-Shift-Up really is its own keystroke on every
+//! terminal, which Ctrl-Shift-P is not.
 //!
 //! Your own bindings go in the settings file, by command name:
 //!
@@ -247,17 +250,20 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::SelectAll, &["ctrl-a"]),
     (Cmd::SelectLine, &["ctrl-l"]),
     (Cmd::ExpandSelection, &["alt-="]),
-    // Alt-Shift first, and Ctrl-Alt-arrow second, because a desktop is allowed
-    // to take a key before the terminal ever sees it and GNOME takes exactly
-    // this one: Ctrl-Alt-Up and Ctrl-Alt-Down switch workspace, so on a stock
-    // Fedora or Ubuntu they never arrive. They stay bound for the desktops
-    // that leave them alone; the letters are what the help screen shows,
-    // because a key in the help that does nothing is worse than no help.
-    (Cmd::AddCursorAbove, &["alt-shift-k", "ctrl-alt-up"]),
-    (Cmd::AddCursorBelow, &["alt-shift-j", "ctrl-alt-down"]),
+    // Another cursor above or below is Ctrl-Alt-arrow in every editor that has
+    // the feature, and a desktop is allowed to take a keystroke before the
+    // terminal under it ever sees it — GNOME and KDE both take exactly that
+    // one for switching workspace. So the first key here is Ctrl-Shift-arrow,
+    // which nothing above the terminal wants and which every terminal encodes,
+    // and Ctrl-Alt-arrow is bound beside it for the desktops that leave it
+    // alone. The first is what the help screen shows, because a key in the
+    // help that does nothing is worse than no help.
+    (Cmd::AddCursorAbove, &["ctrl-shift-up", "ctrl-alt-up"]),
+    (Cmd::AddCursorBelow, &["ctrl-shift-down", "ctrl-alt-down"]),
     (Cmd::AddCursorNextMatch, &["ctrl-d"]),
     (Cmd::SelectAllMatches, &["ctrl-shift-l"]),
     (Cmd::CursorsToLineEnds, &["alt-shift-i"]),
+    (Cmd::CollapseCursors, &["alt-shift-c"]),
 
     // Changing text.
     (Cmd::InsertNewline, &["enter"]),
@@ -458,10 +464,24 @@ mod tests {
         // The help screen and the palette show the first binding, so the first
         // binding has to be the one that works.
         let keys = Keys::default();
-        assert_eq!(keys.shortcut(Cmd::AddCursorAbove).as_deref(), Some("Alt-Shift-k"));
-        assert_eq!(keys.shortcut(Cmd::AddCursorBelow).as_deref(), Some("Alt-Shift-j"));
-        // Still bound, for a desktop that leaves them alone.
+        assert_eq!(
+            keys.shortcut(Cmd::AddCursorAbove).as_deref(),
+            Some("Ctrl-Shift-\u{2191}")
+        );
+        assert_eq!(
+            keys.shortcut(Cmd::AddCursorBelow).as_deref(),
+            Some("Ctrl-Shift-\u{2193}")
+        );
         let press = |code, mods| keys.lookup(Key::from_event(KeyEvent::new(code, mods)));
+        let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        assert_eq!(press(KeyCode::Up, ctrl_shift), Some(Cmd::AddCursorAbove));
+        assert_eq!(press(KeyCode::Down, ctrl_shift), Some(Cmd::AddCursorBelow));
+        // A modified arrow is one escape sequence with a number in it, so
+        // Ctrl-Shift-Up is a different key from Ctrl-Up rather than the same
+        // byte twice — which is why this pair can be the one shown.
+        let ctrl = KeyModifiers::CONTROL;
+        assert_eq!(press(KeyCode::Up, ctrl), Some(Cmd::MoveParaUp));
+        // Still bound, for a desktop that leaves them alone.
         let ctrl_alt = KeyModifiers::CONTROL | KeyModifiers::ALT;
         assert_eq!(press(KeyCode::Up, ctrl_alt), Some(Cmd::AddCursorAbove));
         assert_eq!(press(KeyCode::Down, ctrl_alt), Some(Cmd::AddCursorBelow));

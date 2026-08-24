@@ -1,17 +1,25 @@
 //! Colours, by what they mean rather than what they are.
 //!
-//! Two families of role live here. The first twelve are the interface: borders,
-//! titles, the line that says what file you are in. They are the same twelve
-//! sshman uses and are named the same, so a theme file written for one editor
-//! drops into the other unchanged.
+//! A theme is three groups of names, and the groups are the three things
+//! textfold puts on a screen.
 //!
-//! The second family is the code itself — keywords, strings, comments. A theme
-//! may spell those out, but it does not have to: every one of them has a
-//! meaning that one of the twelve already carries. Strings are the colour of
-//! things that worked, comments the colour of things deliberately in the
-//! background, keywords the colour reserved for the notable. So an sshman
-//! theme is a whole textfold theme, and a textfold theme that wants to be
-//! precise about code says only the parts it disagrees with.
+//! `ui` is the chrome: the tab row, the status bar, the borders of a picker,
+//! the words in a dialog. Ten roles, and they are about *tone* — this worked,
+//! this is worth a look, this is deliberately in the background.
+//!
+//! `editor` is the pane the text is in: what is behind a selection, what marks
+//! the line you are on, the line numbers, the extra cursors.
+//!
+//! `syntax` is the code: thirty-one roles, one for each kind of thing a
+//! grammar can point at. Every theme textfold ships spells all thirty-one out,
+//! because code is what you are looking at all day and "close enough" is not.
+//!
+//! A theme of your own does not have to. Anything left out is worked out: from
+//! the theme named in `base`, and failing that from `ui`, where every kind of
+//! code has a tone that already means it. Strings are the colour of things that
+//! worked, comments the colour of things deliberately in the background. That
+//! gets you a readable editor from ten colours; spelling `syntax` out gets you
+//! a good one.
 //!
 //! The tables are not in this file. Each is a small JSON file: the ones
 //! textfold ships live in `themes/` and are built into the binary, and any
@@ -24,102 +32,164 @@ use std::path::PathBuf;
 use ratatui::style::Color;
 use serde::Deserialize;
 
-/// The twelve interface roles, the four that belong to a text pane, and the
-/// colours code is drawn in. Copied on every span, so it stays `Copy`.
+/// Every colour textfold draws with. Copied on every span, so it stays `Copy`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Theme {
-    /// Focused borders, titles, the marks that say "you are here".
-    pub accent: Color,
-    /// Unfocused borders, hints, anything deliberately in the background.
-    pub dim: Color,
+    // ---- ui: the chrome around the text ----
+    /// What to paint behind everything. [`Color::Reset`] means the terminal's
+    /// own, which is what a theme naming no background gets.
+    pub background: Color,
     /// Ordinary text you are meant to read.
-    pub text: Color,
+    pub foreground: Color,
     /// Text that is there when you look for it: counts, labels, positions.
     pub muted: Color,
-    /// It worked.
-    pub good: Color,
-    /// Worth a second look.
-    pub warn: Color,
-    /// It did not work, or it is about to do something irreversible.
-    pub bad: Color,
-    /// Directories in a listing.
-    pub dir: Color,
-    /// Symlinks in a listing.
-    pub link: Color,
-    /// Files you could run.
-    pub exec: Color,
-    /// Badges that are telling you something rather than warning you.
-    pub info: Color,
+    /// Anything deliberately in the background: hints, unfocused borders,
+    /// the key beside a command in a list.
+    pub faint: Color,
+    /// Focused borders, titles, the marks that say "you are here".
+    pub accent: Color,
     /// Text drawn *on* a coloured chip, so it contrasts with the colours
     /// above rather than with the terminal.
     pub on_accent: Color,
-    /// What to paint behind everything. [`Color::Reset`] means the terminal's
-    /// own, which is what a theme naming no background gets.
-    pub bg: Color,
+    /// It worked.
+    pub success: Color,
+    /// Worth a second look.
+    pub warning: Color,
+    /// It did not work, or it is about to do something irreversible.
+    pub error: Color,
+    /// Badges that are telling you something rather than warning you.
+    pub info: Color,
 
+    // ---- editor: the pane the text is in ----
     /// Behind selected text.
     pub selection: Color,
-    /// Behind the line the cursor is on. Equal to [`Theme::bg`] means no
-    /// highlight at all, which is what a terminal-coloured theme gets, since
-    /// there is no background to lighten.
-    pub cursorline: Color,
+    /// Behind the line the cursor is on. Equal to [`Theme::background`] means
+    /// no highlight at all, which is what a terminal-coloured theme gets,
+    /// since there is no background to lighten.
+    pub current_line: Color,
     /// Line numbers, and the column they sit in.
     pub gutter: Color,
     /// The line number the cursor is on.
-    pub gutter_active: Color,
+    pub gutter_current: Color,
+    /// The block drawn where an extra cursor is. The terminal has one real
+    /// cursor and multi-cursor editing needs forty, so the other thirty-nine
+    /// are painted.
+    pub cursor: Color,
+    /// The bracket under the cursor and the one that closes it.
+    pub bracket_match: Color,
+    /// The dots and arrows that stand in for spaces and tabs, when they are
+    /// being shown at all.
+    pub whitespace: Color,
+    /// The vertical rules down the columns you asked to be warned about.
+    pub ruler: Color,
+
     /// The colours code is drawn in.
     pub syntax: Syntax,
 }
 
-/// What each kind of code is coloured. The names are tree-sitter's own capture
-/// names, cut down to the ones a person can hold in their head; anything more
-/// specific in a grammar's queries falls back along the dots, so
-/// `@function.method.builtin` lands on `function` without anyone saying so.
+/// What each kind of code is coloured.
+///
+/// The names are tree-sitter's capture names, cut down to the ones a person
+/// can hold in their head. Anything more specific in a grammar's queries falls
+/// back along the dots, so `@function.method.builtin` lands on `method`
+/// without anyone saying so, and `@keyword.operator.overload` lands on
+/// `keyword`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Syntax {
+    /// `let`, `pub`, `struct` — the words that are the language.
     pub keyword: Color,
+    /// `if`, `for`, `return`, `throw` — the words that are the control flow.
+    pub keyword_control: Color,
+    /// A function where it is defined, and where it is called.
     pub function: Color,
+    /// One the language provides: `len`, `printf`, `sizeof`.
+    pub function_builtin: Color,
+    /// A function reached through a value: `x.parse()`.
+    pub method: Color,
+    /// `println!`, `#define`, `@decorator` — code that writes code.
+    pub macro_: Color,
+    /// A type by name: `HashMap`, `Widget`.
     pub type_: Color,
+    /// One the language has always had: `u32`, `int`, `string`.
+    pub type_builtin: Color,
+    /// A type used to make one: `Some(x)`, `Point { .. }`.
     pub constructor: Color,
+    /// A string literal.
     pub string: Color,
-    pub escape: Color,
+    /// `\n`, `\u{1f600}` — the parts of a string that are not text.
+    pub string_escape: Color,
+    /// A string the language reads rather than prints: a regex, a format
+    /// specifier, a path in an import.
+    pub string_special: Color,
+    /// `'a'` — a character literal, which is not quite a string.
+    pub character: Color,
+    /// A number literal.
     pub number: Color,
+    /// `true`, `false`, `nil`, `None`.
     pub boolean: Color,
+    /// A comment.
     pub comment: Color,
+    /// A comment that is documentation: `///`, `/** */`, a docstring.
+    pub comment_doc: Color,
+    /// A constant by name: `MAX_SIZE`, an enum member.
     pub constant: Color,
+    /// A variable by name.
     pub variable: Color,
+    /// One the language gives you: `self`, `this`, `super`.
+    pub variable_builtin: Color,
+    /// A parameter, where it is declared and where it is used.
     pub parameter: Color,
+    /// A field on a value: the `name` in `widget.name`.
     pub property: Color,
+    /// `+`, `==`, `=>`.
     pub operator: Color,
+    /// Anything punctuation that is not a bracket or a separator.
     pub punctuation: Color,
+    /// `(`, `[`, `{` and their partners.
+    pub bracket: Color,
+    /// `,`, `;`, `.` — what separates one thing from the next.
+    pub delimiter: Color,
+    /// `#[derive(..)]`, `@Override`, `[Obsolete]`.
     pub attribute: Color,
+    /// A module or namespace by name.
     pub namespace: Color,
+    /// `<div>` — a markup tag.
     pub tag: Color,
+    /// `'outer:` — a loop label, a goto target.
     pub label: Color,
+    /// Text the grammar could not parse.
     pub error: Color,
 }
 
 /// One kind of code, as the highlighter hands it to the drawing.
-///
-/// The order is the order [`CAPTURES`] is in, and the numbers are handed to
-/// tree-sitter as capture indices, so the two have to stay together.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Role {
     Keyword,
+    KeywordControl,
     Function,
+    FunctionBuiltin,
+    Method,
+    Macro,
     Type,
+    TypeBuiltin,
     Constructor,
     String,
-    Escape,
+    StringEscape,
+    StringSpecial,
+    Character,
     Number,
     Boolean,
     Comment,
+    CommentDoc,
     Constant,
     Variable,
+    VariableBuiltin,
     Parameter,
     Property,
     Operator,
     Punctuation,
+    Bracket,
+    Delimiter,
     Attribute,
     Namespace,
     Tag,
@@ -127,28 +197,52 @@ pub enum Role {
     Error,
 }
 
-/// Every capture name textfold knows, in [`Role`] order. A grammar's query
-/// names a capture like `@keyword.control.repeat`; the longest of these that
-/// is a prefix of it wins, so a grammar can be as specific as it likes and
-/// still be coloured.
+/// Every capture name textfold knows. A grammar's query names a capture like
+/// `@keyword.control.repeat`; the longest of these that is a prefix of it
+/// along the dots wins, so a grammar can be as specific as it likes and still
+/// be coloured.
 pub const CAPTURES: &[(&str, Role)] = &[
     ("keyword", Role::Keyword),
+    ("keyword.control", Role::KeywordControl),
+    ("keyword.conditional", Role::KeywordControl),
+    ("keyword.repeat", Role::KeywordControl),
+    ("keyword.return", Role::KeywordControl),
+    ("keyword.exception", Role::KeywordControl),
+    ("keyword.coroutine", Role::KeywordControl),
+    ("conditional", Role::KeywordControl),
+    ("repeat", Role::KeywordControl),
+    ("exception", Role::KeywordControl),
+    ("keyword.directive", Role::Macro),
     ("function", Role::Function),
-    ("method", Role::Function),
+    ("function.builtin", Role::FunctionBuiltin),
+    ("function.method", Role::Method),
+    ("method", Role::Method),
+    ("function.macro", Role::Macro),
+    ("macro", Role::Macro),
+    ("preproc", Role::Macro),
     ("type", Role::Type),
+    ("type.builtin", Role::TypeBuiltin),
     ("constructor", Role::Constructor),
     ("string", Role::String),
-    ("character", Role::String),
-    ("escape", Role::Escape),
-    ("string.escape", Role::Escape),
-    ("string.special", Role::Escape),
+    ("string.escape", Role::StringEscape),
+    ("escape", Role::StringEscape),
+    ("string.special", Role::StringSpecial),
+    ("string.regexp", Role::StringSpecial),
+    ("string.regex", Role::StringSpecial),
+    ("regex", Role::StringSpecial),
+    ("character", Role::Character),
+    ("character.special", Role::StringEscape),
     ("number", Role::Number),
     ("float", Role::Number),
     ("boolean", Role::Boolean),
-    ("comment", Role::Comment),
     ("constant", Role::Constant),
     ("constant.builtin", Role::Boolean),
+    ("constant.macro", Role::Macro),
+    ("comment", Role::Comment),
+    ("comment.documentation", Role::CommentDoc),
+    ("comment.doc", Role::CommentDoc),
     ("variable", Role::Variable),
+    ("variable.builtin", Role::VariableBuiltin),
     ("variable.parameter", Role::Parameter),
     ("parameter", Role::Parameter),
     ("variable.member", Role::Property),
@@ -156,8 +250,11 @@ pub const CAPTURES: &[(&str, Role)] = &[
     ("field", Role::Property),
     ("operator", Role::Operator),
     ("punctuation", Role::Punctuation),
+    ("punctuation.bracket", Role::Bracket),
+    ("punctuation.delimiter", Role::Delimiter),
     ("attribute", Role::Attribute),
     ("annotation", Role::Attribute),
+    ("tag.attribute", Role::Attribute),
     ("namespace", Role::Namespace),
     ("module", Role::Namespace),
     ("tag", Role::Tag),
@@ -171,20 +268,31 @@ impl Theme {
         let s = &self.syntax;
         match role {
             Role::Keyword => s.keyword,
+            Role::KeywordControl => s.keyword_control,
             Role::Function => s.function,
+            Role::FunctionBuiltin => s.function_builtin,
+            Role::Method => s.method,
+            Role::Macro => s.macro_,
             Role::Type => s.type_,
+            Role::TypeBuiltin => s.type_builtin,
             Role::Constructor => s.constructor,
             Role::String => s.string,
-            Role::Escape => s.escape,
+            Role::StringEscape => s.string_escape,
+            Role::StringSpecial => s.string_special,
+            Role::Character => s.character,
             Role::Number => s.number,
             Role::Boolean => s.boolean,
             Role::Comment => s.comment,
+            Role::CommentDoc => s.comment_doc,
             Role::Constant => s.constant,
             Role::Variable => s.variable,
+            Role::VariableBuiltin => s.variable_builtin,
             Role::Parameter => s.parameter,
             Role::Property => s.property,
             Role::Operator => s.operator,
             Role::Punctuation => s.punctuation,
+            Role::Bracket => s.bracket,
+            Role::Delimiter => s.delimiter,
             Role::Attribute => s.attribute,
             Role::Namespace => s.namespace,
             Role::Tag => s.tag,
@@ -193,41 +301,57 @@ impl Theme {
         }
     }
 
-    /// Barely there: a scroll bar's track, the rule between two panes.
-    /// Halfway from the background towards the dim colour, or the dimmest
-    /// thing a terminal-coloured theme has.
-    pub fn faint(&self) -> Color {
-        blend(self.bg, self.dim, 0.45).unwrap_or(Color::DarkGray)
+    /// Barely there: the tab row and the status bar sit on this, and so does
+    /// the rule between two panes. Halfway from the background towards the
+    /// faint colour, or the dimmest thing a terminal-coloured theme has.
+    pub fn chrome(&self) -> Color {
+        blend(self.background, self.faint, 0.45).unwrap_or(Color::DarkGray)
     }
 
-    /// The colours code gets when a theme says nothing about code: each kind
-    /// drawn in whichever of the twelve already means that.
+    /// The colours code gets where nothing has said: each kind drawn in
+    /// whichever of the ten `ui` tones already means it.
     ///
-    /// This is the whole reason an sshman theme is also a textfold theme, and
-    /// it is not a fudge — a string literal really is a thing that worked, and
-    /// a comment really is text deliberately in the background.
+    /// It is not a fudge — a string literal really is a thing that worked, and
+    /// a comment really is text deliberately in the background. It gets a
+    /// ten-colour theme a readable editor. Every theme textfold ships says
+    /// more than this, because an editor you read all day is worth more.
     fn derived_syntax(&self) -> Syntax {
+        // A hue between the accent and the warning, for the kinds of code that
+        // want to be distinct from both. Falls back to the accent where the
+        // theme's colours are terminal slots and there is nothing to mix.
+        let between = blend(self.accent, self.warning, 0.5).unwrap_or(self.accent);
         Syntax {
-            keyword: self.link,
-            function: self.accent,
-            type_: self.info,
-            constructor: self.info,
-            string: self.good,
-            escape: self.link,
-            number: self.warn,
-            boolean: self.warn,
-            comment: self.dim,
-            constant: self.warn,
-            variable: self.text,
+            keyword: self.accent,
+            keyword_control: self.accent,
+            function: self.info,
+            function_builtin: self.info,
+            method: self.info,
+            macro_: between,
+            type_: self.warning,
+            type_builtin: self.warning,
+            constructor: self.warning,
+            string: self.success,
+            string_escape: between,
+            string_special: between,
+            character: self.success,
+            number: self.warning,
+            boolean: self.warning,
+            comment: self.faint,
+            comment_doc: self.faint,
+            constant: self.warning,
+            variable: self.foreground,
+            variable_builtin: self.accent,
             parameter: self.muted,
-            property: self.dir,
+            property: self.info,
             operator: self.muted,
             punctuation: self.muted,
-            attribute: self.warn,
+            bracket: self.muted,
+            delimiter: self.muted,
+            attribute: between,
             namespace: self.info,
-            tag: self.bad,
-            label: self.link,
-            error: self.bad,
+            tag: self.accent,
+            label: between,
+            error: self.error,
         }
     }
 
@@ -235,7 +359,7 @@ impl Theme {
     /// of the way from the background towards the accent keeps whatever the
     /// text was coloured legible, which a flat blue does not.
     fn derived_selection(&self) -> Color {
-        blend(self.bg, self.accent, 0.30).unwrap_or(Color::DarkGray)
+        blend(self.background, self.accent, 0.30).unwrap_or(Color::DarkGray)
     }
 
     /// What to paint behind the cursor's line. A tenth of the way towards the
@@ -244,8 +368,8 @@ impl Theme {
     /// A theme with no background of its own gets none, because there is
     /// nothing to lighten — lightening the terminal's own would mean guessing
     /// what it is.
-    fn derived_cursorline(&self) -> Color {
-        blend(self.bg, self.text, 0.07).unwrap_or(self.bg)
+    fn derived_current_line(&self) -> Color {
+        blend(self.background, self.foreground, 0.07).unwrap_or(self.background)
     }
 }
 
@@ -267,39 +391,53 @@ fn blend(from: Color, to: Color, amount: f32) -> Option<Color> {
 /// themes could not be read. `themes/terminal.json` says the same thing, and a
 /// test below holds the two together.
 pub const FALLBACK: Theme = Theme {
-    accent: Color::Cyan,
-    dim: Color::DarkGray,
-    text: Color::White,
+    background: Color::Reset,
+    foreground: Color::White,
     muted: Color::Gray,
-    good: Color::Green,
-    warn: Color::Yellow,
-    bad: Color::Red,
-    dir: Color::Blue,
-    link: Color::Magenta,
-    exec: Color::Green,
-    info: Color::Blue,
+    faint: Color::DarkGray,
+    accent: Color::Cyan,
     on_accent: Color::Black,
-    bg: Color::Reset,
+    success: Color::Green,
+    warning: Color::Yellow,
+    error: Color::Red,
+    info: Color::Blue,
+
     selection: Color::DarkGray,
-    cursorline: Color::Reset,
+    current_line: Color::Reset,
     gutter: Color::DarkGray,
-    gutter_active: Color::White,
+    gutter_current: Color::White,
+    cursor: Color::Cyan,
+    bracket_match: Color::Cyan,
+    whitespace: Color::DarkGray,
+    ruler: Color::DarkGray,
+
     syntax: Syntax {
         keyword: Color::Magenta,
+        keyword_control: Color::LightMagenta,
         function: Color::Cyan,
+        function_builtin: Color::LightCyan,
+        method: Color::Cyan,
+        macro_: Color::LightMagenta,
         type_: Color::Blue,
-        constructor: Color::Blue,
+        type_builtin: Color::LightBlue,
+        constructor: Color::LightBlue,
         string: Color::Green,
-        escape: Color::Magenta,
+        string_escape: Color::LightGreen,
+        string_special: Color::LightGreen,
+        character: Color::Green,
         number: Color::Yellow,
-        boolean: Color::Yellow,
+        boolean: Color::LightYellow,
         comment: Color::DarkGray,
-        constant: Color::Yellow,
+        comment_doc: Color::Gray,
+        constant: Color::LightYellow,
         variable: Color::White,
+        variable_builtin: Color::LightRed,
         parameter: Color::Gray,
         property: Color::Blue,
         operator: Color::Gray,
         punctuation: Color::Gray,
+        bracket: Color::Gray,
+        delimiter: Color::Gray,
         attribute: Color::Yellow,
         namespace: Color::Blue,
         tag: Color::Red,
@@ -493,9 +631,10 @@ pub fn themes_dir() -> Option<PathBuf> {
     Some(crate::config::config_dir()?.join("themes"))
 }
 
-/// A theme as its file writes it. Every colour is optional: what a file leaves
-/// out comes from the theme it is based on, and what no theme in the chain
-/// mentions is worked out from the twelve.
+/// A theme as its file writes it.
+///
+/// Every colour is optional: what a file leaves out comes from the theme named
+/// in `base`, and what no theme in the chain mentions is worked out from `ui`.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileTheme {
@@ -508,6 +647,145 @@ struct FileTheme {
     #[serde(default)]
     base: Option<String>,
 
+    #[serde(default)]
+    ui: Option<FileUi>,
+    #[serde(default)]
+    editor: Option<FileEditor>,
+    #[serde(default)]
+    syntax: Option<FileSyntax>,
+
+    /// A theme file written for sshman, whose twelve roles are flat at the top
+    /// level and named for a file manager's job rather than an editor's.
+    /// textfold reads one — a theme you already have should not stop working
+    /// because the names got better — and everything above wins over it.
+    #[serde(flatten)]
+    legacy: Legacy,
+}
+
+/// The chrome: ten tones.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileUi {
+    #[serde(default)]
+    background: Option<Colour>,
+    #[serde(default)]
+    foreground: Option<Colour>,
+    #[serde(default)]
+    muted: Option<Colour>,
+    #[serde(default)]
+    faint: Option<Colour>,
+    #[serde(default)]
+    accent: Option<Colour>,
+    #[serde(default)]
+    on_accent: Option<Colour>,
+    #[serde(default)]
+    success: Option<Colour>,
+    #[serde(default)]
+    warning: Option<Colour>,
+    #[serde(default)]
+    error: Option<Colour>,
+    #[serde(default)]
+    info: Option<Colour>,
+}
+
+/// The pane the text is in.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileEditor {
+    #[serde(default)]
+    selection: Option<Colour>,
+    #[serde(default)]
+    current_line: Option<Colour>,
+    #[serde(default)]
+    gutter: Option<Colour>,
+    #[serde(default)]
+    gutter_current: Option<Colour>,
+    #[serde(default)]
+    cursor: Option<Colour>,
+    #[serde(default)]
+    bracket_match: Option<Colour>,
+    #[serde(default)]
+    whitespace: Option<Colour>,
+    #[serde(default)]
+    ruler: Option<Colour>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct FileSyntax {
+    #[serde(default)]
+    keyword: Option<Colour>,
+    #[serde(default)]
+    keyword_control: Option<Colour>,
+    #[serde(default)]
+    function: Option<Colour>,
+    #[serde(default)]
+    function_builtin: Option<Colour>,
+    #[serde(default)]
+    method: Option<Colour>,
+    #[serde(default, rename = "macro")]
+    macro_: Option<Colour>,
+    #[serde(default, rename = "type")]
+    type_: Option<Colour>,
+    #[serde(default)]
+    type_builtin: Option<Colour>,
+    #[serde(default)]
+    constructor: Option<Colour>,
+    #[serde(default)]
+    string: Option<Colour>,
+    #[serde(default, alias = "escape")]
+    string_escape: Option<Colour>,
+    #[serde(default)]
+    string_special: Option<Colour>,
+    #[serde(default)]
+    character: Option<Colour>,
+    #[serde(default)]
+    number: Option<Colour>,
+    #[serde(default)]
+    boolean: Option<Colour>,
+    #[serde(default)]
+    comment: Option<Colour>,
+    #[serde(default)]
+    comment_doc: Option<Colour>,
+    #[serde(default)]
+    constant: Option<Colour>,
+    #[serde(default)]
+    variable: Option<Colour>,
+    #[serde(default)]
+    variable_builtin: Option<Colour>,
+    #[serde(default)]
+    parameter: Option<Colour>,
+    #[serde(default)]
+    property: Option<Colour>,
+    #[serde(default)]
+    operator: Option<Colour>,
+    #[serde(default)]
+    punctuation: Option<Colour>,
+    #[serde(default)]
+    bracket: Option<Colour>,
+    #[serde(default)]
+    delimiter: Option<Colour>,
+    #[serde(default)]
+    attribute: Option<Colour>,
+    #[serde(default)]
+    namespace: Option<Colour>,
+    #[serde(default)]
+    tag: Option<Colour>,
+    #[serde(default)]
+    label: Option<Colour>,
+    #[serde(default)]
+    error: Option<Colour>,
+}
+
+/// sshman's twelve, flat at the top level, plus the four pane colours textfold
+/// used to keep beside them.
+///
+/// `dir`, `link` and `exec` are the colours of a directory, a symlink and
+/// something you could run in a file listing. textfold does not draw a file
+/// listing, so it reads them and does nothing with them rather than pretending
+/// they mean something here. Same for `ansi`: textfold draws no terminal.
+#[derive(Deserialize, Default)]
+struct Legacy {
     #[serde(default)]
     accent: Option<Colour>,
     #[serde(default)]
@@ -523,18 +801,11 @@ struct FileTheme {
     #[serde(default)]
     bad: Option<Colour>,
     #[serde(default)]
-    dir: Option<Colour>,
-    #[serde(default)]
-    link: Option<Colour>,
-    #[serde(default)]
-    exec: Option<Colour>,
-    #[serde(default)]
     info: Option<Colour>,
     #[serde(default)]
     on_accent: Option<Colour>,
     #[serde(default)]
     bg: Option<Colour>,
-
     #[serde(default)]
     selection: Option<Colour>,
     #[serde(default)]
@@ -544,125 +815,128 @@ struct FileTheme {
     #[serde(default)]
     gutter_active: Option<Colour>,
 
-    /// The colours code is drawn in. A theme leaving this out is not leaving
-    /// code uncoloured — it is saying the twelve above already cover it.
     #[serde(default)]
-    syntax: Option<FileSyntax>,
-
-    /// Sixteen terminal colours, accepted and ignored. textfold draws no
-    /// terminal, but sshman's themes carry these and a shared theme file
-    /// should not have to be edited to cross between the two.
+    #[allow(dead_code)]
+    dir: Option<Colour>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    link: Option<Colour>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    exec: Option<Colour>,
     #[serde(default)]
     #[allow(dead_code)]
     ansi: Option<Vec<Colour>>,
 }
 
-#[derive(Deserialize, Default)]
-#[serde(deny_unknown_fields)]
-struct FileSyntax {
-    #[serde(default)]
-    keyword: Option<Colour>,
-    #[serde(default)]
-    function: Option<Colour>,
-    #[serde(default, rename = "type")]
-    type_: Option<Colour>,
-    #[serde(default)]
-    constructor: Option<Colour>,
-    #[serde(default)]
-    string: Option<Colour>,
-    #[serde(default)]
-    escape: Option<Colour>,
-    #[serde(default)]
-    number: Option<Colour>,
-    #[serde(default)]
-    boolean: Option<Colour>,
-    #[serde(default)]
-    comment: Option<Colour>,
-    #[serde(default)]
-    constant: Option<Colour>,
-    #[serde(default)]
-    variable: Option<Colour>,
-    #[serde(default)]
-    parameter: Option<Colour>,
-    #[serde(default)]
-    property: Option<Colour>,
-    #[serde(default)]
-    operator: Option<Colour>,
-    #[serde(default)]
-    punctuation: Option<Colour>,
-    #[serde(default)]
-    attribute: Option<Colour>,
-    #[serde(default)]
-    namespace: Option<Colour>,
-    #[serde(default)]
-    tag: Option<Colour>,
-    #[serde(default)]
-    label: Option<Colour>,
-    #[serde(default)]
-    error: Option<Colour>,
+/// The first of these that says anything, or the fallback.
+fn first(chosen: [Option<Colour>; 2], fallback: Color) -> Color {
+    chosen
+        .into_iter()
+        .flatten()
+        .next()
+        .map(|c| c.0)
+        .unwrap_or(fallback)
 }
 
 impl FileTheme {
     fn resolve(&self, base: Theme) -> Theme {
-        let or = |c: Option<Colour>, fallback: Color| c.map(|c| c.0).unwrap_or(fallback);
+        let ui = self.ui.as_ref();
+        let ed = self.editor.as_ref();
+        let old = &self.legacy;
+
         let mut theme = Theme {
-            accent: or(self.accent, base.accent),
-            dim: or(self.dim, base.dim),
-            text: or(self.text, base.text),
-            muted: or(self.muted, base.muted),
-            good: or(self.good, base.good),
-            warn: or(self.warn, base.warn),
-            bad: or(self.bad, base.bad),
-            dir: or(self.dir, base.dir),
-            link: or(self.link, base.link),
-            exec: or(self.exec, base.exec),
-            info: or(self.info, base.info),
-            on_accent: or(self.on_accent, base.on_accent),
-            bg: or(self.bg, base.bg),
-            // Filled in below, once the twelve they are worked out from are
+            background: first([ui.and_then(|u| u.background), old.bg], base.background),
+            foreground: first([ui.and_then(|u| u.foreground), old.text], base.foreground),
+            muted: first([ui.and_then(|u| u.muted), old.muted], base.muted),
+            faint: first([ui.and_then(|u| u.faint), old.dim], base.faint),
+            accent: first([ui.and_then(|u| u.accent), old.accent], base.accent),
+            on_accent: first([ui.and_then(|u| u.on_accent), old.on_accent], base.on_accent),
+            success: first([ui.and_then(|u| u.success), old.good], base.success),
+            warning: first([ui.and_then(|u| u.warning), old.warn], base.warning),
+            error: first([ui.and_then(|u| u.error), old.bad], base.error),
+            info: first([ui.and_then(|u| u.info), old.info], base.info),
+            // Filled in below, once the ten they are worked out from are
             // settled.
             selection: base.selection,
-            cursorline: base.cursorline,
+            current_line: base.current_line,
             gutter: base.gutter,
-            gutter_active: base.gutter_active,
+            gutter_current: base.gutter_current,
+            cursor: base.cursor,
+            bracket_match: base.bracket_match,
+            whitespace: base.whitespace,
+            ruler: base.ruler,
             syntax: base.syntax,
         };
 
-        // A theme that changed the twelve has changed what the rest mean, so
-        // the derivations run again from the new ones. A theme that spelled a
-        // colour out keeps it: saying so is the whole point of saying so.
-        let derived = theme.derived_syntax();
+        // What a theme did not say about code comes from the theme it is
+        // based on — that is what "based on" means, and a file that changes
+        // one comment colour should not lose the other thirty.
+        //
+        // A theme based on nothing has no such palette to inherit, so its code
+        // colours are worked out from the ten it just named. Re-deriving here
+        // rather than taking the fallback's is the point: they have to be this
+        // theme's colours, not the terminal's.
+        let d = match self.base {
+            Some(_) => base.syntax,
+            None => theme.derived_syntax(),
+        };
         let s = self.syntax.as_ref();
         let pick = |chosen: Option<Colour>, derived: Color| match chosen {
             Some(c) => c.0,
             None => derived,
         };
         theme.syntax = Syntax {
-            keyword: pick(s.and_then(|s| s.keyword), derived.keyword),
-            function: pick(s.and_then(|s| s.function), derived.function),
-            type_: pick(s.and_then(|s| s.type_), derived.type_),
-            constructor: pick(s.and_then(|s| s.constructor), derived.constructor),
-            string: pick(s.and_then(|s| s.string), derived.string),
-            escape: pick(s.and_then(|s| s.escape), derived.escape),
-            number: pick(s.and_then(|s| s.number), derived.number),
-            boolean: pick(s.and_then(|s| s.boolean), derived.boolean),
-            comment: pick(s.and_then(|s| s.comment), derived.comment),
-            constant: pick(s.and_then(|s| s.constant), derived.constant),
-            variable: pick(s.and_then(|s| s.variable), derived.variable),
-            parameter: pick(s.and_then(|s| s.parameter), derived.parameter),
-            property: pick(s.and_then(|s| s.property), derived.property),
-            operator: pick(s.and_then(|s| s.operator), derived.operator),
-            punctuation: pick(s.and_then(|s| s.punctuation), derived.punctuation),
-            attribute: pick(s.and_then(|s| s.attribute), derived.attribute),
-            namespace: pick(s.and_then(|s| s.namespace), derived.namespace),
-            tag: pick(s.and_then(|s| s.tag), derived.tag),
-            label: pick(s.and_then(|s| s.label), derived.label),
-            error: pick(s.and_then(|s| s.error), derived.error),
+            keyword: pick(s.and_then(|s| s.keyword), d.keyword),
+            keyword_control: pick(s.and_then(|s| s.keyword_control), d.keyword_control),
+            function: pick(s.and_then(|s| s.function), d.function),
+            function_builtin: pick(s.and_then(|s| s.function_builtin), d.function_builtin),
+            method: pick(s.and_then(|s| s.method), d.method),
+            macro_: pick(s.and_then(|s| s.macro_), d.macro_),
+            type_: pick(s.and_then(|s| s.type_), d.type_),
+            type_builtin: pick(s.and_then(|s| s.type_builtin), d.type_builtin),
+            constructor: pick(s.and_then(|s| s.constructor), d.constructor),
+            string: pick(s.and_then(|s| s.string), d.string),
+            string_escape: pick(s.and_then(|s| s.string_escape), d.string_escape),
+            string_special: pick(s.and_then(|s| s.string_special), d.string_special),
+            character: pick(s.and_then(|s| s.character), d.character),
+            number: pick(s.and_then(|s| s.number), d.number),
+            boolean: pick(s.and_then(|s| s.boolean), d.boolean),
+            comment: pick(s.and_then(|s| s.comment), d.comment),
+            comment_doc: pick(s.and_then(|s| s.comment_doc), d.comment_doc),
+            constant: pick(s.and_then(|s| s.constant), d.constant),
+            variable: pick(s.and_then(|s| s.variable), d.variable),
+            variable_builtin: pick(s.and_then(|s| s.variable_builtin), d.variable_builtin),
+            parameter: pick(s.and_then(|s| s.parameter), d.parameter),
+            property: pick(s.and_then(|s| s.property), d.property),
+            operator: pick(s.and_then(|s| s.operator), d.operator),
+            punctuation: pick(s.and_then(|s| s.punctuation), d.punctuation),
+            bracket: pick(s.and_then(|s| s.bracket), d.bracket),
+            delimiter: pick(s.and_then(|s| s.delimiter), d.delimiter),
+            attribute: pick(s.and_then(|s| s.attribute), d.attribute),
+            namespace: pick(s.and_then(|s| s.namespace), d.namespace),
+            tag: pick(s.and_then(|s| s.tag), d.tag),
+            label: pick(s.and_then(|s| s.label), d.label),
+            error: pick(s.and_then(|s| s.error), d.error),
         };
-        theme.selection = or(self.selection, theme.derived_selection());
-        theme.cursorline = or(self.cursorline, theme.derived_cursorline());
-        theme.gutter = or(self.gutter, theme.dim);
-        theme.gutter_active = or(self.gutter_active, theme.text);
+
+        theme.selection = first(
+            [ed.and_then(|e| e.selection), old.selection],
+            theme.derived_selection(),
+        );
+        theme.current_line = first(
+            [ed.and_then(|e| e.current_line), old.cursorline],
+            theme.derived_current_line(),
+        );
+        theme.gutter = first([ed.and_then(|e| e.gutter), old.gutter], theme.faint);
+        theme.gutter_current = first(
+            [ed.and_then(|e| e.gutter_current), old.gutter_active],
+            theme.foreground,
+        );
+        theme.cursor = first([ed.and_then(|e| e.cursor), None], theme.accent);
+        theme.bracket_match = first([ed.and_then(|e| e.bracket_match), None], theme.accent);
+        theme.whitespace = first([ed.and_then(|e| e.whitespace), None], theme.faint);
+        theme.ruler = first([ed.and_then(|e| e.ruler), None], theme.faint);
         theme
     }
 }
@@ -741,6 +1015,41 @@ fn parse_colour(text: &str) -> Option<Color> {
 mod tests {
     use super::*;
 
+    /// Every role there is, so a test that means "all of them" says so once.
+    const ALL_ROLES: &[Role] = &[
+        Role::Keyword,
+        Role::KeywordControl,
+        Role::Function,
+        Role::FunctionBuiltin,
+        Role::Method,
+        Role::Macro,
+        Role::Type,
+        Role::TypeBuiltin,
+        Role::Constructor,
+        Role::String,
+        Role::StringEscape,
+        Role::StringSpecial,
+        Role::Character,
+        Role::Number,
+        Role::Boolean,
+        Role::Comment,
+        Role::CommentDoc,
+        Role::Constant,
+        Role::Variable,
+        Role::VariableBuiltin,
+        Role::Parameter,
+        Role::Property,
+        Role::Operator,
+        Role::Punctuation,
+        Role::Bracket,
+        Role::Delimiter,
+        Role::Attribute,
+        Role::Namespace,
+        Role::Tag,
+        Role::Label,
+        Role::Error,
+    ];
+
     #[test]
     fn every_shipped_theme_reads() {
         let themes = Themes::built_in();
@@ -755,14 +1064,151 @@ mod tests {
     }
 
     #[test]
+    fn every_shipped_theme_spells_out_every_kind_of_code() {
+        // The point of the derived colours is that a ten-colour theme still
+        // works. The point of shipping eighteen is that they are better than
+        // that — so none of them may be leaning on the derivation.
+        for (file, text) in BUILT_IN {
+            let parsed: FileTheme = serde_json::from_str(text).expect("reads");
+            let syntax = parsed.syntax.as_ref().unwrap_or_else(|| {
+                panic!("{file} says nothing about code");
+            });
+            let missing: Vec<&str> = [
+                ("keyword", syntax.keyword.is_none()),
+                ("keyword_control", syntax.keyword_control.is_none()),
+                ("function", syntax.function.is_none()),
+                ("function_builtin", syntax.function_builtin.is_none()),
+                ("method", syntax.method.is_none()),
+                ("macro", syntax.macro_.is_none()),
+                ("type", syntax.type_.is_none()),
+                ("type_builtin", syntax.type_builtin.is_none()),
+                ("constructor", syntax.constructor.is_none()),
+                ("string", syntax.string.is_none()),
+                ("string_escape", syntax.string_escape.is_none()),
+                ("string_special", syntax.string_special.is_none()),
+                ("character", syntax.character.is_none()),
+                ("number", syntax.number.is_none()),
+                ("boolean", syntax.boolean.is_none()),
+                ("comment", syntax.comment.is_none()),
+                ("comment_doc", syntax.comment_doc.is_none()),
+                ("constant", syntax.constant.is_none()),
+                ("variable", syntax.variable.is_none()),
+                ("variable_builtin", syntax.variable_builtin.is_none()),
+                ("parameter", syntax.parameter.is_none()),
+                ("property", syntax.property.is_none()),
+                ("operator", syntax.operator.is_none()),
+                ("punctuation", syntax.punctuation.is_none()),
+                ("bracket", syntax.bracket.is_none()),
+                ("delimiter", syntax.delimiter.is_none()),
+                ("attribute", syntax.attribute.is_none()),
+                ("namespace", syntax.namespace.is_none()),
+                ("tag", syntax.tag.is_none()),
+                ("label", syntax.label.is_none()),
+                ("error", syntax.error.is_none()),
+            ]
+            .into_iter()
+            .filter(|(_, missing)| *missing)
+            .map(|(name, _)| name)
+            .collect();
+            assert!(missing.is_empty(), "{file} says nothing about {missing:?}");
+        }
+    }
+
+    #[test]
+    fn every_shipped_theme_colours_code_against_its_own_background() {
+        // A role left at the fallback's colour in a theme with a background of
+        // its own is a role somebody forgot, and it shows up as one word in
+        // the wrong palette halfway down a file.
+        let themes = Themes::built_in();
+        for named in &themes.entries {
+            if !matches!(named.theme.background, Color::Rgb(..)) {
+                continue;
+            }
+            for role in ALL_ROLES {
+                let colour = named.theme.role(*role);
+                assert!(
+                    matches!(colour, Color::Rgb(..)),
+                    "{}: {role:?} is {colour:?}, not a colour of its own",
+                    named.name
+                );
+            }
+        }
+    }
+
+    #[test]
     fn a_theme_naming_no_code_colours_still_has_them() {
         let themes = Themes::built_in();
-        let tokyo = themes.by_name("tokyonight").expect("shipped");
-        // Not the fallback's, and not all the same: worked out from the
-        // twelve this theme does name.
-        assert_eq!(tokyo.syntax.string, tokyo.good);
-        assert_eq!(tokyo.syntax.comment, tokyo.dim);
-        assert_ne!(tokyo.syntax.keyword, tokyo.syntax.function);
+        let ten = r##"{
+            "name": "ten",
+            "ui": {
+                "background": "#101010", "foreground": "#eeeeee",
+                "muted": "#aaaaaa", "faint": "#666666",
+                "accent": "#7aa2f7", "on_accent": "#101010",
+                "success": "#9ece6a", "warning": "#e0af68",
+                "error": "#f7768e", "info": "#2ac3de"
+            }
+        }"##;
+        let mut themes = themes;
+        themes.add(ten, "ten.json");
+        assert!(themes.problems.is_empty(), "{:?}", themes.problems);
+        let theme = themes.by_name("ten").expect("added");
+        // Worked out from the ten, not left at the fallback's.
+        assert_eq!(theme.syntax.string, theme.success);
+        assert_eq!(theme.syntax.comment, theme.faint);
+        assert_ne!(theme.syntax.keyword, theme.syntax.function);
+        for role in ALL_ROLES {
+            assert!(matches!(theme.role(*role), Color::Rgb(..)), "{role:?}");
+        }
+    }
+
+    #[test]
+    fn a_theme_written_for_sshman_still_reads() {
+        // The twelve flat roles, `dir`/`link`/`exec` and all, plus the sixteen
+        // terminal colours. Nothing here is textfold's schema, and all of it
+        // has to land somewhere sensible.
+        let mut themes = Themes::built_in();
+        themes.add(
+            r##"{
+                "name": "fromsshman",
+                "accent": "#7aa2f7", "dim": "#565f89", "text": "#c0caf5",
+                "muted": "#a9b1d6", "good": "#9ece6a", "warn": "#e0af68",
+                "bad": "#f7768e", "dir": "#7dcfff", "link": "#bb9af7",
+                "exec": "#9ece6a", "info": "#2ac3de", "bg": "#1a1b26",
+                "on_accent": "#1a1b26",
+                "ansi": ["black", "red", "green", "yellow", "blue", "magenta",
+                         "cyan", "gray", "darkgray", "lightred", "lightgreen",
+                         "lightyellow", "lightblue", "lightmagenta",
+                         "lightcyan", "white"]
+            }"##,
+            "fromsshman.json",
+        );
+        assert!(themes.problems.is_empty(), "{:?}", themes.problems);
+        let theme = themes.by_name("fromsshman").expect("added");
+        assert_eq!(theme.background, Color::Rgb(0x1a, 0x1b, 0x26));
+        assert_eq!(theme.foreground, Color::Rgb(0xc0, 0xca, 0xf5));
+        assert_eq!(theme.faint, Color::Rgb(0x56, 0x5f, 0x89));
+        assert_eq!(theme.success, Color::Rgb(0x9e, 0xce, 0x6a));
+        assert_eq!(theme.error, Color::Rgb(0xf7, 0x76, 0x8e));
+        // And it is coloured throughout, from those alone.
+        for role in ALL_ROLES {
+            assert!(matches!(theme.role(*role), Color::Rgb(..)), "{role:?}");
+        }
+    }
+
+    #[test]
+    fn the_new_names_win_over_the_old_ones() {
+        let mut themes = Themes::built_in();
+        themes.add(
+            r##"{
+                "name": "both",
+                "text": "#111111",
+                "ui": { "foreground": "#222222" }
+            }"##,
+            "both.json",
+        );
+        assert!(themes.problems.is_empty(), "{:?}", themes.problems);
+        let theme = themes.by_name("both").expect("added");
+        assert_eq!(theme.foreground, Color::Rgb(0x22, 0x22, 0x22));
     }
 
     #[test]
@@ -770,10 +1216,60 @@ mod tests {
         let themes = Themes::built_in();
         let tokyo = themes.by_name("tokyonight").expect("shipped");
         assert!(matches!(tokyo.selection, Color::Rgb(..)));
-        assert_ne!(tokyo.selection, tokyo.bg);
+        assert_ne!(tokyo.selection, tokyo.background);
         // And one without leaves the terminal's own alone.
         let terminal = themes.by_name("terminal").expect("shipped");
-        assert_eq!(terminal.cursorline, Color::Reset);
+        assert_eq!(terminal.current_line, Color::Reset);
+    }
+
+    #[test]
+    fn a_theme_can_be_a_change_to_another_one() {
+        let mut themes = Themes::built_in();
+        themes.add(
+            r##"{
+                "name": "mine",
+                "base": "tokyonight",
+                "syntax": { "comment": "#4a4a5e" }
+            }"##,
+            "mine.json",
+        );
+        assert!(themes.problems.is_empty(), "{:?}", themes.problems);
+        let mine = themes.by_name("mine").expect("added");
+        let tokyo = themes.by_name("tokyonight").expect("shipped");
+        assert_eq!(mine.syntax.comment, Color::Rgb(0x4a, 0x4a, 0x5e));
+        // Everything it did not mention is the theme it came from.
+        assert_eq!(mine.syntax.keyword, tokyo.syntax.keyword);
+        assert_eq!(mine.background, tokyo.background);
+    }
+
+    #[test]
+    fn a_capture_name_falls_back_along_its_dots() {
+        let role = |name: &str| {
+            let mut candidate = name;
+            loop {
+                if let Some((_, role)) = CAPTURES
+                    .iter()
+                    .filter(|(key, _)| *key == candidate)
+                    .max_by_key(|(key, _)| key.len())
+                {
+                    return Some(*role);
+                }
+                match candidate.rfind('.') {
+                    Some(at) => candidate = &candidate[..at],
+                    None => return None,
+                }
+            }
+        };
+        assert_eq!(role("keyword"), Some(Role::Keyword));
+        assert_eq!(role("keyword.control.repeat"), Some(Role::KeywordControl));
+        assert_eq!(role("keyword.operator"), Some(Role::Keyword));
+        assert_eq!(role("function.method.call"), Some(Role::Method));
+        assert_eq!(role("punctuation.bracket"), Some(Role::Bracket));
+        assert_eq!(role("punctuation.delimiter"), Some(Role::Delimiter));
+        assert_eq!(role("type.builtin"), Some(Role::TypeBuiltin));
+        assert_eq!(role("variable.parameter.builtin"), Some(Role::Parameter));
+        assert_eq!(role("comment.documentation"), Some(Role::CommentDoc));
+        assert_eq!(role("nothing.like.this"), None);
     }
 
     #[test]

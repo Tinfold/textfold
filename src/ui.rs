@@ -27,6 +27,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
     app.screen = area;
     app.tab_hits.clear();
+    app.tab_nudges.clear();
     app.status_hits.clear();
     if area.width < 4 || area.height < 3 {
         return;
@@ -34,10 +35,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let theme = app.theme;
     let paint = app.config.background();
-    let ground = if paint { theme.bg } else { Color::Reset };
+    let ground = if paint { theme.background } else { Color::Reset };
     frame
         .buffer_mut()
-        .set_style(area, Style::new().bg(ground).fg(theme.text));
+        .set_style(area, Style::new().bg(ground).fg(theme.foreground));
 
     let tabs = Rect::new(area.x, area.y, area.width, 1);
     let status = Rect::new(area.x, area.y + area.height - 1, area.width, 1);
@@ -286,8 +287,8 @@ fn draw_row(
         .unwrap_or_else(|| text::line_end(&doc.rope, it.line));
 
     let on_cursor_line = it.cursor_lines.contains(&it.line);
-    let line_bg = if on_cursor_line && it.focused && theme.cursorline != theme.bg {
-        theme.cursorline
+    let line_bg = if on_cursor_line && it.focused && theme.current_line != theme.background {
+        theme.current_line
     } else {
         it.ground
     };
@@ -304,7 +305,7 @@ fn draw_row(
             && x < (area.x + area.width) as usize
             && let Some(cell) = buf.cell_mut(Position::new(x as u16, it.screen))
         {
-            cell.set_style(Style::new().bg(line_bg).fg(theme.dim));
+            cell.set_style(Style::new().bg(line_bg).fg(theme.ruler));
             cell.set_char('\u{2502}');
         }
     }
@@ -317,24 +318,30 @@ fn draw_row(
     // The left edge, for a pane that is not folding lines.
     let skip = if view.wrap { 0 } else { view.left };
 
+    // The block an extra cursor is drawn as. The terminal has one cursor of
+    // its own and multi-cursor editing needs all of them, so every cursor but
+    // the primary is painted rather than placed.
+    let block = Style::new()
+        .bg(theme.cursor)
+        .fg(theme.on_accent)
+        .add_modifier(Modifier::BOLD);
+
     while at <= end {
         let is_cursor = it.cursors.contains(&at);
+        let extra = is_cursor && it.focused && at != view.sel.primary().head;
         if is_cursor && column >= skip {
             let x = area.x as usize + column - skip;
             if x < (area.x + area.width) as usize {
                 if at == view.sel.primary().head {
                     cursor_at = Some(Position::new(x as u16, it.screen));
-                } else if it.focused {
-                    // The other cursors have no terminal cursor of their own,
-                    // so they are drawn: a block where the character is.
-                    if let Some(cell) = buf.cell_mut(Position::new(x as u16, it.screen)) {
-                        cell.set_style(
-                            Style::new()
-                                .bg(theme.accent)
-                                .fg(theme.on_accent)
-                                .add_modifier(Modifier::BOLD),
-                        );
-                    }
+                } else if extra && let Some(cell) = buf.cell_mut(Position::new(x as u16, it.screen))
+                {
+                    // A cursor sitting past the last character of the line has
+                    // no character coming to draw it, so it is painted here.
+                    // One with a character under it is painted below, with the
+                    // character — painting it here as well would only be
+                    // overwritten by it.
+                    cell.set_style(block);
                 }
             }
         }
@@ -368,7 +375,7 @@ fn draw_row(
         if Some(at) == it.partner || (it.partner.is_some() && at == view.sel.primary().head) {
             style = style
                 .add_modifier(Modifier::BOLD)
-                .fg(theme.accent);
+                .fg(theme.bracket_match);
         }
 
         // What to actually draw: a tab is spaces, and whitespace shows itself
@@ -395,7 +402,12 @@ fn draw_row(
             };
             let mut style = style;
             if faded {
-                style = style.fg(theme.dim);
+                style = style.fg(theme.whitespace);
+            }
+            // An extra cursor is a block *over* the character it is on, so it
+            // goes on last: anything before it here would be painted over.
+            if extra && step == 0 {
+                style = block;
             }
             cell.set_style(style);
             cell.set_char(if step == 0 { shown } else { filler });
@@ -409,7 +421,7 @@ fn draw_row(
                 let x = area.x + area.width - 1;
                 if let Some(cell) = buf.cell_mut(Position::new(x, it.screen)) {
                     cell.set_char('\u{203a}')
-                        .set_style(Style::new().bg(line_bg).fg(theme.dim));
+                        .set_style(Style::new().bg(line_bg).fg(theme.faint));
                 }
             }
             break;
@@ -434,16 +446,16 @@ fn colour_of(spans: &[(Range, crate::theme::Role)], at: usize, theme: &Theme) ->
         }
     }) {
         Ok(at) => theme.role(spans[at].1),
-        Err(_) => theme.text,
+        Err(_) => theme.foreground,
     }
 }
 
 fn severity_colour(severity: Severity, theme: &Theme) -> Color {
     match severity {
-        Severity::Error => theme.bad,
-        Severity::Warning => theme.warn,
+        Severity::Error => theme.error,
+        Severity::Warning => theme.warning,
         Severity::Info => theme.info,
-        Severity::Hint => theme.dim,
+        Severity::Hint => theme.faint,
     }
 }
 
@@ -500,12 +512,12 @@ fn draw_gutter(buf: &mut Buffer, app: &App, view: &View, doc: &Document, it: Gut
     };
 
     let style = Style::new()
-        .bg(if here && theme.cursorline != theme.bg {
-            theme.cursorline
+        .bg(if here && theme.current_line != theme.background {
+            theme.current_line
         } else {
             Color::Reset
         })
-        .fg(if here { theme.gutter_active } else { theme.gutter });
+        .fg(if here { theme.gutter_current } else { theme.gutter });
 
     // ` 42 ` and then the mark, hard against the text.
     let text = if width >= 2 {
@@ -544,7 +556,7 @@ fn draw_scrollbar(buf: &mut Buffer, view: &View, doc: &Document, theme: &Theme) 
         let inside = row >= top && row < top + size;
         if let Some(cell) = buf.cell_mut(Position::new(x, frame.y + row as u16)) {
             cell.set_char(if inside { '\u{2588}' } else { '\u{2502}' })
-                .set_style(Style::new().fg(if inside { theme.dim } else { theme.faint() }));
+                .set_style(Style::new().fg(if inside { theme.faint } else { theme.chrome() }));
         }
     }
 }
@@ -559,7 +571,7 @@ fn mark_focus(buf: &mut Buffer, view: &View, theme: &Theme, focused: bool) {
     for row in 0..frame.height {
         if let Some(cell) = buf.cell_mut(Position::new(frame.x, frame.y + row)) {
             cell.set_char('\u{2503}').set_style(
-                Style::new().fg(if focused { theme.accent } else { theme.faint() }),
+                Style::new().fg(if focused { theme.accent } else { theme.chrome() }),
             );
         }
     }
@@ -569,85 +581,165 @@ fn mark_focus(buf: &mut Buffer, view: &View, theme: &Theme, focused: bool) {
 // The row at the top and the row at the bottom.
 // ---------------------------------------------------------------------------
 
+/// The row of tabs at the top.
+///
+/// Twenty files open is more than fits across a terminal, so the row is a
+/// window onto a strip that is as wide as it needs to be: the whole strip is
+/// drawn to one side and the part you can see is copied across. Switching file
+/// scrolls it to wherever that file is, the wheel scrolls it by hand, and the
+/// ‹ › at the ends say there is more and take you there.
 fn draw_tabs(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
     let theme = app.theme;
-    let buf = frame.buffer_mut();
-    buf.set_style(area, Style::new().bg(theme.faint()).fg(theme.muted));
-
-    let here = app.view().doc;
-    let mut x = area.x;
-    let mut hits = Vec::new();
-
-    for doc in app.docs() {
-        if x >= area.x + area.width {
-            break;
-        }
-        let current = doc.id == here;
-        // ` name • ` — the dot is the close cross, and the mark that says
-        // there are unsaved changes, because they are never both wanted at
-        // once and one column is one column.
-        let mark = if doc.is_modified() { '\u{25cf}' } else { '\u{00d7}' };
-        let label = format!(" {} ", doc.name);
-        let width = (text::str_width(&label) + 2) as u16;
-        let width = width.min(area.x + area.width - x);
-        if width < 4 {
-            break;
-        }
-
-        let style = if current {
-            Style::new()
-                .bg(theme.bg)
-                .fg(theme.text)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::new().bg(theme.faint()).fg(theme.muted)
-        };
-        buf.set_stringn(x, area.y, &label, (width - 2) as usize, style);
-        let cross = x + width - 2;
-        buf.set_stringn(
-            cross,
-            area.y,
-            format!("{mark} "),
-            2,
-            style.fg(if doc.is_modified() {
-                theme.warn
-            } else {
-                theme.dim
-            }),
-        );
-
-        hits.push((Rect::new(x, area.y, width - 2, 1), doc.id, false));
-        hits.push((Rect::new(cross, area.y, 1, 1), doc.id, true));
-        x += width;
-    }
+    let chrome = theme.chrome();
+    let plain = Style::new().bg(chrome).fg(theme.muted);
+    frame.buffer_mut().set_style(area, plain);
 
     // What is going on at the far right: the language servers, so that "why
-    // are there no completions" has an answer on the screen.
-    let busy: Vec<String> = app
+    // are there no completions" has an answer on the screen. It takes its room
+    // off the end of the strip rather than being drawn over it, or a tab and a
+    // server would fight for the same columns.
+    let busy = app
         .lsp
         .all()
         .iter()
-        .filter_map(|server| {
+        .find_map(|server| {
             server
                 .busy_with()
-                .map(|what| format!("{} {what}", server.name))
-        })
-        .collect();
-    if let Some(said) = busy.first() {
-        let said = format!(" {said} ");
-        let width = text::str_width(&said) as u16;
-        if area.width > width + 4 {
-            buf.set_stringn(
-                area.x + area.width - width,
-                area.y,
-                &said,
-                width as usize,
-                Style::new().bg(theme.faint()).fg(theme.info),
-            );
+                .map(|what| format!(" {} {what} ", server.name))
+        });
+    let busy = busy.filter(|said| area.width > text::str_width(said) as u16 + 12);
+    let aside = busy.as_ref().map_or(0, |said| text::str_width(said) as u16);
+    let window = area.width - aside;
+    if window < 4 {
+        app.tab_hits.clear();
+        app.tab_nudges.clear();
+        return;
+    }
+
+    // Every tab, at its place along a strip as wide as all of them together.
+    // ` name • ` — the dot is the close cross, and the mark that says there are
+    // unsaved changes, because they are never both wanted at once and one
+    // column is one column.
+    let here = app.view().doc;
+    let mut tabs = Vec::new();
+    let mut total = 0u16;
+    for doc in app.docs() {
+        let label = format!(" {} ", doc.name);
+        let width = (text::str_width(&label) + 2) as u16;
+        tabs.push((doc.id, label, doc.is_modified(), total, width));
+        total = total.saturating_add(width);
+    }
+
+    // Where along the strip to look. Whatever it was, brought back inside what
+    // there is to see, and then moved far enough that the file you are looking
+    // at is on the screen — switching to a file has to show you its tab.
+    let furthest = total.saturating_sub(window);
+    let mut scroll = app.tab_scroll.min(furthest);
+    if let Some((_, _, _, at, width)) = tabs.iter().find(|(id, ..)| *id == here) {
+        if *at < scroll {
+            scroll = *at;
+        } else if at + width > scroll + window {
+            scroll = (at + width) - window;
         }
     }
+    let scroll = scroll.min(furthest);
+    app.tab_scroll = scroll;
+
+    // Drawn whole, then the part that fits is copied across. Clipping each tab
+    // as it is drawn would mean every string, every style and every hit box
+    // knowing about the edges; this way only the copy does.
+    let mut strip = Buffer::empty(Rect::new(0, 0, total.max(1), 1));
+    strip.set_style(strip.area, plain);
+    for (id, label, modified, at, width) in &tabs {
+        let style = if *id == here {
+            Style::new()
+                .bg(theme.background)
+                .fg(theme.foreground)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            plain
+        };
+        strip.set_stringn(*at, 0, label, (width - 2) as usize, style);
+        let mark = if *modified { '\u{25cf}' } else { '\u{00d7}' };
+        strip.set_stringn(
+            at + width - 2,
+            0,
+            format!("{mark} "),
+            2,
+            style.fg(if *modified { theme.warning } else { theme.faint }),
+        );
+    }
+
+    let buf = frame.buffer_mut();
+    for x in 0..window {
+        let Some(from) = strip.cell(Position::new(scroll + x, 0)) else {
+            break;
+        };
+        let from = from.clone();
+        if let Some(cell) = buf.cell_mut(Position::new(area.x + x, area.y)) {
+            *cell = from;
+        }
+    }
+    if let Some(said) = &busy {
+        buf.set_stringn(
+            area.x + window,
+            area.y,
+            said,
+            aside as usize,
+            plain.fg(theme.info),
+        );
+    }
+
+    // What is under each spot, in the screen's own columns rather than the
+    // strip's, so a click is answered by what is actually on the screen.
+    let seen = |at: u16, width: u16| -> Option<Rect> {
+        let from = at.max(scroll);
+        let to = (at + width).min(scroll + window);
+        (to > from).then(|| Rect::new(area.x + from - scroll, area.y, to - from, 1))
+    };
+    app.tab_hits = tabs
+        .iter()
+        .flat_map(|(id, _, _, at, width)| {
+            [
+                seen(*at, width - 2).map(|rect| (rect, *id, false)),
+                seen(at + width - 2, 1).map(|rect| (rect, *id, true)),
+            ]
+        })
+        .flatten()
+        .collect();
+
+    // And the ends, where there is more row than there is room. Each takes one
+    // column back off the tab under it, and answers a click first.
+    app.tab_nudges.clear();
+    let starts = || tabs.iter().map(|(_, _, _, at, _)| *at);
+    if scroll > 0 {
+        let back = starts().filter(|at| *at < scroll).next_back().unwrap_or(0);
+        arrow(buf, area.x, area.y, '\u{2039}', theme);
+        app.tab_nudges
+            .push((Rect::new(area.x, area.y, 1, 1), back));
+    }
+    if scroll < furthest {
+        let on = starts()
+            .find(|at| *at > scroll)
+            .unwrap_or(furthest)
+            .min(furthest);
+        let x = area.x + window - 1;
+        arrow(buf, x, area.y, '\u{203a}', theme);
+        app.tab_nudges.push((Rect::new(x, area.y, 1, 1), on));
+    }
     let _ = ground;
-    app.tab_hits = hits;
+}
+
+/// One of the ‹ › at the ends of the tab row: there is more this way.
+fn arrow(buf: &mut Buffer, x: u16, y: u16, mark: char, theme: Theme) {
+    if let Some(cell) = buf.cell_mut(Position::new(x, y)) {
+        cell.set_char(mark).set_style(
+            Style::new()
+                .bg(theme.chrome())
+                .fg(theme.accent)
+                .add_modifier(Modifier::BOLD),
+        );
+    }
 }
 
 fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
@@ -684,16 +776,16 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
         .map(|d| (d.severity, d.message.lines().next().unwrap_or("").to_string()));
 
     let buf = frame.buffer_mut();
-    buf.set_style(area, Style::new().bg(theme.faint()).fg(theme.muted));
+    buf.set_style(area, Style::new().bg(theme.chrome()).fg(theme.muted));
 
     // Left: what is being said, or what is wrong under the cursor.
     let (left, left_style) = if app.status.showing() {
         (
             app.status.text.clone(),
             Style::new().fg(match app.status.tone {
-                Tone::Plain => theme.text,
-                Tone::Good => theme.good,
-                Tone::Bad => theme.bad,
+                Tone::Plain => theme.foreground,
+                Tone::Good => theme.success,
+                Tone::Bad => theme.error,
             }),
         )
     } else if let Some((severity, message)) = under {
@@ -725,7 +817,7 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
         }
         chips.push((
             said,
-            if errors > 0 { theme.bad } else { theme.warn },
+            if errors > 0 { theme.error } else { theme.warning },
             Cmd::Diagnostics,
         ));
     }
@@ -739,10 +831,10 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
         chips.push((format!("{selected} selected"), theme.info, Cmd::SelectLine));
     }
     if doc.read_only {
-        chips.push(("read-only".into(), theme.warn, Cmd::About));
+        chips.push(("read-only".into(), theme.warning, Cmd::About));
     }
     if let Some(why) = doc.colours_off {
-        chips.push((format!("no colours: {why}"), theme.dim, Cmd::About));
+        chips.push((format!("no colours: {why}"), theme.faint, Cmd::About));
     }
     chips.push((language, theme.muted, Cmd::SetLanguage));
     chips.push((format!("{line}:{column}"), theme.muted, Cmd::GotoLine));
@@ -766,7 +858,7 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
             area.y,
             &shown,
             width as usize,
-            Style::new().bg(theme.faint()).fg(*colour),
+            Style::new().bg(theme.chrome()).fg(*colour),
         );
         hits.push((Rect::new(right, area.y, width, 1), *cmd));
     }
@@ -777,7 +869,7 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
         area.y,
         text::truncate(&left, room),
         room,
-        left_style.bg(theme.faint()),
+        left_style.bg(theme.chrome()),
     );
     let _ = ground;
     app.status_hits = hits;
@@ -858,10 +950,10 @@ fn beside(screen: Rect, at: Position, width: u16, height: u16) -> Rect {
 }
 
 fn box_style(theme: &Theme, ground: Color) -> Style {
-    Style::new().bg(if theme.bg == Color::Reset {
+    Style::new().bg(if theme.background == Color::Reset {
         ground
     } else {
-        theme.bg
+        theme.background
     })
 }
 
@@ -915,15 +1007,15 @@ fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color
 
     frame.render_widget(Clear, area);
     let buf = frame.buffer_mut();
-    buf.set_style(area, box_style(&theme, ground).fg(theme.text));
+    buf.set_style(area, box_style(&theme, ground).fg(theme.foreground));
 
     for (row, (label, detail, kind)) in items.iter().enumerate() {
         let y = area.y + row as u16;
         let chosen = top + row == cursor;
         let style = if chosen {
-            Style::new().bg(theme.selection).fg(theme.text)
+            Style::new().bg(theme.selection).fg(theme.foreground)
         } else {
-            box_style(&theme, ground).fg(theme.text)
+            box_style(&theme, ground).fg(theme.foreground)
         };
         buf.set_style(Rect::new(area.x, y, area.width, 1), style);
 
@@ -936,7 +1028,7 @@ fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color
             y,
             format!(" {kind:<w$}", w = kind_width.saturating_sub(1)),
             kind_width,
-            style.fg(theme.dim),
+            style.fg(theme.faint),
         );
         let room = area.width as usize - kind_width - 1;
         let label_width = text::str_width(label).min(room);
@@ -945,7 +1037,7 @@ fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color
             y,
             text::truncate(label, room),
             room,
-            style.fg(if chosen { theme.accent } else { theme.text }),
+            style.fg(if chosen { theme.accent } else { theme.foreground }),
         );
         // The type, right up against the right edge, dimmed — it is there to
         // be glanced at, not read.
@@ -959,7 +1051,7 @@ fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color
                     y,
                     &shown,
                     width as usize,
-                    style.fg(theme.dim),
+                    style.fg(theme.faint),
                 );
             }
         }
@@ -1013,7 +1105,7 @@ fn draw_hover(frame: &mut Frame, app: &mut App, at: Position, ground: Color) {
     frame.render_widget(Clear, area);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme.dim))
+        .border_style(Style::new().fg(theme.faint))
         .style(box_style(&theme, ground));
     let inside = block.inner(area);
     frame.render_widget(block, area);
@@ -1033,7 +1125,7 @@ fn draw_hover(frame: &mut Frame, app: &mut App, at: Position, ground: Color) {
                 y,
                 crate::app::RULE.repeat(inside.width as usize),
                 inside.width as usize,
-                box_style(&theme, ground).fg(theme.faint()),
+                box_style(&theme, ground).fg(theme.chrome()),
             );
             continue;
         }
@@ -1043,7 +1135,7 @@ fn draw_hover(frame: &mut Frame, app: &mut App, at: Position, ground: Color) {
                 y,
                 text::truncate(&line.text, inside.width as usize),
                 inside.width as usize,
-                box_style(&theme, ground).fg(theme.text),
+                box_style(&theme, ground).fg(theme.foreground),
             );
             continue;
         }
@@ -1056,7 +1148,7 @@ fn draw_hover(frame: &mut Frame, app: &mut App, at: Position, ground: Color) {
         for (range, role) in line.spans.iter().chain(std::iter::once(&TAIL)) {
             let plain = line.text.get(at..range.start.min(line.text.len()));
             let coloured = line.text.get(range.clone());
-            for (piece, colour) in [(plain, theme.text), (coloured, theme.role(*role))] {
+            for (piece, colour) in [(plain, theme.foreground), (coloured, theme.role(*role))] {
                 let Some(piece) = piece.filter(|p| !p.is_empty()) else {
                     continue;
                 };
@@ -1162,7 +1254,7 @@ fn draw_picker(frame: &mut Frame, app: &mut App, ground: Color) -> Option<Positi
             area.y,
             &count,
             count.len(),
-            Style::new().bg(theme.bg).fg(theme.dim),
+            Style::new().bg(theme.background).fg(theme.faint),
         );
     }
     if !hint.is_empty() && area.width as usize > hint.len() + 6 {
@@ -1171,7 +1263,7 @@ fn draw_picker(frame: &mut Frame, app: &mut App, ground: Color) -> Option<Positi
             area.y + area.height - 1,
             format!(" {hint} "),
             hint.len() + 2,
-            Style::new().bg(theme.bg).fg(theme.dim),
+            Style::new().bg(theme.background).fg(theme.faint),
         );
     }
 
@@ -1183,11 +1275,11 @@ fn draw_picker(frame: &mut Frame, app: &mut App, ground: Color) -> Option<Positi
         query_row,
         &picker.query,
         inside.width as usize - 2,
-        Style::new().fg(theme.text),
+        Style::new().fg(theme.foreground),
     );
     let rule = inside.y + 1;
     for x in inside.x..inside.x + inside.width {
-        buf.set_string(x, rule, "\u{2500}", Style::new().fg(theme.faint()));
+        buf.set_string(x, rule, "\u{2500}", Style::new().fg(theme.chrome()));
     }
 
     let list = Rect::new(inside.x, inside.y + 2, inside.width, inside.height - 2);
@@ -1222,7 +1314,7 @@ fn draw_picker(frame: &mut Frame, app: &mut App, ground: Color) -> Option<Positi
         } else {
             "nothing matches"
         };
-        buf.set_string(list.x + 1, list.y, said, Style::new().fg(theme.dim));
+        buf.set_string(list.x + 1, list.y, said, Style::new().fg(theme.faint));
     }
 
     for (
@@ -1265,7 +1357,7 @@ fn draw_picker(frame: &mut Frame, app: &mut App, ground: Color) -> Option<Positi
             let width = text::str_width(&shown) as u16;
             if right > x + width + 8 {
                 right -= width;
-                buf.set_stringn(right, y, &shown, width as usize, style.fg(theme.warn));
+                buf.set_stringn(right, y, &shown, width as usize, style.fg(theme.warning));
             }
         }
         if let Some(detail) = detail {
@@ -1274,7 +1366,7 @@ fn draw_picker(frame: &mut Frame, app: &mut App, ground: Color) -> Option<Positi
                 let shown = text::truncate(detail, room);
                 let width = text::str_width(&shown) as u16;
                 right -= width + 1;
-                buf.set_stringn(right, y, &shown, width as usize, style.fg(theme.dim));
+                buf.set_stringn(right, y, &shown, width as usize, style.fg(theme.faint));
             }
         }
 
@@ -1282,7 +1374,7 @@ fn draw_picker(frame: &mut Frame, app: &mut App, ground: Color) -> Option<Positi
         // row is on the list, shown rather than left to be guessed at.
         let room = right.saturating_sub(x) as usize;
         let shown = text::truncate(label, room);
-        let base = style.fg(theme.text);
+        let base = style.fg(theme.foreground);
         buf.set_stringn(x, y, &shown, room, base);
         for &position in matched {
             let column = x as usize + position as usize;
@@ -1319,7 +1411,7 @@ fn draw_prompt(frame: &mut Frame, app: &mut App) -> Option<Position> {
     // drew would leave its words showing through underneath.
     frame.render_widget(Clear, area);
     let buf = frame.buffer_mut();
-    buf.set_style(area, Style::new().bg(theme.faint()).fg(theme.text));
+    buf.set_style(area, Style::new().bg(theme.chrome()).fg(theme.foreground));
     for x in area.x..area.x + area.width {
         if let Some(cell) = buf.cell_mut(Position::new(x, area.y)) {
             cell.set_char(' ');
@@ -1341,7 +1433,7 @@ fn draw_prompt(frame: &mut Frame, app: &mut App) -> Option<Position> {
         area.y,
         &prompt.input,
         room,
-        Style::new().bg(theme.faint()).fg(theme.text),
+        Style::new().bg(theme.chrome()).fg(theme.foreground),
     );
 
     // For a search, how many there are — the thing you actually want to know
@@ -1365,8 +1457,8 @@ fn draw_prompt(frame: &mut Frame, app: &mut App) -> Option<Position> {
                 area.y,
                 &said,
                 width as usize,
-                Style::new().bg(theme.faint()).fg(if count == 0 {
-                    theme.bad
+                Style::new().bg(theme.chrome()).fg(if count == 0 {
+                    theme.error
                 } else {
                     theme.muted
                 }),
@@ -1407,7 +1499,7 @@ fn draw_confirm(frame: &mut Frame, app: &mut App, ground: Color) {
     frame.render_widget(Clear, area);
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme.warn))
+        .border_style(Style::new().fg(theme.warning))
         .style(box_style(&theme, ground));
     let inside = block.inner(area);
     frame.render_widget(block, area);
@@ -1416,7 +1508,7 @@ fn draw_confirm(frame: &mut Frame, app: &mut App, ground: Color) {
     for (row, line) in lines.iter().enumerate() {
         let style = match row {
             0 => box_style(&theme, ground)
-                .fg(theme.text)
+                .fg(theme.foreground)
                 .add_modifier(Modifier::BOLD),
             _ => box_style(&theme, ground).fg(theme.muted),
         };
@@ -1495,7 +1587,7 @@ fn draw_help(frame: &mut Frame, app: &mut App, ground: Color) {
                     y,
                     text::truncate(key, key_width),
                     key_width,
-                    box_style(&theme, ground).fg(theme.warn),
+                    box_style(&theme, ground).fg(theme.warning),
                 );
                 buf.set_stringn(
                     x + 1 + key_width as u16,
@@ -1515,7 +1607,7 @@ fn draw_help(frame: &mut Frame, app: &mut App, ground: Color) {
         inside.y + inside.height - 1,
         feet,
         inside.width as usize,
-        box_style(&theme, ground).fg(theme.dim),
+        box_style(&theme, ground).fg(theme.faint),
     );
 }
 
@@ -1577,9 +1669,225 @@ fn help_lines(app: &App) -> Vec<HelpLine> {
         ("Right click", "what can be done here"),
         ("Wheel", "scroll the pane under the pointer"),
         ("Click a tab", "switch to it; the × closes it"),
+        ("Wheel over the tabs", "walk along them when there are more than fit"),
+        ("Click a ‹ or ›", "the next tab that way"),
         ("Click the status bar", "the language, the position and the problems are buttons"),
     ] {
         lines.push(HelpLine::Item(what.into(), does.into()));
     }
     lines
+}
+
+#[cfg(test)]
+mod tests {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
+
+    use super::*;
+    use crate::app::App;
+    use crate::cmd::Cmd;
+    use crate::config::Config;
+    use crate::text::{Range, Selections};
+    use ratatui::crossterm::event::{
+        Event as TermEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    };
+
+    /// An editor with one document in it, drawn onto a buffer we can read
+    /// back. The point of these tests is what actually reaches the screen:
+    /// everything below here is a fact about pixels, not about state.
+    fn screen(text: &str, then: impl FnOnce(&mut App)) -> (Buffer, App) {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(Config::default(), tx);
+        app.here_mut().rope = ropey::Rope::from_str(text);
+        then(&mut app);
+        let mut terminal =
+            Terminal::new(TestBackend::new(60, 12)).expect("a terminal to draw on");
+        terminal
+            .draw(|frame| super::draw(frame, &mut app))
+            .expect("drawn");
+        (terminal.backend().buffer().clone(), app)
+    }
+
+    /// Every cell drawn in the given background, as (x, y).
+    fn cells_on(buffer: &Buffer, bg: Color) -> Vec<(u16, u16)> {
+        let area = buffer.area;
+        let mut found = Vec::new();
+        for y in area.y..area.y + area.height {
+            for x in area.x..area.x + area.width {
+                if buffer[(x, y)].style().bg == Some(bg) {
+                    found.push((x, y));
+                }
+            }
+        }
+        found
+    }
+
+    /// An editor with `count` scratch buffers open, drawn narrow enough that
+    /// they cannot all be on the screen at once.
+    fn many_tabs(count: usize, width: u16) -> App {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(Config::default(), tx);
+        for _ in 1..count {
+            app.run(Cmd::New);
+        }
+        app.screen = Rect::new(0, 0, width, 12);
+        app
+    }
+
+    /// Put it on a screen `width` columns across, and hand back what is on the
+    /// top row. The drawing is what settles where the tabs went, so a test
+    /// about tabs has to draw.
+    fn tab_row(app: &mut App, width: u16) -> String {
+        let mut terminal =
+            Terminal::new(TestBackend::new(width, 12)).expect("a terminal to draw on");
+        terminal
+            .draw(|frame| super::draw(frame, app))
+            .expect("drawn");
+        let buffer = terminal.backend().buffer();
+        (0..width).map(|x| buffer[(x, 0)].symbol()).collect()
+    }
+
+    /// One press of the left button, the way it arrives from the terminal.
+    fn click(app: &mut App, column: u16, row: u16) {
+        app.handle(crate::app::Event::Term(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })));
+    }
+
+    #[test]
+    fn the_tab_of_the_file_you_are_looking_at_is_always_on_the_screen() {
+        // Twelve files across forty columns: most of them are off the side, and
+        // the one being edited is the twelfth, which is not one of the ones
+        // that happen to fit.
+        let mut app = many_tabs(12, 40);
+        let here = app.here().name.clone();
+        let row = tab_row(&mut app, 40);
+        assert!(row.contains(&here), "{here} is not in {row:?}");
+        assert!(app.tab_scroll > 0, "the row scrolled to reach it");
+
+        // And walking back to the first one scrolls the other way.
+        for _ in 0..11 {
+            app.run(Cmd::PrevBuffer);
+        }
+        let here = app.here().name.clone();
+        let row = tab_row(&mut app, 40);
+        assert_eq!(app.tab_scroll, 0);
+        assert!(row.contains(&here), "{here} is not in {row:?}");
+    }
+
+    #[test]
+    fn a_row_of_tabs_too_wide_to_fit_says_which_way_the_rest_are() {
+        let mut app = many_tabs(12, 40);
+        // Somewhere in the middle, so there is more of the row both ways.
+        for _ in 0..5 {
+            app.run(Cmd::PrevBuffer);
+        }
+        let row = tab_row(&mut app, 40);
+        assert!(row.starts_with('\u{2039}'), "{row:?}");
+        assert!(row.ends_with('\u{203a}'), "{row:?}");
+        assert_eq!(app.tab_nudges.len(), 2, "one arrow at each end");
+
+        // Clicking the left one moves back by a whole tab, not by a column.
+        let was = app.tab_scroll;
+        click(&mut app, 0, 0);
+        assert!(app.tab_scroll < was, "{} is not before {was}", app.tab_scroll);
+        // And it did not switch file, which is what the tab under it would do.
+        assert_eq!(app.here().name, app.docs()[6].name);
+    }
+
+    #[test]
+    fn tabs_that_all_fit_do_not_scroll_and_have_no_arrows() {
+        let mut app = many_tabs(3, 100);
+        let row = tab_row(&mut app, 100);
+        assert_eq!(app.tab_scroll, 0);
+        assert!(app.tab_nudges.is_empty());
+        assert!(
+            !row.contains('\u{2039}') && !row.contains('\u{203a}'),
+            "{row:?}"
+        );
+    }
+
+    #[test]
+    fn a_click_lands_on_the_tab_that_is_drawn_there() {
+        // The hit boxes are in the screen's columns and the tabs are drawn from
+        // a strip that has been slid sideways, so the two have to agree: a
+        // click must switch to the file whose name is under the pointer.
+        let mut app = many_tabs(12, 40);
+        let row: Vec<char> = tab_row(&mut app, 40).chars().collect();
+        // A tab that is on the screen whole, found by its name rather than by
+        // counting columns — where it lands is the thing under test.
+        let wanted = format!(" {} ", app.docs()[10].name);
+        let at = row
+            .windows(wanted.chars().count())
+            .position(|w| w.iter().collect::<String>() == wanted)
+            .expect("a whole tab on the screen") as u16;
+
+        click(&mut app, at + 1, 0);
+        assert_eq!(
+            app.here().name,
+            app.docs()[10].name,
+            "clicking column {at} of {:?}",
+            row.iter().collect::<String>()
+        );
+    }
+
+    #[test]
+    fn the_wheel_over_the_tabs_walks_along_them() {
+        let mut app = many_tabs(12, 40);
+        for _ in 0..11 {
+            app.run(Cmd::PrevBuffer);
+        }
+        tab_row(&mut app, 40);
+        assert_eq!(app.tab_scroll, 0);
+        app.handle(crate::app::Event::Term(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 5,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })));
+        assert!(app.tab_scroll > 0, "the row moved along");
+    }
+
+    #[test]
+    fn every_extra_cursor_is_drawn_where_it_is() {
+        // The terminal has one cursor and this has three, so two of them are
+        // blocks painted onto the text. They are painted over the character
+        // they are on, which is the part that is easy to get backwards: draw
+        // the block first and the character lands on top of it, and a
+        // multi-cursor edit becomes one you cannot see.
+        let (buffer, app) = screen("alpha\nbravo\ncharlie\n", |app| {
+            app.view_mut().sel = Selections::many(
+                vec![Range::point(2), Range::point(8), Range::point(14)],
+                0,
+            );
+        });
+        let blocks = cells_on(&buffer, app.theme.cursor);
+        // The primary is the terminal's own cursor and is not painted, so two.
+        assert_eq!(blocks.len(), 2, "{blocks:?}");
+        // And each one still shows the character it is sitting on.
+        for (x, y) in blocks {
+            let symbol = buffer[(x, y)].symbol();
+            assert!(
+                matches!(symbol, "p" | "a"),
+                "the block at {x},{y} is {symbol:?}, not the character under it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_cursor_past_the_end_of_a_line_is_drawn_too() {
+        // Alt-Shift-I puts a cursor at the end of every selected line, which
+        // is a cursor with no character under it to carry the block.
+        let (buffer, app) = screen("aa\nbb\ncc\n", |app| {
+            app.run(Cmd::SelectAll);
+            app.run(Cmd::CursorsToLineEnds);
+        });
+        assert!(app.view().sel.len() > 1, "several cursors");
+        let blocks = cells_on(&buffer, app.theme.cursor);
+        assert_eq!(blocks.len(), app.view().sel.len() - 1, "{blocks:?}");
+    }
 }
