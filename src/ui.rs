@@ -1084,6 +1084,27 @@ fn box_style(theme: &Theme, ground: Color) -> Style {
     })
 }
 
+/// What goes at the right-hand end of a row in the completion list: the type
+/// of the thing, or where the name comes from, with a plus in front of it when
+/// taking this one writes a line at the top of the file as well. An import
+/// that appears out of nowhere is a surprise; one the list said was coming is
+/// a feature.
+fn right_of(item: &crate::app::Suggestion) -> Option<String> {
+    match (item.also.is_empty(), &item.detail) {
+        (true, detail) => detail.clone(),
+        (false, Some(detail)) => Some(format!("+ {detail}")),
+        (false, None) => Some("+ import".to_string()),
+    }
+}
+
+/// One line of the completion list, as it will be drawn.
+struct Row {
+    label: String,
+    suffix: Option<String>,
+    detail: Option<String>,
+    kind: &'static str,
+}
+
 fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color) {
     let Some(completion) = &app.completion else {
         return;
@@ -1100,8 +1121,13 @@ fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color
         .take(40)
         .map(|item| {
             text::str_width(&item.label)
-                + item.detail.as_deref().map(text::str_width).unwrap_or(0)
-                + text::str_width(item.kind)
+                + item.suffix.as_deref().map(|s| text::str_width(s) + 1).unwrap_or(0)
+                + right_of(item).as_deref().map(text::str_width).unwrap_or(0)
+                // The kind gets a column of its own up to ten wide, whatever
+                // this particular word is; asking for only as much as the
+                // word needs is how the note at the right edge ends up with
+                // nowhere to go and is dropped.
+                + text::str_width(item.kind).max(10)
                 + 6
         })
         .max()
@@ -1126,11 +1152,16 @@ fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color
     let area = beside(screen, Position::new(start_column, at.y), width, rows);
 
     let (top, cursor) = (completion.top, completion.cursor);
-    let items: Vec<(String, Option<String>, &'static str)> = completion
+    let items: Vec<Row> = completion
         .visible()
         .skip(top)
         .take(rows as usize)
-        .map(|item| (item.label.clone(), item.detail.clone(), item.kind))
+        .map(|item| Row {
+            label: item.label.clone(),
+            suffix: item.suffix.clone(),
+            detail: right_of(item),
+            kind: item.kind,
+        })
         .collect();
     let about = completion.selected().and_then(|item| item.about.clone());
 
@@ -1138,7 +1169,13 @@ fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color
     let buf = frame.buffer_mut();
     buf.set_style(area, box_style(&theme, ground).fg(theme.foreground));
 
-    for (row, (label, detail, kind)) in items.iter().enumerate() {
+    for (row, Row {
+        label,
+        suffix,
+        detail,
+        kind,
+    }) in items.iter().enumerate()
+    {
         let y = area.y + row as u16;
         let chosen = top + row == cursor;
         let style = if chosen {
@@ -1160,7 +1197,7 @@ fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color
             style.fg(theme.faint),
         );
         let room = area.width as usize - kind_width - 1;
-        let label_width = text::str_width(label).min(room);
+        let mut label_width = text::str_width(label).min(room);
         buf.set_stringn(
             area.x + kind_width as u16,
             y,
@@ -1172,6 +1209,28 @@ fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color
                 theme.foreground
             }),
         );
+        // The rest of the name, against the name and dimmer than it: the
+        // arguments of a function, or the `(use std::collections::HashMap)`
+        // that says where this one comes from. It is not part of what you are
+        // matching against, and it does not read as though it were.
+        if let Some(suffix) = suffix {
+            let left = room.saturating_sub(label_width);
+            if left > 3 {
+                // A space between, which LSP says not to put there. Servers
+                // send `(use std::collections::HashMap)` and `(x: i32)`
+                // through the same field, and the first of those run against
+                // the name is a word nobody can read.
+                let shown = format!(" {}", text::truncate(suffix, left - 1));
+                buf.set_stringn(
+                    area.x + kind_width as u16 + label_width as u16,
+                    y,
+                    &shown,
+                    left,
+                    style.fg(theme.muted),
+                );
+                label_width += text::str_width(&shown);
+            }
+        }
         // The type, right up against the right edge, dimmed — it is there to
         // be glanced at, not read.
         if let Some(detail) = detail {
@@ -1190,10 +1249,19 @@ fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color
         }
     }
 
-    // One line about the chosen one, under the list.
+    // One line about the chosen one, on the far side of the list from the
+    // cursor: under the list where the list is under the cursor, and over it
+    // where the list had to go over. Always under it would lay a line of
+    // documentation straight across the line you are typing, which is the one
+    // line on the screen that has to stay readable while you type it.
     if let Some(about) = about.filter(|a| !a.is_empty()) {
-        let y = area.y + area.height;
-        if y < screen.y + screen.height - 1 {
+        let over = area.y + area.height <= at.y;
+        let y = if over {
+            area.y.checked_sub(1)
+        } else {
+            Some(area.y + area.height)
+        };
+        if let Some(y) = y.filter(|y| *y >= screen.y && *y < screen.y + screen.height - 1) {
             let shown = format!(" {} ", text::truncate(&about, area.width as usize - 2));
             frame.render_widget(Clear, Rect::new(area.x, y, area.width, 1));
             frame.buffer_mut().set_stringn(
@@ -1876,8 +1944,14 @@ fn draw_help(frame: &mut Frame, app: &mut App, ground: Color) {
 
     let lines = help_lines(app);
     let buf = frame.buffer_mut();
-    // Two columns, because the list is long and a terminal is wide.
-    let columns = if inside.width >= 90 { 2 } else { 1 };
+    // As many columns as there is room to read, because the list is long and
+    // a terminal is wide. Room to read is the whole of it: a column narrower
+    // than this cuts nearly every line in it short, and two columns of stubs
+    // — `Swap this line with the on…` above `Swap this line with the on…` —
+    // are not two bindings a person can tell apart. They read as the same
+    // line printed twice, which is worse than scrolling.
+    const NARROWEST_COLUMN: u16 = 60;
+    let columns = (inside.width / NARROWEST_COLUMN).clamp(1, 3);
     let column_width = inside.width / columns;
     let rows = inside.height.saturating_sub(1) as usize;
     let shown = &lines[(*scroll).min(lines.len())..];
@@ -2087,6 +2161,164 @@ mod tests {
         (0..buffer.area.width)
             .map(|x| buffer[(x, y)].symbol())
             .collect()
+    }
+
+    #[test]
+    fn a_suggestion_says_which_module_it_would_import_from() {
+        // The whole reason to look at the list is often that you know the
+        // name and not the path to it, and a server that offers a name your
+        // file has not imported sends the path along beside it.
+        let (buffer, _app) = screen("HashMa", |app| {
+            app.view_mut().sel = Selections::single(Range::point(6));
+            app.suggest_for_test(
+                6,
+                true,
+                serde_json::json!([{
+                    "label": "HashMap",
+                    "labelDetails": {
+                        "detail": "(use std::collections::HashMap)",
+                        "description": "HashMap<K, V>",
+                    },
+                }]),
+            );
+        });
+
+        let rows: Vec<String> = (0..buffer.area.height).map(|y| row_text(&buffer, y)).collect();
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("HashMap (use std::collections::HashMap)")),
+            "the list should say where the name comes from, got:\n{}",
+            rows.join("\n"),
+        );
+    }
+
+    #[test]
+    fn what_a_suggestion_is_keeps_off_the_line_you_are_typing() {
+        // Near the bottom of the screen the list has to go above the cursor.
+        // The line of documentation under it then has nowhere to be but on
+        // the cursor's own row, which is the one row it must not cover.
+        let text = "\n".repeat(9) + "HashMa";
+        let (buffer, app) = screen(&text, |app| {
+            let at = app.here().len_chars();
+            app.view_mut().sel = Selections::single(Range::point(at));
+            app.suggest_for_test(
+                at,
+                true,
+                serde_json::json!([{
+                    "label": "HashMap",
+                    "documentation": "quadratic probing",
+                }]),
+            );
+        });
+
+        let at = super::cursor_screen(&app).expect("a cursor on the screen");
+        let row = row_text(&buffer, at.y);
+        assert!(
+            row.contains("HashMa"),
+            "the line being typed is still readable, got: {row:?}",
+        );
+        assert!(
+            !row.contains("quadratic probing"),
+            "and what the suggestion is has not been laid over it, got: {row:?}",
+        );
+        assert!(
+            (0..buffer.area.height).any(|y| row_text(&buffer, y).contains("quadratic probing")),
+            "but it is on the screen somewhere",
+        );
+    }
+
+    /// The help at a given size, as the rows a person would read.
+    fn help_rows(width: u16, height: u16) -> Vec<String> {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(Config::default(), tx);
+        app.run(Cmd::Help);
+        let mut terminal =
+            Terminal::new(TestBackend::new(width, height)).expect("a terminal to draw on");
+        terminal
+            .draw(|frame| super::draw(frame, &mut app))
+            .expect("drawn");
+        let buffer = terminal.backend().buffer().clone();
+        (0..buffer.area.height)
+            .map(|y| row_text(&buffer, y))
+            .collect()
+    }
+
+
+    #[test]
+    fn the_help_never_shows_the_same_line_twice() {
+        // Two columns in a terminal too narrow for two columns cuts every
+        // description down to a stub, and the stubs collide: `Swap this line
+        // with the one above` and `Swap this line with the one below` come out
+        // as the same row, which reads as the help repeating itself.
+        for width in [80u16, 90, 95, 100, 110, 120, 140, 180, 200, 240] {
+            let rows = help_rows(width, 40);
+            let mut said: Vec<&str> = rows
+                .iter()
+                .flat_map(|row| row.split("  "))
+                .map(str::trim)
+                .filter(|part| part.len() > 8 && part.chars().any(char::is_alphabetic))
+                .collect();
+            said.sort_unstable();
+            let before = said.len();
+            said.dedup();
+            assert_eq!(
+                before,
+                said.len(),
+                "the help says something twice at {width} columns wide",
+            );
+        }
+    }
+
+    #[test]
+    fn the_help_takes_the_columns_a_wide_terminal_gives_it() {
+        // The list is long, and reading it a screenful at a time on a screen
+        // with room for all of it is the other way to get this wrong.
+        let narrow = help_rows(80, 40);
+        let wide = help_rows(200, 40);
+        // How much of the help is on the screen at once, counted in the
+        // things it has to say rather than in rows.
+        let entries = |rows: &[String]| {
+            rows.iter()
+                .flat_map(|row| row.split("  "))
+                .map(str::trim)
+                .filter(|part| part.len() > 8 && part.chars().any(char::is_alphabetic))
+                .count()
+        };
+        assert!(
+            entries(&wide) > entries(&narrow) * 2,
+            "three columns should show more than twice what one column does: \
+             {} against {}",
+            entries(&wide),
+            entries(&narrow),
+        );
+    }
+
+    #[test]
+    fn a_suggestion_that_brings_an_import_says_so() {
+        let (buffer, _app) = screen("HashMa", |app| {
+            app.view_mut().sel = Selections::single(Range::point(6));
+            app.suggest_for_test(
+                6,
+                true,
+                serde_json::json!([{
+                    "label": "HashMap",
+                    "additionalTextEdits": [{
+                        "range": {
+                            "start": { "line": 0, "character": 0 },
+                            "end": { "line": 0, "character": 0 },
+                        },
+                        "newText": "use std::collections::HashMap;\n",
+                    }],
+                }]),
+            );
+        });
+
+        let rows: Vec<String> = (0..buffer.area.height).map(|y| row_text(&buffer, y)).collect();
+        assert!(
+            rows.iter().any(|row| row.contains("+ import")),
+            "taking it writes a line at the top of the file, and the list should say so, got:\n{}",
+            rows.join("\n"),
+        );
     }
 
     #[test]

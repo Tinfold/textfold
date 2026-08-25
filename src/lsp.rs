@@ -104,6 +104,15 @@ pub enum Ask {
     /// A code action we asked the server to work out the details of before
     /// applying it.
     ResolveAction,
+    /// A suggestion we asked the server to fill in while it sits under the
+    /// cursor in the list. Where the import that comes with it lives, for the
+    /// servers that do not work one out until asked.
+    ResolveCompletion {
+        doc: DocId,
+        /// Which suggestion in the open list, since the answer says nothing
+        /// about which question it belongs to.
+        index: usize,
+    },
     /// A command we asked the server to run. The answer is usually nothing;
     /// what matters arrives separately as `workspace/applyEdit`.
     Command,
@@ -909,6 +918,38 @@ impl Servers {
         true
     }
 
+    /// Ask the server to fill in a suggestion it sent in outline.
+    ///
+    /// Several servers — TypeScript's, and the Java and C# ones — never work
+    /// out the import a suggestion needs until somebody asks about that one
+    /// suggestion. Taking such an item as it arrived puts the name in and
+    /// leaves the file not compiling, which is the opposite of the point.
+    pub fn resolve_completion(
+        &mut self,
+        id: ServerId,
+        doc: DocId,
+        index: usize,
+        item: &Value,
+    ) -> bool {
+        let Some(server) = self.get_mut(id) else {
+            return false;
+        };
+        if server
+            .capabilities
+            .get("completionProvider")
+            .and_then(|c| c.get("resolveProvider"))
+            != Some(&Value::Bool(true))
+        {
+            return false;
+        }
+        server.request(
+            "completionItem/resolve",
+            item.clone(),
+            Ask::ResolveCompletion { doc, index },
+        );
+        true
+    }
+
     /// Answer something the server asked us.
     ///
     /// Every request gets an answer, including the ones we have nothing useful
@@ -1170,7 +1211,23 @@ fn capabilities() -> Value {
                     "snippetSupport": false,
                     "documentationFormat": ["markdown", "plaintext"],
                     "insertReplaceSupport": true,
-                    "resolveSupport": { "properties": ["documentation", "detail"] },
+                    // `additionalTextEdits` is the one that matters. A
+                    // server will not offer a name your file has not imported
+                    // unless the client says it can take the import
+                    // separately and later — rust-analyzer leaves every such
+                    // name out of the list entirely otherwise, which is the
+                    // difference between typing `HashMa` and being offered
+                    // `HashMap` and typing it out in full and importing it by
+                    // hand afterwards. It is a promise to ask, and
+                    // `resolve_completion` is where we keep it.
+                    "resolveSupport": {
+                        "properties": ["documentation", "detail", "additionalTextEdits"],
+                    },
+                    // Where a server puts the part of a suggestion that is
+                    // not its name — `(use std::collections::HashMap)`. Say
+                    // nothing and rust-analyzer glues it onto the label,
+                    // where it gets in the way of matching what you typed.
+                    "labelDetailsSupport": true,
                 },
                 "contextSupport": true,
             },

@@ -400,8 +400,10 @@ server that is slow, wedged, or busy indexing half a million lines cannot make
 the cursor stutter, because the cursor is not waiting on it. While one is busy,
 the top right says what it is doing.
 
-What is wired up: completion (as you type, and on the characters the server
-says should trigger it), diagnostics (underlined in the text, marked in the
+What is wired up: completion (as you type, on the characters the server says
+should trigger it, and again as you keep typing when the server said its answer
+was partial — which is what puts names your file has not imported yet in the
+list, with the import that comes with them), diagnostics (underlined in the text, marked in the
 margin, and the one under the cursor spelled out in the status bar), hover,
 go to definition / type definition / implementation, find all uses, document
 and workspace symbols, rename across files, code actions, signature help, and
@@ -743,10 +745,26 @@ go back to the code it is about.
 
 ### Imports you have not written yet
 
-When the cursor comes to rest on something the language server has complained
-about, textfold quietly asks what could be done about it. If there is an
-answer, it appears in the status bar in the server's own words —
-`Alt-i: Import 'List' (java.util)` — and at the bottom of the hover.
+Mostly you never write them. The list that appears as you type is not limited
+to the names your file can already see: type `HashMa` and `HashMap` is offered
+with `(use std::collections::HashMap)` beside it, and taking it puts the name
+where you were typing and the `use` line at the top of the file, as one edit
+you can undo with one Ctrl-Z. Anything in the list that brings a line in with
+it says `+` at its right-hand end. It works for whatever your language server
+knows about, which for a Rust project is every crate you depend on.
+
+The list narrows as you type where the server said it had given a full answer,
+and is asked again where it said it had not — which is nearly always the case
+for names you have not imported, since no server lists every name in every
+crate for two characters of prefix. So the thing you are typing towards keeps
+arriving as you get closer to it, rather than the list going quiet because it
+was built from the first two letters.
+
+The other way in is for a name you have already typed. When the cursor comes to
+rest on something the language server has complained about, textfold quietly
+asks what could be done about it. If there is an answer, it appears in the
+status bar in the server's own words — `Alt-i: Import 'List' (java.util)` —
+and at the bottom of the hover.
 
 **Alt-I** does it. One fix means one keystroke: the import goes in and you
 carry on typing. Several means a list. Nothing means it says so.

@@ -161,6 +161,11 @@ pub enum Then {
 #[derive(Clone, Debug)]
 pub struct Suggestion {
     pub label: String,
+    /// The rest of the name, which a server sends apart from it: the
+    /// arguments of a function, or the `(use std::collections::HashMap)` that
+    /// says this one arrives with an import. Shown against the label and left
+    /// out of the matching, so that typing `HashMap` matches `HashMap`.
+    pub suffix: Option<String>,
     pub detail: Option<String>,
     pub kind: &'static str,
     /// What actually goes in, and over what — a server usually says exactly
@@ -173,11 +178,38 @@ pub struct Suggestion {
     /// What to sort by, which is not always what to show.
     pub sort: String,
     pub about: Option<String>,
+    /// The item exactly as the server sent it, to hand back when asking for
+    /// the rest of it.
+    raw: Value,
+    /// How far along asking the server for the rest of it has got.
+    resolve: Resolve,
+}
+
+/// Whether a suggestion has had the parts a server is allowed to leave out
+/// filled in.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Resolve {
+    /// Nobody has asked. Either the cursor has not been on it, or there is no
+    /// server to ask.
+    Unasked,
+    /// Asked, and the answer has not come back.
+    Waiting,
+    /// As complete as it is going to get — the answer came back, the answer
+    /// failed, or this server fills its suggestions in to begin with.
+    Done,
 }
 
 /// The list of suggestions under the cursor.
 pub struct Completion {
     pub doc: DocId,
+    /// Who answered, for asking them about one suggestion in more detail.
+    server: ServerId,
+    /// Whether the server said this list was as much of an answer as it had
+    /// room for. It nearly always is where imports are concerned: a server
+    /// asked about `Ha` will not list every unimported name in every crate,
+    /// it lists some of them and says so. Narrowing such a list as you type
+    /// hides the thing you are typing towards, so it is asked again instead.
+    incomplete: bool,
     /// Where the word being completed starts, so that typing narrows the list
     /// instead of asking again.
     pub start: usize,
@@ -784,6 +816,11 @@ pub struct App {
     /// is cheap, but not so cheap that it is worth doing several times a
     /// second for the sake of noticing a `git checkout` a moment sooner.
     disk_checked: Instant,
+    /// A suggestion that was taken while the server was still working out
+    /// what it brings with it, to be put in the moment that comes back.
+    /// Pressing Tab a fraction before the import has been worked out should
+    /// mean waiting a fraction, not going without the import.
+    accept_when_resolved: Option<usize>,
     /// A document waiting to be written once the formatter answers. Formatting
     /// on save is a round trip to a language server, so the save cannot happen
     /// until the edits are in — saving first would write the old text and
@@ -844,6 +881,7 @@ impl App {
             said_clipboard: false,
             git_checked: Instant::now() - GIT_CHECK_EVERY,
             disk_checked: Instant::now(),
+            accept_when_resolved: None,
             save_after_format: None,
             config,
         };
@@ -1431,19 +1469,9 @@ impl App {
         let edits = edit::insert_char(doc, view, c, auto_pairs);
         self.after_edit(edits);
 
-        // Typing keeps the completion list, narrowing it; anything else
-        // closes it.
-        let typed = self.typed_since_completion();
-        match (&mut self.completion, typed) {
-            (Some(completion), Some(prefix)) => {
-                completion.narrow(&prefix);
-                if completion.is_empty() {
-                    self.completion = None;
-                }
-            }
-            (Some(_), None) => self.completion = None,
-            (None, _) => {}
-        }
+        // Typing keeps the completion list, narrowing it and asking again
+        // where the server had more to say; anything else closes it.
+        self.refresh_completion();
 
         if self.config.auto_completion() && self.lsp.primary_for(self.here()).is_some() {
             let triggers = self
@@ -1578,9 +1606,13 @@ impl App {
         if cmd.breaks_undo() {
             self.here_mut().close_revision();
         }
-        if !matches!(cmd, Cmd::Completion) {
+        // Backspace is the other key that leaves you still completing a word,
+        // and it narrows the list rather than closing it — which it cannot do
+        // if the list has already gone.
+        if !matches!(cmd, Cmd::Completion | Cmd::DeleteBackward) {
             self.completion = None;
             self.completion_due = None;
+            self.accept_when_resolved = None;
         }
 
         let tab_width = self.config.tab_width();
@@ -1683,7 +1715,7 @@ impl App {
                 let (doc, view) = self.pair();
                 let edits = edit::delete_backward(doc, view, tab_width);
                 self.after_edit(edits);
-                self.narrow_or_close_completion();
+                self.refresh_completion();
             }
             Cmd::DeleteForward => {
                 let (doc, view) = self.pair();
@@ -1908,18 +1940,45 @@ impl App {
         self.signature = None;
     }
 
-    fn narrow_or_close_completion(&mut self) {
+    /// Keep the open list of suggestions honest after an edit that changed
+    /// the word being completed.
+    ///
+    /// Narrowing what is already on the screen answers the keystroke without
+    /// a round trip, and for a list the server called complete that is the
+    /// whole of it. For one it called partial it is not: the name you are
+    /// typing towards may not be in the list at all — a server asked about
+    /// `Ha` offers a few of the unimported names it could reach and says
+    /// there are more — so the question is asked again as well, with what is
+    /// already there standing in until the answer arrives.
+    fn refresh_completion(&mut self) {
+        self.accept_when_resolved = None;
         let typed = self.typed_since_completion();
-        match (&mut self.completion, typed) {
-            (Some(completion), Some(prefix)) => {
+        let Some(completion) = &mut self.completion else {
+            return;
+        };
+        let incomplete = completion.incomplete;
+        match typed {
+            Some(prefix) => {
                 completion.narrow(&prefix);
-                if completion.is_empty() {
+                if completion.is_empty() && !incomplete {
                     self.completion = None;
                 }
             }
-            (Some(_), None) => self.completion = None,
-            _ => {}
+            // The cursor has left the word this list was about.
+            None => {
+                self.completion = None;
+                return;
+            }
         }
+        if incomplete {
+            self.completion_due = Some(Instant::now() + COMPLETION_DELAY);
+            // An empty list is a box with nothing in it. Better to take it
+            // off the screen and let the answer put it back.
+            if self.completion.as_ref().is_some_and(Completion::is_empty) {
+                self.completion = None;
+            }
+        }
+        self.resolve_selected();
     }
 
     fn scroll(&mut self, rows: isize) {
@@ -4202,11 +4261,37 @@ impl App {
     }
 
     /// Take the suggestion under the cursor.
+    ///
+    /// Not always at once: a suggestion whose import the server has not
+    /// worked out yet is taken when it has, which is a few milliseconds and
+    /// no keystrokes away.
     fn accept_completion(&mut self) {
+        let Some(completion) = &self.completion else {
+            return;
+        };
+        let Some(&index) = completion.shown.get(completion.cursor) else {
+            self.completion = None;
+            return;
+        };
+        if completion.all[index].resolve != Resolve::Done {
+            self.resolve_selected();
+            if self.completion.as_ref().is_some_and(|completion| {
+                completion.all[index].resolve == Resolve::Waiting
+            }) {
+                self.accept_when_resolved = Some(index);
+                return;
+            }
+        }
+        self.take_suggestion(index);
+    }
+
+    /// Put one suggestion in, with whatever else has to go in with it.
+    fn take_suggestion(&mut self, index: usize) {
         let Some(completion) = self.completion.take() else {
             return;
         };
-        let Some(item) = completion.selected().cloned() else {
+        self.accept_when_resolved = None;
+        let Some(item) = completion.all.get(index).cloned() else {
             return;
         };
         if self.view().doc != completion.doc {
@@ -4232,21 +4317,27 @@ impl App {
                 text.clone(),
             ));
         }
-        changes.sort_by_key(|c| c.from);
+        // Sorted by where each starts and then by how much it covers, which
+        // matters where an import goes in at the very spot the word being
+        // completed starts: the changes are applied back to front, and a
+        // change of no width has to be the one that goes in last if it is to
+        // end up in front of the word rather than inside it.
+        changes.sort_by_key(|c| (c.from, c.to));
 
         let (doc, view) = self.pair();
         let before = view.sel.clone();
         let edits = doc.apply_atomic(changes, &before);
         view.absorb(&edits, doc.len_chars());
         // The cursor goes to the end of what was put in, wherever mapping
-        // would otherwise have left it.
-        let mut landed = from + item.insert.chars().count();
-        for edit in &edits {
-            if edit.from < from {
-                landed = (landed as isize + edit.inserted as isize - (edit.to - edit.from) as isize)
-                    as usize;
+        // would otherwise have left it. Everything that went in ahead of the
+        // word — the import, usually — moves that end along.
+        let mut landed = (from + item.insert.chars().count()) as isize;
+        for (start, end, text) in &item.also {
+            if *end <= from {
+                landed += text.chars().count() as isize - (end - start) as isize;
             }
         }
+        let landed = landed.max(0) as usize;
         view.sel = Selections::single(Range::point(landed.min(doc.len_chars())));
         self.after_edit(edits);
     }
@@ -4268,10 +4359,20 @@ impl App {
                 let by = completion.height() as isize;
                 completion.step(by);
             }
-            (KeyCode::Enter, _) | (KeyCode::Tab, KeyModifiers::NONE) => self.accept_completion(),
-            (KeyCode::Esc, _) => self.completion = None,
+            (KeyCode::Enter, _) | (KeyCode::Tab, KeyModifiers::NONE) => {
+                self.accept_completion();
+                return true;
+            }
+            (KeyCode::Esc, _) => {
+                self.completion = None;
+                self.accept_when_resolved = None;
+                return true;
+            }
             _ => return false,
         }
+        // Whatever the cursor landed on, find out the rest of it now rather
+        // than at the moment it is taken.
+        self.resolve_selected();
         true
     }
 
@@ -4416,12 +4517,24 @@ impl App {
                 // A failed request for something the editor asked for on its
                 // own — completions as you type, fixes for the problem under
                 // the cursor — is not worth a word.
+                if let Ask::ResolveCompletion { index, .. } = ask {
+                    // Nothing more is coming. Take what there is rather than
+                    // leave a keystroke unanswered.
+                    if let Some(item) = self.suggestion_mut(index) {
+                        item.resolve = Resolve::Done;
+                    }
+                    self.accept_if_waiting(index);
+                    return;
+                }
                 if let Ask::QuickFixes { doc, at } = ask {
                     // "content modified" is the usual one, and it means the
                     // server was still catching up when we asked rather than
                     // that there is nothing to offer. Ask again.
                     self.retry_fixes(doc, at);
-                } else if !matches!(ask, Ask::Completion { .. } | Ask::Signature { .. }) {
+                } else if !matches!(
+                    ask,
+                    Ask::Completion { .. } | Ask::ResolveCompletion { .. } | Ask::Signature { .. }
+                ) {
                     self.say_bad(why);
                 }
                 return;
@@ -4434,7 +4547,9 @@ impl App {
                 let open: Vec<&Document> = docs.iter().collect();
                 lsp.ready(id, value, &open);
             }
-            Ask::Completion { doc, at, version } => self.take_completions(doc, at, version, value),
+            Ask::Completion { doc, at, version } => {
+                self.take_completions(id, doc, at, version, value)
+            }
             Ask::Hover { doc, at } => self.take_hover(doc, at, value),
             Ask::Goto {
                 doc,
@@ -4457,11 +4572,21 @@ impl App {
             Ask::ClassFile { uri, line, column } => self.take_class_file(uri, line, column, value),
             Ask::Signature { doc, at } => self.take_signature(doc, at, value),
             Ask::ResolveAction => self.do_code_action(id, value),
+            Ask::ResolveCompletion { doc, index } => {
+                self.take_resolved_completion(doc, index, value)
+            }
             Ask::Command => {}
         }
     }
 
-    fn take_completions(&mut self, doc: DocId, at: usize, version: i32, value: Value) {
+    fn take_completions(
+        &mut self,
+        server: ServerId,
+        doc: DocId,
+        at: usize,
+        version: i32,
+        value: Value,
+    ) {
         // An answer about a file that has changed underneath it is an answer
         // to a question nobody is asking any more.
         if self.view().doc != doc || self.doc(doc).map(|d| d.version) != Some(version) {
@@ -4475,6 +4600,10 @@ impl App {
                 .cloned()
                 .unwrap_or_default(),
         };
+        let incomplete = value
+            .get("isIncomplete")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
         if items.is_empty() {
             self.completion = None;
             return;
@@ -4505,6 +4634,8 @@ impl App {
         let typed = document.slice(Range::new(start.min(at), at));
         let mut completion = Completion {
             doc,
+            server,
+            incomplete,
             start,
             all: suggestions,
             shown: Vec::new(),
@@ -4514,6 +4645,100 @@ impl App {
         };
         completion.narrow(&typed);
         self.completion = (!completion.is_empty()).then_some(completion);
+        self.accept_when_resolved = None;
+        self.resolve_selected();
+    }
+
+    /// A list of suggestions, as though a server had just sent one. For the
+    /// tests that are about what reaches the screen rather than about what
+    /// the editor is holding.
+    #[cfg(test)]
+    pub(crate) fn suggest_for_test(&mut self, at: usize, incomplete: bool, items: Value) {
+        let (doc, version) = (self.here().id, self.here().version);
+        self.take_completions(
+            crate::lsp::ServerId(0),
+            doc,
+            at,
+            version,
+            serde_json::json!({ "isIncomplete": incomplete, "items": items }),
+        );
+    }
+
+    /// Ask what else there is to know about the suggestion under the cursor.
+    ///
+    /// Asked as soon as the list arrives and again as it is stepped through,
+    /// rather than when something is taken: an import that has to be fetched
+    /// before the name can go in is an import you would wait for, and waiting
+    /// is what this is here to stop.
+    fn resolve_selected(&mut self) {
+        let Some(completion) = &mut self.completion else {
+            return;
+        };
+        let (doc, server) = (completion.doc, completion.server);
+        let Some(&index) = completion.shown.get(completion.cursor) else {
+            return;
+        };
+        let item = &mut completion.all[index];
+        if item.resolve != Resolve::Unasked {
+            return;
+        }
+        let raw = item.raw.clone();
+        let asked = self.lsp.resolve_completion(server, doc, index, &raw);
+        // A server that does not answer that question has already told us
+        // everything it is going to.
+        if let Some(item) = self.suggestion_mut(index) {
+            item.resolve = if asked {
+                Resolve::Waiting
+            } else {
+                Resolve::Done
+            };
+        }
+    }
+
+    fn suggestion_mut(&mut self, index: usize) -> Option<&mut Suggestion> {
+        self.completion.as_mut()?.all.get_mut(index)
+    }
+
+    /// Put what came back into the suggestion it was about.
+    ///
+    /// Only the parts a server is allowed to leave out of the first answer.
+    /// What goes in and over what was settled when the list was drawn, and a
+    /// resolved item is not permitted to change it.
+    fn take_resolved_completion(&mut self, doc: DocId, index: usize, value: Value) {
+        let document = match self.completion.as_ref() {
+            Some(completion) if completion.doc == doc => match self.doc(doc) {
+                Some(document) => document,
+                None => return,
+            },
+            // An answer about a list that has been typed past or closed.
+            _ => return,
+        };
+        let at = self.view().cursor();
+        let Some(filled) = suggestion_from(&value, document, at) else {
+            return;
+        };
+        let Some(completion) = &mut self.completion else {
+            return;
+        };
+        let Some(item) = completion.all.get_mut(index) else {
+            return;
+        };
+        if !filled.also.is_empty() {
+            item.also = filled.also;
+        }
+        item.about = filled.about.or_else(|| item.about.take());
+        item.detail = filled.detail.or_else(|| item.detail.take());
+        item.suffix = filled.suffix.or_else(|| item.suffix.take());
+        item.resolve = Resolve::Done;
+        self.accept_if_waiting(index);
+    }
+
+    /// Take the suggestion that was taken before it was ready, now that it is.
+    fn accept_if_waiting(&mut self, index: usize) {
+        if self.accept_when_resolved == Some(index) {
+            self.accept_when_resolved = None;
+            self.take_suggestion(index);
+        }
     }
 
     fn take_hover(&mut self, doc: DocId, at: usize, value: Value) {
@@ -5300,6 +5525,20 @@ fn suggestion_from(item: &Value, doc: &Document, at: usize) -> Option<Suggestion
     if label.is_empty() {
         return None;
     }
+    // What a server sends beside the label rather than in it. `detail` goes
+    // against the name — arguments, or the import this one brings with it —
+    // and `description` is the dimmer note off to the right.
+    let details = item.get("labelDetails");
+    let suffix = details
+        .and_then(|d| d.get("detail"))
+        .and_then(Value::as_str)
+        .map(|d| d.trim().to_string())
+        .filter(|d| !d.is_empty());
+    let description = details
+        .and_then(|d| d.get("description"))
+        .and_then(Value::as_str)
+        .map(|d| d.replace('\n', " "))
+        .filter(|d| !d.is_empty());
     let edit = item.get("textEdit");
     let range = edit.and_then(|e| {
         e.get("range")
@@ -5349,10 +5588,14 @@ fn suggestion_from(item: &Value, doc: &Document, at: usize) -> Option<Suggestion
 
     Some(Suggestion {
         kind: completion_kind(item.get("kind").and_then(Value::as_u64).unwrap_or(0)),
-        detail: item
-            .get("detail")
-            .and_then(Value::as_str)
-            .map(|d| d.replace('\n', " ")),
+        // Where the name lives beats what type it has, when a server says
+        // both: the reason to be looking at this list is often that you do
+        // not remember which module the name is in.
+        detail: description.or_else(|| {
+            item.get("detail")
+                .and_then(Value::as_str)
+                .map(|d| d.replace('\n', " "))
+        }),
         sort: item
             .get("sortText")
             .and_then(Value::as_str)
@@ -5366,7 +5609,10 @@ fn suggestion_from(item: &Value, doc: &Document, at: usize) -> Option<Suggestion
         replace,
         insert,
         label,
+        suffix,
         also,
+        raw: item.clone(),
+        resolve: Resolve::Unasked,
     })
 }
 
@@ -5704,6 +5950,9 @@ impl App {
                 let at = completion.top + (row - area.y) as usize;
                 if at < completion.len() {
                     completion.cursor = at;
+                    // A row that has never been under the cursor has never
+                    // been asked about, so this goes through the same wait as
+                    // a Tab does rather than dropping the import.
                     self.accept_completion();
                 }
                 return;
@@ -5975,6 +6224,7 @@ impl App {
             && hits(completion.area, column, row)
         {
             completion.step(by.signum());
+            self.resolve_selected();
             return;
         }
         // The wheel over a hover scrolls the hover, not the file behind it.
@@ -6082,6 +6332,7 @@ fn hits(area: Rect, column: u16, row: u16) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     use std::sync::mpsc;
 
     /// An editor with nothing of yours in it: the settings are the defaults
@@ -6120,6 +6371,163 @@ mod tests {
     fn keyed(app: &mut App, key: &str) {
         let key = Key::parse(key).expect("a key");
         app.on_key(KeyEvent::new(key.code, key.mods));
+    }
+
+    /// A completion list as a server would have sent it, for a file with
+    /// `at` characters of a word typed so far.
+    fn suggested(app: &mut App, at: usize, incomplete: bool, items: Value) {
+        app.suggest_for_test(at, incomplete, items);
+    }
+
+    #[test]
+    fn a_name_the_file_has_not_imported_shows_where_it_comes_from() {
+        // What rust-analyzer sends for a name you have not imported: the
+        // module in the label details rather than in the label, so that what
+        // you typed still matches what you are being offered.
+        let (mut app, _rx) = editor();
+        typed(&mut app, "HashMa");
+        suggested(
+            &mut app,
+            6,
+            true,
+            json!([{
+                "label": "HashMap",
+                "labelDetails": {
+                    "detail": "(use std::collections::HashMap)",
+                    "description": "HashMap<K, V>",
+                },
+            }]),
+        );
+
+        let item = app.completion.as_ref().expect("a list").selected().unwrap();
+        assert_eq!(item.label, "HashMap");
+        assert_eq!(item.suffix.as_deref(), Some("(use std::collections::HashMap)"));
+        assert_eq!(item.detail.as_deref(), Some("HashMap<K, V>"));
+    }
+
+    #[test]
+    fn a_partial_list_is_asked_for_again_rather_than_narrowed_to_nothing() {
+        // A server asked about two characters offers some of what it could
+        // reach and says there is more. Narrowing that is how a name you are
+        // typing towards disappears before you have finished typing it.
+        let (mut app, _rx) = editor();
+        typed(&mut app, "Ha");
+        suggested(&mut app, 2, true, json!([{ "label": "Handle" }]));
+        assert_eq!(app.completion.as_ref().map(Completion::len), Some(1));
+
+        typed(&mut app, "s");
+        assert!(app.completion.is_none(), "nothing left matching `Has`");
+        assert!(
+            app.completion_due.is_some(),
+            "the server has more to say and has not been asked"
+        );
+    }
+
+    #[test]
+    fn a_complete_list_narrows_where_it_stands() {
+        // The other half of it: a server that said it gave a full answer is
+        // taken at its word, and typing does not go back to it.
+        let (mut app, _rx) = editor();
+        typed(&mut app, "Ha");
+        suggested(
+            &mut app,
+            2,
+            false,
+            json!([{ "label": "Handle" }, { "label": "Hasty" }]),
+        );
+        typed(&mut app, "s");
+
+        assert_eq!(app.completion.as_ref().map(Completion::len), Some(1));
+        assert!(app.completion_due.is_none());
+    }
+
+    #[test]
+    fn backspace_narrows_the_list_rather_than_closing_it() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "Has");
+        suggested(
+            &mut app,
+            3,
+            false,
+            json!([{ "label": "Handle" }, { "label": "Hasty" }]),
+        );
+        assert_eq!(app.completion.as_ref().map(Completion::len), Some(1));
+
+        app.run(Cmd::DeleteBackward);
+        assert_eq!(
+            app.completion.as_ref().map(Completion::len),
+            Some(2),
+            "backspacing to `Ha` matches both again"
+        );
+    }
+
+    #[test]
+    fn the_import_arrives_with_the_name_even_when_it_is_worked_out_late() {
+        // Servers send the name first and the import it needs only when asked
+        // about that one suggestion. Taking it before the answer is back has
+        // to wait for the answer, not go without it.
+        let (mut app, _rx) = editor();
+        app.here_mut().language = crate::lang::LangId::PLAIN;
+        typed(&mut app, "HashMa");
+        suggested(&mut app, 6, false, json!([{ "label": "HashMap" }]));
+
+        // As though a server had been asked and had not answered yet.
+        let index = app.completion.as_ref().unwrap().shown[0];
+        app.suggestion_mut(index).unwrap().resolve = Resolve::Waiting;
+        app.accept_completion();
+
+        assert_eq!(app.here().rope.to_string(), "HashMa", "nothing put in yet");
+        assert_eq!(app.accept_when_resolved, Some(index));
+
+        let doc = app.here().id;
+        app.take_resolved_completion(
+            doc,
+            index,
+            json!({
+                "label": "HashMap",
+                "additionalTextEdits": [{
+                    "range": {
+                        "start": { "line": 0, "character": 0 },
+                        "end": { "line": 0, "character": 0 },
+                    },
+                    "newText": "use std::collections::HashMap;\n",
+                }],
+            }),
+        );
+
+        assert_eq!(
+            app.here().rope.to_string(),
+            "use std::collections::HashMap;\nHashMap",
+        );
+        // And the cursor is after the name, not still up where the import
+        // pushed the line it was on out of the way.
+        assert_eq!(app.view().cursor(), app.here().len_chars());
+        assert!(app.completion.is_none());
+        assert_eq!(app.accept_when_resolved, None);
+    }
+
+    #[test]
+    fn an_import_that_never_comes_does_not_eat_the_keystroke() {
+        // A server that fails the question has still been answered: the name
+        // goes in without the import rather than nothing going in at all.
+        let (mut app, _rx) = editor();
+        typed(&mut app, "HashMa");
+        suggested(&mut app, 6, false, json!([{ "label": "HashMap" }]));
+        let index = app.completion.as_ref().unwrap().shown[0];
+        app.suggestion_mut(index).unwrap().resolve = Resolve::Waiting;
+        app.accept_completion();
+
+        app.on_response(
+            crate::lsp::ServerId(0),
+            0,
+            Err("content modified".to_string()),
+        );
+        // Nothing claimed that request, so the editor is still waiting on it;
+        // the resolve coming back empty is what actually unsticks it.
+        let doc = app.here().id;
+        app.take_resolved_completion(doc, index, json!({ "label": "HashMap" }));
+
+        assert_eq!(app.here().rope.to_string(), "HashMap");
     }
 
     #[test]
