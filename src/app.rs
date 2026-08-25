@@ -16,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
+use anyhow::Context;
 use ratatui::crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
@@ -25,11 +26,13 @@ use serde_json::Value;
 
 use crate::cmd::Cmd;
 use crate::config::{Config, LineNumbers};
-use crate::doc::{Diagnostic, DocId, Document, Indent, Severity};
+use crate::doc::{Diagnostic, DocId, Document, Indent, OnDisk, Severity};
 use crate::edit::{self, Motion};
+use crate::git::Tracker;
 use crate::keys::{Key, Keys};
 use crate::lang::{self, LangId};
 use crate::lsp::{Ask, Goto, Incoming, ServerId, Servers};
+use crate::menu::{self, Menu};
 use crate::picker::{Choice, Kind, Picker, Row};
 use crate::text::{self, Range, Selections};
 use crate::theme::{Role, Theme, Themes};
@@ -58,6 +61,23 @@ const MESSAGE_TIME: Duration = Duration::from_secs(6);
 /// Two clicks closer together than this are a double click.
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
+/// How long the cursor has to sit on a problem before the editor asks what
+/// could be done about it. Long enough that walking along a line of red is one
+/// question rather than forty.
+const FIX_DELAY: Duration = Duration::from_millis(250);
+
+/// How many times a language server may say "not now" about the fixes for one
+/// spot before the editor takes it for an answer.
+const FIX_TRIES: u8 = 4;
+
+/// How often the diff against the last commit is worked out again.
+const GIT_CHECK_EVERY: Duration = Duration::from_millis(150);
+
+/// How often the open files are looked at on disk. Often enough that a `git
+/// checkout` in the next window is noticed while you are still thinking about
+/// it, rarely enough that a hundred open files cost nothing.
+const DISK_CHECK_EVERY: Duration = Duration::from_millis(1200);
+
 /// How long to wait after a keystroke before asking for completions, so that
 /// typing a word is one request rather than six.
 const COMPLETION_DELAY: Duration = Duration::from_millis(120);
@@ -70,6 +90,8 @@ pub enum Overlay {
     Confirm(Confirm),
     /// The keys and what they do, scrolled to this row.
     Help(usize),
+    /// A short list of what can be done right here, opened where you clicked.
+    Menu(Menu),
 }
 
 /// A single line to type into.
@@ -83,6 +105,10 @@ pub struct Prompt {
     pub origin: Option<Selections>,
     /// The search term, while the second half of a replace is being typed.
     pub held: String,
+    /// Whether Enter has been pressed in this search: whether where the cursor
+    /// has got to is somewhere you meant to go, or only somewhere typing took
+    /// it on the way.
+    pub committed: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -229,6 +255,166 @@ impl Completion {
     }
 }
 
+/// One line about files that need a person to look at them, worst first.
+///
+/// Names while there is one name to give, and a count once there are several,
+/// because "nine files" is the useful part of nine names.
+fn disk_news(clashed: &[String], gone: &[String]) -> Option<String> {
+    let said = |names: &[String], one: &str, many: &str| match names.len() {
+        0 => None,
+        1 => Some(format!("{} {one}", names[0])),
+        n => Some(format!("{n} files {many}")),
+    };
+    let clashed = said(
+        clashed,
+        "changed on disk, and has unsaved changes here",
+        "changed on disk and have unsaved changes here",
+    );
+    let gone = said(gone, "is gone from disk", "are gone from disk");
+    match (clashed, gone) {
+        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+        (Some(a), None) | (None, Some(a)) => Some(a),
+        (None, None) => None,
+    }
+}
+
+/// Whether a kind of code is the kind that has a definition to go to.
+///
+/// Types, functions and the names of things, but not the words the language
+/// itself is made of, not literals, and not local variables and parameters —
+/// a definition of `self` or of `0` is not a thing.
+fn names_something(role: Role) -> bool {
+    matches!(
+        role,
+        Role::Type
+            | Role::TypeBuiltin
+            | Role::Function
+            | Role::FunctionBuiltin
+            | Role::Method
+            | Role::Constructor
+            | Role::Macro
+            | Role::Namespace
+            | Role::Property
+            | Role::Constant
+            | Role::Attribute
+    )
+}
+
+/// The parts of a line of markdown that were written as code: the runs inside
+/// backticks, and the text of a link.
+///
+/// Character ranges, because that is what a column on the screen is. Nothing
+/// here is a markdown parser — it is looking for the two shapes a language
+/// server uses to say "this word is a name", and anything it misses is a word
+/// that does not light up, which is the safe way to be wrong.
+fn code_spans_in_prose(text: &str) -> Vec<std::ops::Range<usize>> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut at = 0;
+    while at < chars.len() {
+        match chars[at] {
+            '`' => {
+                // ``` and `` are both openers; the same run of them closes it.
+                let ticks = chars[at..].iter().take_while(|c| **c == '`').count();
+                let from = at + ticks;
+                let mut to = from;
+                while to < chars.len() {
+                    if chars[to] == '`'
+                        && chars[to..].iter().take_while(|c| **c == '`').count() == ticks
+                    {
+                        break;
+                    }
+                    to += 1;
+                }
+                if to < chars.len() && to > from {
+                    out.push(from..to);
+                }
+                at = (to + ticks).max(at + 1);
+            }
+            // `[text](url)` and `[text][ref]`. The text is the part a person
+            // reads and the part worth following; the URL is for a browser.
+            '[' => {
+                let from = at + 1;
+                match chars[from..].iter().position(|c| *c == ']') {
+                    Some(len) if len > 0 => {
+                        let close = from + len;
+                        // Only where it really is a link. A bare `[` in prose
+                        // is a bracket.
+                        let linked = chars
+                            .get(close + 1)
+                            .is_some_and(|c| *c == '(' || *c == '[' || *c == ':');
+                        // `[`Foo`](url)` is the ordinary shape, so the
+                        // backticks come off and the range is the name itself.
+                        let mut start = from;
+                        let mut end = close;
+                        while start < end && chars[start] == '`' {
+                            start += 1;
+                        }
+                        while end > start && chars[end - 1] == '`' {
+                            end -= 1;
+                        }
+                        if linked
+                            && end > start
+                            && !out.iter().any(|had| had.start <= start && end <= had.end)
+                        {
+                            out.push(start..end);
+                        }
+                        // Past the `]`, whatever was trimmed off inside it, so
+                        // the backtick that closed the name is not read as one
+                        // opening another.
+                        at = close + 1;
+                    }
+                    _ => at += 1,
+                }
+            }
+            _ => at += 1,
+        }
+    }
+    out
+}
+
+/// A name in a box of documentation that can be followed, and where on the
+/// screen its letters are.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Link {
+    pub word: String,
+    pub row: u16,
+    pub from: u16,
+    pub to: u16,
+}
+
+/// The word at a column of a line of rendered documentation, and the columns
+/// it occupies.
+///
+/// The same idea of a word the editor uses in code — letters, digits and
+/// underscores — because what is being clicked on in a docstring is a type or
+/// a function name, and the punctuation round it is prose.
+///
+/// A single letter is not a name anybody means to follow; `T` and `a` are
+/// everywhere in a paragraph of prose and lighting them up would make the
+/// whole box twitch as the pointer crossed it.
+fn word_span(line: &str, column: usize) -> Option<(String, usize, usize)> {
+    let chars: Vec<char> = line.chars().collect();
+    let part = |c: &char| c.is_alphanumeric() || *c == '_';
+    if !chars.get(column).is_some_and(part) {
+        return None;
+    }
+    let start = chars[..column]
+        .iter()
+        .rposition(|c| !part(c))
+        .map_or(0, |at| at + 1);
+    let end = chars[column..]
+        .iter()
+        .position(|c| !part(c))
+        .map_or(chars.len(), |at| column + at);
+    let word: String = chars[start..end].iter().collect();
+    // Nor is a bare number, which is a length or a version and not a type.
+    let worth_following =
+        word.chars().count() > 1 && word.chars().any(|c| c.is_alphabetic() || c == '_');
+    worth_following.then_some((word, start, end))
+}
+
+
 /// Whether every letter of `needle` appears in `haystack`, in order.
 fn subsequence(haystack: &str, needle: &str) -> bool {
     let mut chars = haystack.chars();
@@ -243,6 +429,217 @@ pub struct Popup {
     /// closed when you move away.
     pub at: usize,
     pub scroll: usize,
+    /// Whether the keyboard is in the box rather than in the text.
+    ///
+    /// A hover that steals every key would be a hover you had to escape from
+    /// to carry on typing, so it does not: it appears, and it goes away the
+    /// moment you touch anything. Asking for it a second time is what says
+    /// you want to read it rather than glance at it, and from then until you
+    /// leave it the arrows scroll it and it stays put.
+    pub focused: bool,
+    /// Where it was last drawn, inside its border, for answering clicks and
+    /// for working out which line the pointer is on.
+    pub area: Rect,
+    /// The same including the border, which is what decides whether the
+    /// pointer is still in the box. A pointer on the frame has not left.
+    pub outer: Rect,
+    /// Where the pointer is inside the box, if it is inside it. What makes a
+    /// name under the pointer light up as something you can click.
+    pub pointer: Option<(u16, u16)>,
+    /// What has been dragged over, as (line, character) pairs into `lines`:
+    /// where the drag started, and where it has got to.
+    ///
+    /// In the text's own coordinates rather than the screen's, so that
+    /// scrolling the box carries the selection with the words it is on rather
+    /// than leaving it behind on a row.
+    pub select: Option<(Spot, Spot)>,
+}
+
+/// A place in a box of documentation: which line, and how far into it.
+pub type Spot = (usize, usize);
+
+impl Popup {
+    pub fn new(lines: Vec<DocLine>, at: usize) -> Self {
+        Self {
+            lines,
+            at,
+            scroll: 0,
+            focused: false,
+            area: Rect::default(),
+            outer: Rect::default(),
+            pointer: None,
+            select: None,
+        }
+    }
+
+    /// How many rows of text the box shows.
+    fn rows(&self) -> usize {
+        (self.area.height as usize).max(1)
+    }
+
+    /// The furthest it can be scrolled: far enough that the last line is on
+    /// the bottom row, and no further.
+    ///
+    /// Scrolling past that would empty the box out from the top, which is the
+    /// thing that makes a popup feel as though it is falling apart while you
+    /// read it.
+    fn furthest(&self) -> usize {
+        self.lines.len().saturating_sub(self.rows())
+    }
+
+    pub fn scroll_by(&mut self, by: isize) {
+        self.scroll = (self.scroll as isize + by).clamp(0, self.furthest() as isize) as usize;
+    }
+
+    /// Which line of the text is on a given screen row.
+    fn line_at(&self, row: u16) -> Option<usize> {
+        if row < self.area.y || row >= self.area.y + self.area.height {
+            return None;
+        }
+        let at = self.scroll + (row - self.area.y) as usize;
+        (at < self.lines.len()).then_some(at)
+    }
+
+    /// The name under a point in the box, and where it is on that row.
+    ///
+    /// The columns come back so the drawing can underline exactly the letters
+    /// that would be followed, rather than the whole line or nothing.
+    pub fn link_at(&self, column: u16, row: u16) -> Option<Link> {
+        let line = self.line_at(row)?;
+        if column < self.area.x || column >= self.area.x + self.area.width {
+            return None;
+        }
+        let at = (column - self.area.x) as usize;
+        let line = &self.lines[line];
+        // Only where the markup said this was a name rather than a word.
+        if !line.links.iter().any(|range| range.contains(&at)) {
+            return None;
+        }
+        let (word, start, end) = word_span(&line.text, at)?;
+        Some(Link {
+            word,
+            row,
+            from: self.area.x + start as u16,
+            to: self.area.x + (end.min(self.area.width as usize)) as u16,
+        })
+    }
+
+    /// The place in the text under a point on the screen.
+    ///
+    /// Clamped rather than refused: dragging off the end of a short line
+    /// should take the whole of it, which is what dragging does everywhere.
+    pub fn spot_at(&self, column: u16, row: u16) -> Option<Spot> {
+        if self.lines.is_empty() {
+            return None;
+        }
+        let down = row.saturating_sub(self.area.y) as usize;
+        let line = (self.scroll + down).min(self.lines.len() - 1);
+        let across = column.saturating_sub(self.area.x) as usize;
+        let width = self.lines[line].text.chars().count();
+        Some((line, across.min(width)))
+    }
+
+    /// The selection the right way round, whichever way it was dragged.
+    fn selected(&self) -> Option<(Spot, Spot)> {
+        let (anchor, head) = self.select?;
+        Some(if anchor <= head {
+            (anchor, head)
+        } else {
+            (head, anchor)
+        })
+    }
+
+    /// Which characters of one line are selected, for the drawing.
+    pub fn selected_on(&self, line: usize) -> Option<(usize, usize)> {
+        let (start, end) = self.selected()?;
+        if line < start.0 || line > end.0 {
+            return None;
+        }
+        let width = self.lines.get(line)?.text.chars().count();
+        let from = if line == start.0 { start.1 } else { 0 };
+        // A line selected through to the next one takes its line break with
+        // it, which is one column past its last character.
+        let to = if line == end.0 { end.1 } else { width + 1 };
+        (to > from).then_some((from, to.min(width)))
+    }
+
+    /// Grow the selection to the word around where it was made, for a double
+    /// click.
+    pub fn take_word(&mut self) {
+        let Some((line, at)) = self.select.map(|(_, head)| head) else {
+            return;
+        };
+        let Some(text) = self.lines.get(line).map(|l| &l.text) else {
+            return;
+        };
+        let chars: Vec<char> = text.chars().collect();
+        let part = |c: &char| c.is_alphanumeric() || *c == '_';
+        let at = at.min(chars.len().saturating_sub(1));
+        if !chars.get(at).is_some_and(part) {
+            return;
+        }
+        let from = chars[..at].iter().rposition(|c| !part(c)).map_or(0, |n| n + 1);
+        let to = chars[at..]
+            .iter()
+            .position(|c| !part(c))
+            .map_or(chars.len(), |n| at + n);
+        self.select = Some(((line, from), (line, to)));
+    }
+
+    /// The whole line the selection is sitting on, for a Ctrl-C with nothing
+    /// dragged over — which is what Ctrl-C means everywhere else in the
+    /// editor.
+    fn line_text(&self, line: usize) -> String {
+        self.lines
+            .get(line)
+            .map(|l| if l.text == RULE { String::new() } else { l.text.clone() })
+            .unwrap_or_default()
+    }
+
+    /// What has been dragged over, as text.
+    pub fn selected_text(&self) -> Option<String> {
+        let (start, end) = self.selected()?;
+        if start == end {
+            // A bare caret takes its line, the way it does in the editor.
+            return Some(self.line_text(start.0));
+        }
+        let mut out = String::new();
+        for line in start.0..=end.0 {
+            if line > start.0 {
+                out.push('\n');
+            }
+            let text = self.line_text(line);
+            let width = text.chars().count();
+            let from = if line == start.0 { start.1 } else { 0 };
+            let to = if line == end.0 { end.1.min(width) } else { width };
+            if to > from {
+                out.extend(text.chars().skip(from).take(to - from));
+            }
+        }
+        Some(out)
+    }
+}
+
+/// Fixes the language server is holding ready for the problem under the
+/// cursor.
+pub struct Fixes {
+    /// Which buffer they are about. Where in it is [`App::fixes_at`], which is
+    /// the same fact the request was keyed on and so the one that decides
+    /// whether an answer is still about anywhere.
+    pub doc: DocId,
+    pub server: ServerId,
+    pub actions: Vec<Value>,
+}
+
+impl Fixes {
+    /// The shortest useful thing to call the first one, for a status bar with
+    /// a line to spare and not a line to waste.
+    pub fn headline(&self) -> Option<&str> {
+        self.actions
+            .first()
+            .and_then(|a| a.get("title"))
+            .and_then(Value::as_str)
+    }
 }
 
 /// Something to tell the person using the editor.
@@ -279,11 +676,16 @@ enum Drag {
     /// Selecting text, character by character.
     Text,
     /// Selecting text a word at a time, having started with a double click.
-    Words { anchor_start: usize, anchor_end: usize },
+    Words {
+        anchor_start: usize,
+        anchor_end: usize,
+    },
     /// A line at a time, having started with a triple click.
     Lines { anchor: usize },
     /// Moving the view with the scroll bar.
     Scrollbar,
+    /// Dragging over the text of a hover, to copy part of it.
+    Popup,
 }
 
 pub struct App {
@@ -322,6 +724,9 @@ pub struct App {
     /// Where files come from for the file picker, and where a project-wide
     /// search searches.
     pub project: PathBuf,
+    /// What git says about the project and the files open from it: the
+    /// branch, and which lines differ from the last commit.
+    pub git: Tracker,
     /// Files found by the walking thread, kept so the picker opens instantly
     /// the second time.
     files: Option<Vec<PathBuf>>,
@@ -354,6 +759,31 @@ pub struct App {
     resting: Option<(Instant, u16, u16)>,
     /// When to ask for completions, having waited for typing to stop.
     completion_due: Option<Instant>,
+    /// What the language server would do about the problem under the cursor,
+    /// fetched before anybody asks so that it can be offered rather than
+    /// waited for. This is the whole of "you have not imported that" being
+    /// something you can see instead of something you have to go looking for.
+    pub fixes: Option<Fixes>,
+    /// Where the fixes were last asked about, so the same question is not
+    /// asked twice for a cursor that has not moved.
+    fixes_at: Option<(DocId, usize)>,
+    /// When to ask, having waited for the cursor to stop. Walking along a line
+    /// of red would otherwise be one request per character.
+    fixes_due: Option<Instant>,
+    /// How many times we have asked about this spot and been turned away. A
+    /// server that is still catching up answers "content modified" rather than
+    /// answering, and the first ask after a file opens nearly always is.
+    fixes_tries: u8,
+    /// Whether the first copy of the session has said where copied text goes.
+    /// Once, because "copied 12 characters through wl-copy and OSC 52" is
+    /// worth reading the first time and noise every time after.
+    said_clipboard: bool,
+    /// When the diff against the last commit was last worked out.
+    git_checked: Instant,
+    /// When the open files were last looked at on disk. A `stat` per open file
+    /// is cheap, but not so cheap that it is worth doing several times a
+    /// second for the sake of noticing a `git checkout` a moment sooner.
+    disk_checked: Instant,
     /// A document waiting to be written once the formatter answers. Formatting
     /// on save is a round trip to a language server, so the save cannot happen
     /// until the edits are in — saving first would write the old text and
@@ -393,6 +823,7 @@ impl App {
             clipboard: String::new(),
             last_search: String::new(),
             project,
+            git: Tracker::default(),
             files: None,
             files_walking: false,
             quit: false,
@@ -406,9 +837,17 @@ impl App {
             last_click: None,
             resting: None,
             completion_due: None,
+            fixes: None,
+            fixes_at: None,
+            fixes_due: None,
+            fixes_tries: 0,
+            said_clipboard: false,
+            git_checked: Instant::now() - GIT_CHECK_EVERY,
+            disk_checked: Instant::now(),
             save_after_format: None,
             config,
         };
+        app.git.open(&app.project.clone());
         let scratch = app.new_scratch();
         app.panes.push(View::new(scratch, app.config.wrap()));
         app.complain_about_settings();
@@ -494,11 +933,7 @@ impl App {
 
     fn new_scratch(&mut self) -> DocId {
         let id = self.new_id();
-        let untitled = self
-            .docs
-            .iter()
-            .filter(|d| d.path.is_none())
-            .count();
+        let untitled = self.docs.iter().filter(|d| d.path.is_none()).count();
         let name = match untitled {
             0 => "untitled".to_string(),
             n => format!("untitled {}", n + 1),
@@ -530,6 +965,7 @@ impl App {
             // A directory is not a file, but it is a perfectly good thing to
             // have meant: search inside it.
             self.project = path;
+            self.git.open(&self.project.clone());
             self.files = None;
             self.open_files_picker();
             return;
@@ -552,20 +988,25 @@ impl App {
         }
     }
 
-    /// Show a document in the focused pane.
+    /// Show a document in the focused pane, back where that pane last was in
+    /// it.
     fn show(&mut self, id: DocId) {
         self.touch(id);
+        let at = self.focus.min(self.panes.len() - 1);
+        // Somewhere sensible to be if this pane has never shown this file:
+        // wherever another pane has it open, and otherwise the top.
         let selections = self
             .panes
             .iter()
             .find(|p| p.doc == id)
             .map(|p| p.sel.clone())
             .unwrap_or_default();
+        let len = self.doc(id).map(Document::len_chars).unwrap_or(0);
         let wrap = self.view().wrap;
-        let at = self.focus.min(self.panes.len() - 1);
-        self.panes[at].show(id, selections);
+        self.panes[at].revisit(id, selections, len);
         self.panes[at].wrap = wrap;
         self.dismiss_popups();
+        self.scroll_into_view();
         self.lsp_open(id);
     }
 
@@ -597,19 +1038,26 @@ impl App {
         }
         self.docs.retain(|d| d.id != id);
         self.seen.remove(&id);
+        self.git.forget(id);
         if self.docs.is_empty() {
             let fresh = self.new_scratch();
             for pane in &mut self.panes {
                 pane.show(fresh, Selections::default());
             }
-            return;
-        }
-        // Panes showing it move to whatever was looked at most recently.
-        let fallback = self.most_recent().unwrap_or(self.docs[0].id);
-        for pane in &mut self.panes {
-            if pane.doc == id {
-                pane.show(fallback, Selections::default());
+        } else {
+            // Panes showing it move to whatever was looked at most recently.
+            let fallback = self.most_recent().unwrap_or(self.docs[0].id);
+            for pane in &mut self.panes {
+                if pane.doc == id {
+                    pane.show(fallback, Selections::default());
+                }
             }
+        }
+        // After the panes have moved off it, not before: pointing a pane
+        // somewhere else is what puts away where it was, and putting away
+        // where it was in a buffer that has gone is what we are avoiding.
+        for pane in &mut self.panes {
+            pane.forget(id);
         }
     }
 
@@ -651,7 +1099,11 @@ impl App {
     /// How long to wait for the next event before doing the rounds anyway.
     /// Short while something is on a timer, long while nothing is.
     pub fn idle(&self) -> Duration {
-        if self.completion_due.is_some() || self.resting.is_some() || self.status.showing() {
+        if self.completion_due.is_some()
+            || self.fixes_due.is_some()
+            || self.resting.is_some()
+            || self.status.showing()
+        {
             Duration::from_millis(60)
         } else {
             Duration::from_millis(400)
@@ -672,6 +1124,209 @@ impl App {
         {
             self.resting = None;
             self.hover_at_screen(column, row);
+        }
+        self.check_fixes();
+        if self.disk_checked.elapsed() >= DISK_CHECK_EVERY {
+            self.disk_checked = Instant::now();
+            self.check_disk();
+            self.git.poll_head();
+        }
+        self.check_git();
+    }
+
+    /// Ask what could be done about the problem under the cursor, once per
+    /// place the cursor comes to rest on one.
+    ///
+    /// Only where there is a diagnostic: an editor that asked a language
+    /// server for advice about every character you moved past would be an
+    /// editor that spent its life waiting for one.
+    fn check_fixes(&mut self) {
+        let id = self.view().doc;
+        let at = self.view().cursor();
+        if self.fixes_at != Some((id, at)) {
+            // The cursor has moved, so last time's answer is about somewhere
+            // else. Ask again once it stops.
+            self.fixes = None;
+            self.fixes_at = Some((id, at));
+            self.fixes_tries = 0;
+            let on_a_problem = self
+                .doc(id)
+                .is_some_and(|d| d.diagnostics.iter().any(|p| p.range.contains(at)));
+            self.fixes_due = on_a_problem.then(|| Instant::now() + FIX_DELAY);
+            return;
+        }
+        let Some(due) = self.fixes_due else { return };
+        if due > Instant::now() {
+            return;
+        }
+        self.fixes_due = None;
+        let range = Range::point(at);
+        let App { docs, lsp, .. } = self;
+        if let Some(doc) = docs.iter().find(|d| d.id == id) {
+            lsp.quick_fixes(doc, range);
+        }
+    }
+
+    /// Ask again after being turned away, up to a point.
+    ///
+    /// A few times rather than for ever: a server that will not answer this
+    /// question is a server we should stop asking, and the cost of being wrong
+    /// about that is one code action nobody was told about.
+    fn retry_fixes(&mut self, doc: DocId, at: usize) {
+        if self.fixes_at != Some((doc, at)) || self.fixes_tries >= FIX_TRIES {
+            return;
+        }
+        self.fixes_tries += 1;
+        self.fixes_due = Some(Instant::now() + FIX_DELAY * 2);
+    }
+
+    fn take_quick_fixes(&mut self, server: ServerId, doc: DocId, at: usize, value: Value) {
+        // Anything that came back about somewhere the cursor has since left is
+        // an answer to a question nobody is asking any more.
+        if self.fixes_at != Some((doc, at)) {
+            return;
+        }
+        let Value::Array(actions) = value else { return };
+        let actions: Vec<Value> = actions
+            .into_iter()
+            .filter(|a| a.get("title").and_then(Value::as_str).is_some())
+            .collect();
+        if actions.is_empty() {
+            return;
+        }
+        self.fixes = Some(Fixes {
+            doc,
+            server,
+            actions,
+        });
+    }
+
+    /// Do the obvious thing about the problem under the cursor.
+    ///
+    /// One fix means one keystroke: the import goes in and you carry on
+    /// typing, which is the whole point and the reason nobody should have to
+    /// scroll to the top of a file to add a line they already know the text
+    /// of. Several means a list, because there is a choice to make.
+    fn fix_it(&mut self) {
+        let Some(fixes) = &self.fixes else {
+            // Nothing waiting: it may simply not have come back yet, or there
+            // may be nothing wrong here at all.
+            let on_a_problem = {
+                let at = self.view().cursor();
+                self.here().diagnostics.iter().any(|d| d.range.contains(at))
+            };
+            return self.say(if on_a_problem {
+                "no fix offered for this"
+            } else {
+                "nothing wrong here to fix"
+            });
+        };
+        if fixes.actions.len() == 1 {
+            let (server, action) = (fixes.server, fixes.actions[0].clone());
+            let title = action
+                .get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("fixed it")
+                .to_string();
+            self.fixes = None;
+            self.do_code_action(server, action);
+            return self.say_good(title);
+        }
+        let (server, actions) = (fixes.server, fixes.actions.clone());
+        self.take_code_actions(server, Value::Array(actions));
+    }
+
+    /// Work out which lines differ from the last commit, for whatever is on
+    /// the screen.
+    ///
+    /// Only the panes, rather than every open buffer: a diff is cheap but not
+    /// free, and a mark in a gutter nobody is looking at is worth nothing. The
+    /// buffers behind the other tabs catch up the moment you switch to them.
+    fn check_git(&mut self) {
+        if !self.git.watching() {
+            return;
+        }
+        // A diff of a large file is under a millisecond, but so is a keystroke,
+        // and there is no reason to spend one on the other. Marks that lag
+        // typing by a tenth of a second are marks nobody notices lagging.
+        if self.git_checked.elapsed() < GIT_CHECK_EVERY {
+            return;
+        }
+        self.git_checked = Instant::now();
+        self.refresh_git();
+    }
+
+    /// The work `check_git` decides how often to do.
+    fn refresh_git(&mut self) {
+        let showing: Vec<DocId> = self.panes.iter().map(|p| p.doc).collect();
+        for id in showing {
+            let App { docs, git, .. } = self;
+            if let Some(doc) = docs.iter().find(|d| d.id == id) {
+                git.refresh(doc);
+            }
+        }
+    }
+
+    /// Notice files written by something that is not this editor.
+    ///
+    /// A build that reformats, a `git checkout`, the same file open somewhere
+    /// else. A buffer with nothing unsaved in it is simply read again, because
+    /// there is nothing to lose and looking at text that is no longer in the
+    /// file is worse than useless. A buffer with unsaved changes is left
+    /// exactly alone and marked, because only the person editing it can say
+    /// which side wins.
+    fn check_disk(&mut self) {
+        let ids: Vec<DocId> = self
+            .docs
+            .iter()
+            .filter(|d| d.path.is_some())
+            .map(|d| d.id)
+            .collect();
+        let auto = self.config.reload_on_change();
+        let mut reloaded: Vec<String> = Vec::new();
+        let mut clashed: Vec<String> = Vec::new();
+        let mut waiting: Vec<String> = Vec::new();
+        let mut gone: Vec<String> = Vec::new();
+
+        for id in ids {
+            let Some(doc) = self.doc_mut(id) else {
+                continue;
+            };
+            let was = doc.on_disk;
+            let now = doc.check_disk();
+            if now == was || now == OnDisk::Same {
+                continue;
+            }
+            let name = doc.name.clone();
+            let modified = doc.is_modified();
+            match now {
+                OnDisk::Gone => gone.push(name),
+                OnDisk::Changed if modified => clashed.push(name),
+                OnDisk::Changed if !auto => waiting.push(name),
+                OnDisk::Changed => {
+                    if self.take_from_disk(id).is_ok() {
+                        reloaded.push(name);
+                    }
+                }
+                OnDisk::Same => {}
+            }
+        }
+
+        // One line, whatever happened, and the worst of it first: an unsaved
+        // buffer that no longer matches its file is the thing you have to do
+        // something about.
+        if let Some(said) = disk_news(&clashed, &gone) {
+            self.say_bad(said);
+        } else if !waiting.is_empty() {
+            self.say(match waiting.len() {
+                1 => format!("{} changed on disk — reload to take it", waiting[0]),
+                n => format!("{n} files changed on disk — reload to take them"),
+            });
+        } else if !reloaded.is_empty() {
+            self.say(match reloaded.len() {
+                1 => format!("{} changed on disk — read again", reloaded[0]),
+                n => format!("{n} files changed on disk — read again"),
+            });
         }
     }
 
@@ -736,11 +1391,19 @@ impl App {
             return self.open_prompt(PromptKind::OpenPath);
         }
 
+        // A hover you have asked to read takes the keys that read it, and
+        // hands back everything else — along with itself, since a key that
+        // means something in the text is a key that has finished with the box.
+        if self.hover.as_ref().is_some_and(|h| h.focused) && self.hover_key(key) {
+            return;
+        }
+
         match &mut self.overlay {
             Overlay::Picker(_) => return self.picker_key(key),
             Overlay::Prompt(_) => return self.prompt_key(key),
             Overlay::Confirm(_) => return self.confirm_key(key),
             Overlay::Help(_) => return self.help_key(key),
+            Overlay::Menu(_) => return self.menu_key(key),
             Overlay::None => {}
         }
 
@@ -792,9 +1455,7 @@ impl App {
             if triggers.contains(&c) {
                 self.completion = None;
                 self.ask_for_completions(Some(c), false);
-            } else if self.completion.is_none()
-                && (c.is_alphanumeric() || c == '_')
-            {
+            } else if self.completion.is_none() && (c.is_alphanumeric() || c == '_') {
                 // Wait for typing to stop, so a word is one request.
                 self.completion_due = Some(Instant::now() + COMPLETION_DELAY);
             }
@@ -842,17 +1503,32 @@ impl App {
 
     /// Everything to do after the text changed.
     fn after_edit(&mut self, edits: Vec<crate::doc::AppliedEdit>) {
+        let id = self.view().doc;
+        let focus = self.focus.min(self.panes.len() - 1);
+        self.after_edit_to(id, edits, Some(focus));
+    }
+
+    /// Everything that has to happen after a document's text changes, for a
+    /// document that is not necessarily the one being looked at.
+    ///
+    /// `absorbed` names the pane that has already taken the edits in — the one
+    /// that made them. A change from somewhere other than a keystroke, like a
+    /// file being re-read underneath us, has no such pane and passes `None`.
+    fn after_edit_to(
+        &mut self,
+        id: DocId,
+        edits: Vec<crate::doc::AppliedEdit>,
+        absorbed: Option<usize>,
+    ) {
         if edits.is_empty() {
             return;
         }
-        let id = self.view().doc;
         let len = self.doc(id).map(Document::len_chars).unwrap_or(0);
 
         // Every other pane looking at this document has cursors that were
         // pointing at text that has moved.
-        let focus = self.focus.min(self.panes.len() - 1);
         for (at, pane) in self.panes.iter_mut().enumerate() {
-            if at != focus && pane.doc == id {
+            if Some(at) != absorbed && pane.doc == id {
                 pane.absorb(&edits, len);
             }
         }
@@ -876,7 +1552,9 @@ impl App {
             doc.take_pending();
         }
         self.hover = None;
-        self.scroll_into_view();
+        if self.view().doc == id {
+            self.scroll_into_view();
+        }
     }
 
     fn scroll_into_view(&mut self) {
@@ -1084,7 +1762,7 @@ impl App {
             Cmd::Copy => self.copy(false),
             Cmd::Cut => self.copy(true),
             Cmd::Paste => {
-                let text = self.clipboard.clone();
+                let text = self.system_clipboard();
                 if text.is_empty() {
                     self.say("nothing to paste");
                 } else {
@@ -1106,6 +1784,14 @@ impl App {
             Cmd::SaveAll => self.save_all(),
             Cmd::Reload => self.reload(),
             Cmd::Close => self.close(false),
+            Cmd::CloseOthers => self.close_many(Keep::Others),
+            Cmd::CloseSaved => self.close_many(Keep::Unsaved),
+            Cmd::CloseAll => self.close_many(Keep::Nothing),
+            Cmd::CopyPath => self.copy_path(false),
+            Cmd::CopyRelativePath => self.copy_path(true),
+            Cmd::ContextMenu => self.open_context_menu(),
+            Cmd::NextChange => self.change_step(true),
+            Cmd::PrevChange => self.change_step(false),
             Cmd::CloseForce => self.close(true),
             Cmd::Quit => self.leave(false),
             Cmd::QuitForce => self.leave(true),
@@ -1139,6 +1825,7 @@ impl App {
             Cmd::Hover => self.ask_hover(self.view().cursor()),
             Cmd::Rename => self.start_rename(),
             Cmd::CodeAction => self.ask_code_actions(),
+            Cmd::FixIt => self.fix_it(),
             Cmd::Format => self.format(),
             Cmd::Symbols => self.ask_symbols(),
             Cmd::WorkspaceSymbols => self.open_workspace_symbols(),
@@ -1285,6 +1972,19 @@ impl App {
         self.scroll_into_view();
     }
 
+    /// What Ctrl-V should put in.
+    ///
+    /// Whatever is on the desktop's clipboard, where that can be asked for,
+    /// so that a copy made in a browser pastes into the editor without going
+    /// through the terminal's own paste key. Where it cannot, what Ctrl-C last
+    /// took, which is the most this can honestly know.
+    fn system_clipboard(&mut self) -> String {
+        if let Some(text) = crate::term::from_clipboard() {
+            self.clipboard = text;
+        }
+        self.clipboard.clone()
+    }
+
     fn copy(&mut self, cut: bool) {
         // Copying with nothing selected takes the line, which is what people
         // mean by Ctrl-C on a line they are standing on.
@@ -1314,10 +2014,19 @@ impl App {
             self.view_mut().sel.collapse_selections();
         }
         let count = self.clipboard.chars().count();
-        self.say(format!(
-            "{} {count} characters",
-            if cut { "cut" } else { "copied" }
-        ));
+        let did = if cut { "cut" } else { "copied" };
+        if self.said_clipboard {
+            self.say(format!("{did} {count} characters"));
+        } else {
+            // Where a copy goes is the one thing about a terminal editor
+            // nobody can work out by looking, so it is said once, on the first
+            // copy, and then never again.
+            self.said_clipboard = true;
+            self.say(format!(
+                "{did} {count} characters — {}",
+                crate::term::clipboard_story()
+            ));
+        }
     }
 
     fn on_paste(&mut self, text: &str) {
@@ -1338,7 +2047,13 @@ impl App {
                 self.on_prompt_changed();
                 return;
             }
+            // A menu has nothing to type into. Pasting is you having finished
+            // with it, so it closes and the text goes where it was going.
+            Overlay::Menu(_) => self.overlay = Overlay::None,
             _ => {}
+        }
+        if self.hover.as_ref().is_some_and(|h| h.focused) {
+            self.hover = None;
         }
         // A pasted `\r\n` is the terminal's idea of a line break, not the
         // file's; the rope only ever holds `\n`.
@@ -1412,6 +2127,9 @@ impl App {
                     // language server has never heard of.
                     lsp.open(doc);
                 }
+                // Saving is how a file git has never seen becomes one it has,
+                // and how a "save as" becomes a different file entirely.
+                self.git.forget_baseline(id);
                 self.say_good(format!("saved {name}, {lines} lines"));
             }
             Err(e) => self.say_bad(format!("{e}")),
@@ -1429,8 +2147,12 @@ impl App {
         let final_newline = self.config.final_newline();
         let mut failed = Vec::new();
         for id in ids {
-            let Some(doc) = self.doc_mut(id) else { continue };
-            let Some(path) = doc.path.clone() else { continue };
+            let Some(doc) = self.doc_mut(id) else {
+                continue;
+            };
+            let Some(path) = doc.path.clone() else {
+                continue;
+            };
             if let Err(e) = doc.save_to(&path, final_newline) {
                 failed.push(format!("{e}"));
                 continue;
@@ -1439,6 +2161,7 @@ impl App {
             if let Some(doc) = docs.iter().find(|d| d.id == id) {
                 lsp.did_save(doc);
             }
+            self.git.forget_baseline(id);
         }
         match failed.first() {
             Some(problem) => self.say_bad(problem.clone()),
@@ -1487,25 +2210,48 @@ impl App {
     }
 
     fn do_reload(&mut self, id: DocId) {
-        let Some(path) = self.doc(id).and_then(|d| d.path.clone()) else {
-            return self.say("this buffer has no file to read");
-        };
-        let indent = self.default_indent();
-        match Document::open(id, &path, indent) {
-            Ok(fresh) => {
-                let len = fresh.len_chars();
-                if let Some(at) = self.docs.iter().position(|d| d.id == id) {
-                    self.docs[at] = fresh;
-                }
-                for pane in &mut self.panes {
-                    if pane.doc == id {
-                        pane.sel.clamp(len);
-                    }
-                }
-                self.say_good("read again from disk");
-            }
+        match self.take_from_disk(id) {
+            Ok(true) => self.say_good("read again from disk"),
+            Ok(false) => self.say("already what is on disk"),
             Err(e) => self.say_bad(format!("{e}")),
         }
+    }
+
+    /// Replace a buffer's text with what is on the file now, keeping where
+    /// everybody was looking.
+    ///
+    /// The new text goes in as an ordinary edit rather than as a new
+    /// `Document`. That is what makes the rest of the editor keep working
+    /// across a re-read: cursors are carried by the same code that carries
+    /// them across a paste, language servers are told what changed instead of
+    /// being left holding the old text, and the whole thing can be undone.
+    ///
+    /// Answers whether anything actually differed.
+    fn take_from_disk(&mut self, id: DocId) -> anyhow::Result<bool> {
+        let Some(path) = self.doc(id).and_then(|d| d.path.clone()) else {
+            anyhow::bail!("this buffer has no file to read");
+        };
+        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        let text = if text.contains("\r\n") {
+            text.replace("\r\n", "\n")
+        } else {
+            text
+        };
+
+        let Some(doc) = self.doc_mut(id) else {
+            anyhow::bail!("that buffer has gone");
+        };
+        if doc.rope == text.as_str() {
+            doc.mark_saved();
+            return Ok(false);
+        }
+        let len = doc.len_chars();
+        let sel = crate::text::Selections::single(Range::point(0));
+        let edits = doc.apply_atomic(vec![crate::doc::Change::replace(0, len, text)], &sel);
+        doc.mark_saved();
+        self.after_edit_to(id, edits, None);
+        Ok(true)
     }
 
     fn close(&mut self, force: bool) {
@@ -1523,6 +2269,60 @@ impl App {
             return;
         }
         self.close_doc(id);
+    }
+
+    /// Close several buffers at once, from a tab menu or the palette.
+    ///
+    /// Anything with unsaved changes in it is left open and counted, rather
+    /// than asking about each one in turn: a question per file is a question
+    /// nobody reads by the fourth time, and closing a tab is not worth losing
+    /// work over. What is left behind says so.
+    fn close_many(&mut self, keep: Keep) {
+        let here = self.view().doc;
+        let doomed: Vec<DocId> = self
+            .docs
+            .iter()
+            .filter(|d| match keep {
+                Keep::Others => d.id != here,
+                Keep::Unsaved => !d.is_modified(),
+                Keep::Nothing => true,
+            })
+            .map(|d| d.id)
+            .collect();
+        let mut closed = 0;
+        let mut kept = 0;
+        for id in doomed {
+            if self.doc(id).is_some_and(Document::is_modified) {
+                kept += 1;
+                continue;
+            }
+            self.close_doc(id);
+            closed += 1;
+        }
+        match (closed, kept) {
+            (0, 0) => self.say("nothing to close"),
+            (n, 0) => self.say(format!("closed {n} {}", plural("buffer", n))),
+            (n, k) => self.say(format!(
+                "closed {n} {}, kept {k} with unsaved changes",
+                plural("buffer", n)
+            )),
+        }
+    }
+
+    /// Put this file's path on the clipboard. What you want when you are about
+    /// to name it to something else — a shell, a colleague, a stack trace.
+    fn copy_path(&mut self, relative: bool) {
+        let Some(path) = self.here().path.clone() else {
+            return self.say("this buffer has no file behind it");
+        };
+        let text = if relative {
+            short(&path, &self.project)
+        } else {
+            path.display().to_string()
+        };
+        self.clipboard = text.clone();
+        crate::term::to_clipboard(&text);
+        self.say(format!("copied {text}"));
     }
 
     fn leave(&mut self, force: bool) {
@@ -1616,7 +2416,11 @@ impl App {
             "line_numbers" => {
                 let off = self.config.line_numbers() == LineNumbers::Off;
                 self.config.line_numbers = Some(if off { "absolute" } else { "off" }.into());
-                if off { "line numbers on" } else { "line numbers off" }
+                if off {
+                    "line numbers on"
+                } else {
+                    "line numbers off"
+                }
             }
             "relative_numbers" => {
                 let relative = matches!(
@@ -1633,7 +2437,11 @@ impl App {
             "show_whitespace" => {
                 let on = !self.config.show_whitespace();
                 self.config.show_whitespace = Some(on);
-                if on { "showing spaces and tabs" } else { "not showing spaces and tabs" }
+                if on {
+                    "showing spaces and tabs"
+                } else {
+                    "not showing spaces and tabs"
+                }
             }
             "mouse" => {
                 let on = !self.config.mouse();
@@ -1652,7 +2460,11 @@ impl App {
                     pane.wrap = on;
                     pane.left = 0;
                 }
-                if on { "long lines fold" } else { "long lines run off the side" }
+                if on {
+                    "long lines fold"
+                } else {
+                    "long lines run off the side"
+                }
             }
             "auto_completion" => {
                 let on = !self.config.auto_completion();
@@ -1666,22 +2478,38 @@ impl App {
             "auto_pairs" => {
                 let on = !self.config.auto_pairs();
                 self.config.auto_pairs = Some(on);
-                if on { "brackets close themselves" } else { "brackets are yours to close" }
+                if on {
+                    "brackets close themselves"
+                } else {
+                    "brackets are yours to close"
+                }
             }
             "format_on_save" => {
                 let on = !self.config.format_on_save();
                 self.config.format_on_save = Some(on);
-                if on { "formatting on save" } else { "not formatting on save" }
+                if on {
+                    "formatting on save"
+                } else {
+                    "not formatting on save"
+                }
             }
             "spaces" => {
                 let on = !self.config.spaces();
                 self.config.spaces = Some(on);
-                if on { "new files use spaces" } else { "new files use tabs" }
+                if on {
+                    "new files use spaces"
+                } else {
+                    "new files use tabs"
+                }
             }
             "trim_trailing_whitespace" => {
                 let on = !self.config.trim_trailing_whitespace();
                 self.config.trim_trailing_whitespace = Some(on);
-                if on { "trailing spaces go on save" } else { "trailing spaces stay" }
+                if on {
+                    "trailing spaces go on save"
+                } else {
+                    "trailing spaces stay"
+                }
             }
             _ => return,
         };
@@ -1699,6 +2527,26 @@ impl App {
 /// "place" or "places", so that a count of one does not read like a bug.
 fn places(n: usize) -> &'static str {
     if n == 1 { "place" } else { "places" }
+}
+
+/// `buffer` or `buffers`, for the counts a status line reports.
+fn plural(word: &'static str, n: usize) -> String {
+    if n == 1 {
+        word.to_string()
+    } else {
+        format!("{word}s")
+    }
+}
+
+/// Which buffers a bulk close leaves alone.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Keep {
+    /// Everything but the one you are looking at.
+    Others,
+    /// Everything with unsaved changes in it.
+    Unsaved,
+    /// Nothing.
+    Nothing,
 }
 
 /// A path as it is worth showing: relative to the project when it is inside
@@ -1751,12 +2599,17 @@ impl App {
                 .as_ref()
                 .map(|p| p.display().to_string())
                 .unwrap_or_default(),
-            PromptKind::Rename => text::word_text_at(&self.here().rope, self.view().cursor())
-                .unwrap_or_default(),
-            // A search box opens with the last search in it, selected in the
-            // sense that typing replaces it — which here means the caret is at
-            // the end and Ctrl-U clears it.
-            PromptKind::Find | PromptKind::ReplaceFind => self.last_search.clone(),
+            PromptKind::Rename => {
+                text::word_text_at(&self.here().rope, self.view().cursor()).unwrap_or_default()
+            }
+            // The search box opens empty. Opening it is nearly always the
+            // start of looking for something else, and a box with the last
+            // thing in it is a box you have to clear before you can type —
+            // the previous search is not lost, it is still what F3 finds.
+            PromptKind::Find => String::new(),
+            // Replace is the exception: "find that, and now change it" is the
+            // usual way round, so the last search is what you meant.
+            PromptKind::ReplaceFind => self.last_search.clone(),
             _ => String::new(),
         };
         let caret = input.chars().count();
@@ -1766,6 +2619,7 @@ impl App {
             caret,
             origin: matches!(kind, PromptKind::Find).then(|| self.view().sel.clone()),
             held: String::new(),
+            committed: false,
         });
         self.completion = None;
         self.dismiss_popups();
@@ -1778,8 +2632,10 @@ impl App {
         match (key.code, key.mods) {
             (KeyCode::Esc, _) => {
                 // Searching moved the cursor as you typed; changing your mind
-                // has to put it back where it was.
-                let origin = prompt.origin.take();
+                // has to put it back where it was. Unless you have pressed
+                // Enter, which is saying you meant to go there — leaving after
+                // that leaves you where you walked to.
+                let origin = prompt.origin.take().filter(|_| !prompt.committed);
                 self.overlay = Overlay::None;
                 if let Some(origin) = origin {
                     self.view_mut().sel = origin;
@@ -1787,10 +2643,18 @@ impl App {
                 }
                 return;
             }
-            (KeyCode::Enter, _) => return self.accept_prompt(),
-            (KeyCode::Backspace, KeyModifiers::CONTROL) | (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
-                prompt.delete_word()
+            // In the search box Enter is "the next one", not "done": looking
+            // through the hits is the whole of what you are doing, and having
+            // to reach for another key to keep going is what makes people
+            // close the box and press F3 instead. Escape is how you leave.
+            (KeyCode::Enter, mods) if prompt.kind == PromptKind::Find => {
+                let back = mods.contains(KeyModifiers::SHIFT) || mods.contains(KeyModifiers::ALT);
+                self.find_from_prompt(if back { -1 } else { 1 });
+                return;
             }
+            (KeyCode::Enter, _) => return self.accept_prompt(),
+            (KeyCode::Backspace, KeyModifiers::CONTROL)
+            | (KeyCode::Char('w'), KeyModifiers::CONTROL) => prompt.delete_word(),
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
                 prompt.input.clear();
                 prompt.caret = 0;
@@ -1803,21 +2667,24 @@ impl App {
             }
             (KeyCode::Home, _) => prompt.caret = 0,
             (KeyCode::End, _) => prompt.caret = prompt.input.chars().count(),
-            // Enter and the arrows step through hits without closing the box,
-            // so you can look before you leap.
-            (KeyCode::Down, _) | (KeyCode::F(3), _) => {
+            // The arrows and F3 do the same as Enter, for the hands that are
+            // already there.
+            (KeyCode::Down, _) => {
                 if prompt.kind == PromptKind::Find {
-                    let needle = prompt.input.clone();
-                    self.last_search = needle;
-                    self.find_step(1);
+                    self.find_from_prompt(1);
                 }
                 return;
             }
             (KeyCode::Up, _) => {
                 if prompt.kind == PromptKind::Find {
-                    let needle = prompt.input.clone();
-                    self.last_search = needle;
-                    self.find_step(-1);
+                    self.find_from_prompt(-1);
+                }
+                return;
+            }
+            (KeyCode::F(3), mods) => {
+                if prompt.kind == PromptKind::Find {
+                    let back = mods.contains(KeyModifiers::SHIFT);
+                    self.find_from_prompt(if back { -1 } else { 1 });
                 }
                 return;
             }
@@ -1840,17 +2707,27 @@ impl App {
         }
         let needle = prompt.input.clone();
         let origin = prompt.origin.clone();
+        let committed = prompt.committed;
         if needle.is_empty() {
-            if let Some(origin) = origin {
+            // Clearing the box puts you back where you started — unless Enter
+            // has already taken you somewhere on purpose.
+            if let Some(origin) = origin.filter(|_| !committed) {
                 self.view_mut().sel = origin;
                 self.scroll_into_view();
             }
             return;
         }
-        let from = origin
-            .as_ref()
-            .map(|sel| sel.primary().start())
-            .unwrap_or(0);
+        // From where the search started, so that typing another letter
+        // narrows the same hit rather than jumping to the next one. Once Enter
+        // has moved you on purpose, that place is where you now are.
+        let from = if committed {
+            self.view().sel.primary().start()
+        } else {
+            origin
+                .as_ref()
+                .map(|sel| sel.primary().start())
+                .unwrap_or(0)
+        };
         match self.search(&needle, from, true, true) {
             Some(range) => {
                 self.view_mut().sel = Selections::single(range);
@@ -1903,7 +2780,13 @@ impl App {
                     return;
                 }
                 let at = self.view().cursor();
-                let App { docs, lsp, panes, focus, .. } = self;
+                let App {
+                    docs,
+                    lsp,
+                    panes,
+                    focus,
+                    ..
+                } = self;
                 let id = panes[(*focus).min(panes.len() - 1)].doc;
                 let asked = docs
                     .iter()
@@ -1934,6 +2817,303 @@ impl App {
                 self.replace_all(&held, &input);
             }
         }
+    }
+
+    // ---- Reading a hover ----
+
+    /// Keys while the hover has the keyboard. Answers whether it took the key.
+    fn hover_key(&mut self, key: Key) -> bool {
+        let Some(hover) = &mut self.hover else {
+            return false;
+        };
+        // A page is a screenful less a row, so that the line you were reading
+        // when you pressed it is still there to pick up from.
+        let page = hover.rows().saturating_sub(1).max(1) as isize;
+        let furthest = hover.furthest();
+        match (key.code, key.mods) {
+            (KeyCode::Esc, _) => self.hover = None,
+            (KeyCode::Up, _) => hover.scroll_by(-1),
+            (KeyCode::Down, _) => hover.scroll_by(1),
+            (KeyCode::PageUp, _) => hover.scroll_by(-page),
+            (KeyCode::PageDown, _) | (KeyCode::Char(' '), KeyModifiers::NONE) => {
+                hover.scroll_by(page)
+            }
+            (KeyCode::Home, _) => hover.scroll = 0,
+            (KeyCode::End, _) => hover.scroll = furthest,
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => match hover.selected_text() {
+                Some(text) => {
+                    self.clipboard = text.clone();
+                    crate::term::to_clipboard(&text);
+                    let count = text.chars().count();
+                    self.say(format!("copied {count} characters"));
+                }
+                None => self.say("drag over the part you want, then Ctrl-C"),
+            },
+            (KeyCode::Enter, _) => self.hover_to_buffer(),
+            // Anything else is you carrying on with the file.
+            _ => {
+                self.hover = None;
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Put what the hover says into a buffer of its own.
+    ///
+    /// A box that floats over the text can only ever be read; a buffer is the
+    /// thing this editor already knows how to scroll, search, select and copy
+    /// out of, and it stays open in a tab while you go back to the code it is
+    /// about. Rather than teaching a popup to be an editor, the popup becomes
+    /// one.
+    fn hover_to_buffer(&mut self) {
+        let Some(hover) = self.hover.take() else {
+            return;
+        };
+        let text = hover
+            .lines
+            .iter()
+            .map(|line| if line.text == RULE { "" } else { &line.text })
+            .collect::<Vec<_>>()
+            .join("\n");
+        // The first line of a hover is nearly always the signature, which is
+        // the best short name there is for what the tab holds.
+        let title = hover
+            .lines
+            .iter()
+            .map(|line| line.text.trim())
+            .find(|line| !line.is_empty() && *line != RULE)
+            .unwrap_or("documentation");
+        let name = format!("docs: {}", text::truncate(title, 40));
+
+        let id = self.new_id();
+        let mut doc = Document::scratch(id, name, self.default_indent());
+        doc.set_text(&text);
+        // Markdown, because that is what a language server sends and what
+        // makes the fences and the headings read as themselves.
+        doc.language = lang::by_name("markdown").unwrap_or(LangId::PLAIN);
+        doc.reparse();
+        doc.mark_saved();
+        self.docs.push(doc);
+        self.show(id);
+    }
+
+    // ---- Context menus ----
+
+    fn menu_key(&mut self, key: Key) {
+        let Overlay::Menu(m) = &mut self.overlay else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => self.overlay = Overlay::None,
+            KeyCode::Up => m.step(-1),
+            KeyCode::Down => m.step(1),
+            KeyCode::Home => {
+                m.cursor = 0;
+                if m.chosen().is_none() {
+                    m.step(1);
+                }
+            }
+            KeyCode::End => {
+                m.cursor = m.len().saturating_sub(1);
+                if m.chosen().is_none() {
+                    m.step(-1);
+                }
+            }
+            KeyCode::Enter | KeyCode::Char(' ') => {
+                let chosen = m.chosen();
+                self.overlay = Overlay::None;
+                if let Some(action) = chosen {
+                    self.do_menu(action);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn do_menu(&mut self, action: menu::Action) {
+        match action {
+            menu::Action::Run(cmd) => self.run(cmd),
+            menu::Action::RunOn(id, cmd) => {
+                if self.doc(id).is_some() {
+                    self.show(id);
+                }
+                self.run(cmd);
+            }
+            menu::Action::Divide => {}
+        }
+    }
+
+    /// What the key on the keyboard for this command is called, for the right
+    /// of a menu row. `None` where nothing is bound to it, which is a row you
+    /// can still choose — it just has nothing to teach.
+    fn key_for(&self, cmd: Cmd) -> Option<String> {
+        self.keys.shortcut(cmd)
+    }
+
+    /// The menu for a place in the text: right-clicking code, or the
+    /// context-menu key.
+    ///
+    /// The same commands the keyboard has, in the order a person looks for
+    /// them: what to do with the selection, then what the language server
+    /// knows, then the rest.
+    fn text_menu(&self, anchor: (u16, u16)) -> Menu {
+        let has_server = self.lsp.primary_for(self.here()).is_some();
+        let writable = !self.here().read_only;
+        let selected = !self.view().sel.primary().is_empty();
+        let word = text::word_text_at(&self.here().rope, self.view().cursor()).is_some();
+        let can_undo = self.here().can_undo();
+        let can_redo = self.here().can_redo();
+
+        let row = |label: &str, cmd: Cmd| menu::Item::new(label, cmd).key(self.key_for(cmd));
+        Menu::new(
+            vec![
+                row("Cut", Cmd::Cut).enabled(writable),
+                row("Copy", Cmd::Copy),
+                row("Paste", Cmd::Paste).enabled(writable),
+                menu::Item::divider(),
+                row("Undo", Cmd::Undo).enabled(writable && can_undo),
+                row("Redo", Cmd::Redo).enabled(writable && can_redo),
+                menu::Item::divider(),
+                row("Go to definition", Cmd::GotoDefinition).enabled(has_server),
+                row("Find references", Cmd::References).enabled(has_server),
+                row("Rename…", Cmd::Rename).enabled(has_server && writable),
+                row("Fix it", Cmd::FixIt).enabled(self.fixes.is_some()),
+                row("What can be done here…", Cmd::CodeAction).enabled(has_server && writable),
+                row("What is this?", Cmd::Hover).enabled(has_server),
+                menu::Item::divider(),
+                row("Select line", Cmd::SelectLine),
+                row("Select all", Cmd::SelectAll),
+                row("Comment out", Cmd::ToggleComment).enabled(writable),
+                row("Reformat the file", Cmd::Format).enabled(has_server && writable),
+                menu::Item::divider(),
+                row("Find this word", Cmd::FindWordUnderCursor).enabled(word || selected),
+                row("Find it in every file", Cmd::Grep),
+            ],
+            anchor,
+        )
+    }
+
+    /// The menu for a tab.
+    fn tab_menu(&self, id: DocId, anchor: (u16, u16)) -> Menu {
+        let named = self.doc(id).is_some_and(|d| d.path.is_some());
+        let modified = self.doc(id).is_some_and(Document::is_modified);
+        let others = self.docs.len() > 1;
+        let any_saved = self.docs.iter().any(|d| !d.is_modified());
+
+        let row = |label: &str, cmd: Cmd| menu::Item::on(id, label, cmd).key(self.key_for(cmd));
+        Menu::new(
+            vec![
+                row("Save", Cmd::Save).enabled(modified || !named),
+                row("Read again from disk", Cmd::Reload).enabled(named),
+                menu::Item::divider(),
+                row("Close", Cmd::Close),
+                row("Close the others", Cmd::CloseOthers).enabled(others),
+                row("Close the saved ones", Cmd::CloseSaved).enabled(any_saved),
+                row("Close them all", Cmd::CloseAll),
+                menu::Item::divider(),
+                row("Copy its path", Cmd::CopyPath).enabled(named),
+                row("Copy its path from here", Cmd::CopyRelativePath).enabled(named),
+                menu::Item::divider(),
+                row("Open it in another pane", Cmd::Split),
+            ],
+            anchor,
+        )
+    }
+
+    /// To the next or previous line that differs from the last commit.
+    ///
+    /// A run of changed lines is one change, so this walks the edits you have
+    /// made rather than the lines they touched.
+    fn change_step(&mut self, forwards: bool) {
+        if !self.git.watching() {
+            return self.say("this file is not in a git repository");
+        }
+        let id = self.view().doc;
+        let here = text::line_of(&self.here().rope, self.view().cursor());
+        let Some(line) = self.git.next_change(id, here, forwards) else {
+            return self.say(match self.git.tracking(id) {
+                true => "nothing here differs from the last commit".into(),
+                false => format!("git has never seen {}", self.here().name),
+            });
+        };
+        self.view_mut().mark_jump();
+        self.go_to_line(line);
+        let count = self.git.changed_lines(id);
+        self.say(format!("{count} changed {}", plural("line", count)));
+    }
+
+    /// Go looking for a name across the project, having been given only the
+    /// name.
+    ///
+    /// This is what Ctrl-clicking a type in a docstring has to mean. There is
+    /// no "definition" to ask for — the name is in a paragraph of prose, not
+    /// in the code — so the question becomes the one a person would ask
+    /// instead: where in this project is there something called that?
+    fn look_up(&mut self, name: &str) {
+        // The best answer by far is the one Ctrl-clicking the code would have
+        // given, and it is available whenever the file itself uses the name:
+        // ask the server what is defined at that spot. That is what reaches a
+        // type in another crate, with the right one of the nine things called
+        // `HashMap` rather than a list of all nine.
+        if let Some(at) = self.first_use_of(name) {
+            let want = name.to_string();
+            let (doc, lsp) = self.doc_and_lsp();
+            if lsp
+                .goto_or(doc, at, Goto::Definition, Some(want))
+                .is_some()
+            {
+                self.view_mut().mark_jump();
+                return;
+            }
+        }
+        self.look_up_by_name(name);
+    }
+
+    /// Where in this file the name is used, as a word rather than as part of
+    /// a longer one.
+    ///
+    /// A position in real code is the only thing a language server can answer
+    /// "what is this?" about; a word in a paragraph of prose is not one.
+    fn first_use_of(&self, name: &str) -> Option<usize> {
+        if name.is_empty() {
+            return None;
+        }
+        let text = self.here().rope.to_string();
+        let part = |c: char| c.is_alphanumeric() || c == '_';
+        let mut from = 0;
+        while let Some(found) = text[from..].find(name) {
+            let at = from + found;
+            let before = text[..at].chars().next_back();
+            let after = text[at + name.len()..].chars().next();
+            if !before.is_some_and(part) && !after.is_some_and(part) {
+                return Some(text[..at].chars().count());
+            }
+            from = at + name.len();
+        }
+        None
+    }
+
+    /// Go looking for a name by name, because there is nowhere to ask about
+    /// it from.
+    fn look_up_by_name(&mut self, name: &str) {
+        let (doc, lsp) = self.doc_and_lsp();
+        if lsp
+            .workspace_symbols(doc, name, Some(name.to_string()))
+            .is_none()
+        {
+            return self.say(format!("no language server that can look up {name}"));
+        }
+        // The list opens straight away, with the name already in it, so that
+        // the wait is a list filling in rather than nothing happening. One
+        // answer replaces it with the place itself.
+        self.overlay = Overlay::Picker(Picker::searching(Kind::WorkspaceSymbols, name));
+    }
+
+    /// The context-menu key: no pointer, so the menu opens at the cursor.
+    fn open_context_menu(&mut self) {
+        let anchor = crate::ui::cursor_cell(self).unwrap_or((self.screen.x, self.screen.y));
+        self.overlay = Overlay::Menu(self.text_menu(anchor));
     }
 
     fn confirm_key(&mut self, key: Key) {
@@ -2197,7 +3377,11 @@ impl App {
                 rows.push(
                     Row::new(d.message.lines().next().unwrap_or("").to_string(), choice)
                         .detail(where_)
-                        .tag(d.source.clone().unwrap_or_else(|| d.severity.label().into()))
+                        .tag(
+                            d.source
+                                .clone()
+                                .unwrap_or_else(|| d.severity.label().into()),
+                        )
                         .severity(d.severity),
                 );
             }
@@ -2247,9 +3431,8 @@ impl App {
                 let last = picker.len().saturating_sub(1);
                 picker.select(last);
             }
-            (KeyCode::Backspace, KeyModifiers::CONTROL) | (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
-                picker.delete_word()
-            }
+            (KeyCode::Backspace, KeyModifiers::CONTROL)
+            | (KeyCode::Char('w'), KeyModifiers::CONTROL) => picker.delete_word(),
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => picker.clear(),
             (KeyCode::Backspace, _) => picker.backspace(),
             (KeyCode::Delete, _) => picker.delete(),
@@ -2332,6 +3515,15 @@ impl App {
                 self.view_mut().sel = Selections::single(Range::point(at.min(len)));
                 self.scroll_into_view();
                 self.centre_if_off_screen();
+            }
+            Choice::At {
+                target,
+                line,
+                column,
+            } => {
+                let (target, line, column) = (target.clone(), line, column);
+                self.view_mut().mark_jump();
+                self.go_to_target(target, line, column);
             }
             Choice::There { path, line, column } => {
                 self.view_mut().mark_jump();
@@ -2442,7 +3634,11 @@ impl App {
     /// it is about, and this is how to have both without copying the file.
     fn doc_and_lsp(&mut self) -> (&Document, &mut Servers) {
         let App {
-            docs, lsp, panes, focus, ..
+            docs,
+            lsp,
+            panes,
+            focus,
+            ..
         } = self;
         let id = panes[(*focus).min(panes.len() - 1)].doc;
         let doc = docs
@@ -2511,6 +3707,32 @@ impl App {
         Some(Range::new(start, start + pin.chars().count()))
     }
 
+    /// Step to the next or previous hit from inside the search box, leaving
+    /// the box open.
+    fn find_from_prompt(&mut self, by: isize) {
+        let Overlay::Prompt(prompt) = &mut self.overlay else {
+            return;
+        };
+        let needle = prompt.input.clone();
+        if needle.is_empty() {
+            // Nothing typed: fall back on the last thing that was, so Ctrl-F
+            // then Enter still means "that again".
+            let last = self.last_search.clone();
+            if last.is_empty() {
+                return;
+            }
+            if let Overlay::Prompt(prompt) = &mut self.overlay {
+                prompt.caret = last.chars().count();
+                prompt.input = last;
+                prompt.committed = true;
+            }
+            return self.on_prompt_changed();
+        }
+        prompt.committed = true;
+        self.last_search = needle;
+        self.find_step(by);
+    }
+
     fn find_step(&mut self, by: isize) {
         let needle = self.last_search.clone();
         if needle.is_empty() {
@@ -2539,8 +3761,34 @@ impl App {
 
     /// How many times a string appears in this file, for the search box to
     /// show while you are still typing it.
-    pub fn count_matches_of(&self, needle: &str) -> usize {
-        self.count_matches(needle)
+    /// Which hit the cursor is sitting on, counting from one, and how many
+    /// there are. "3 of 12" is what tells you whether pressing Enter again is
+    /// worth doing.
+    ///
+    /// `None` for the number when the cursor is not on a hit, which is the
+    /// case the moment you move away from one.
+    pub fn match_place_of(&self, needle: &str) -> (Option<usize>, usize) {
+        let total = self.count_matches(needle);
+        if total == 0 {
+            return (None, 0);
+        }
+        let doc = self.here();
+        let text = doc.rope.to_string();
+        let sensitive = needle.chars().any(char::is_uppercase);
+        let (hay, pin) = if sensitive {
+            (text, needle.to_string())
+        } else {
+            (text.to_lowercase(), needle.to_lowercase())
+        };
+        // Lowercasing can change how many bytes a character takes; where it
+        // does, the byte offsets below would not line up with the rope, so
+        // there is no honest answer to give.
+        if hay.len() != doc.rope.len_bytes() {
+            return (None, total);
+        }
+        let want = doc.rope.char_to_byte(self.view().sel.primary().start());
+        let at = hay.match_indices(&pin).position(|(byte, _)| byte == want);
+        (at.map(|n| n + 1), total)
     }
 
     fn count_matches(&self, needle: &str) -> usize {
@@ -2660,7 +3908,11 @@ impl App {
                                     column: line[..column.min(line.len())].chars().count(),
                                 },
                             )
-                            .detail(format!("{}:{}", short(&path, &project), number + 1)),
+                            .detail(format!(
+                                "{}:{}",
+                                short(&path, &project),
+                                number + 1
+                            )),
                         );
                         if rows.len() >= 500 {
                             break 'files;
@@ -2798,11 +4050,8 @@ impl App {
                 .or_else(|| sorted.last())
         };
         let Some(found) = next else { return };
-        let (start, message, severity) = (
-            found.range.start(),
-            found.message.clone(),
-            found.severity,
-        );
+        let (start, message, severity) =
+            (found.range.start(), found.message.clone(), found.severity);
         self.view_mut().mark_jump();
         let len = self.here().len_chars();
         self.view_mut().sel = Selections::single(Range::point(start.min(len)));
@@ -2841,7 +4090,11 @@ impl App {
                         .map(str::to_string)
                         .unwrap_or_else(|| "ready".into()),
                 };
-                format!("{} ({}): {state}", server.name, short(&server.root, &self.project))
+                format!(
+                    "{} ({}): {state}",
+                    server.name,
+                    short(&server.root, &self.project)
+                )
             })
             .collect();
         self.say(lines.join("   "));
@@ -2867,6 +4120,18 @@ impl App {
     }
 
     fn ask_hover(&mut self, at: usize) {
+        // Asking for a hover that is already on the screen is asking to read
+        // it rather than glance at it.
+        if let Some(hover) = &mut self.hover {
+            if !hover.focused {
+                hover.focused = true;
+                self.say(
+                    "arrows scroll, drag to select, Ctrl-C copies, Enter opens it in a tab",
+                );
+                return;
+            }
+            return self.hover_to_buffer();
+        }
         let (doc, lsp) = self.doc_and_lsp();
         if lsp.hover(doc, at).is_none() {
             // Without a server, say what the parser knows. It is not much, but
@@ -2890,7 +4155,7 @@ impl App {
     fn ask_workspace_symbols(&mut self, query: &str) {
         let (doc, lsp) = self.doc_and_lsp();
         let query = query.to_string();
-        if lsp.workspace_symbols(doc, &query).is_none() && query.is_empty() {
+        if lsp.workspace_symbols(doc, &query, None).is_none() && query.is_empty() {
             self.say("no language server that can search the project");
         }
     }
@@ -2978,8 +4243,8 @@ impl App {
         let mut landed = from + item.insert.chars().count();
         for edit in &edits {
             if edit.from < from {
-                landed = (landed as isize + edit.inserted as isize
-                    - (edit.to - edit.from) as isize) as usize;
+                landed = (landed as isize + edit.inserted as isize - (edit.to - edit.from) as isize)
+                    as usize;
             }
         }
         view.sel = Selections::single(Range::point(landed.min(doc.len_chars())));
@@ -3011,6 +4276,9 @@ impl App {
     }
 
     fn hover_at_screen(&mut self, column: u16, row: u16) {
+        if self.hover.as_ref().is_some_and(|h| h.focused) {
+            return;
+        }
         let Some(at) = self.position_at(column, row) else {
             return;
         };
@@ -3040,14 +4308,18 @@ impl App {
                 // server that has stopped.
                 self.lsp.respond(id, request_id.clone(), &method, &params);
                 if method == "workspace/applyEdit"
-                    && let Some(edit) = params.get("edit") {
-                        let count = self.apply_workspace_edit(edit);
-                        if count > 0 {
-                            self.say_good(format!("changed {count} {}", places(count)));
-                        }
+                    && let Some(edit) = params.get("edit")
+                {
+                    let count = self.apply_workspace_edit(edit);
+                    if count > 0 {
+                        self.say_good(format!("changed {count} {}", places(count)));
                     }
+                }
             }
-            Incoming::Response { id: request, result } => self.on_response(id, request, result),
+            Incoming::Response {
+                id: request,
+                result,
+            } => self.on_response(id, request, result),
             Incoming::Exited(why) => {
                 let name = self
                     .lsp
@@ -3123,6 +4395,15 @@ impl App {
         // go and everybody else's stay.
         doc.diagnostics.retain(|d| d.server != id.0);
         doc.diagnostics.extend(fresh);
+
+        // What is wrong here has changed, so what could be done about it has
+        // too — and the cursor may have been sitting on this spot since before
+        // there was anything wrong with it, which is exactly what opening a
+        // file at a compiler's line and column looks like.
+        if self.fixes_at.is_some_and(|(doc, _)| doc == doc_id) {
+            self.fixes = None;
+            self.fixes_at = None;
+        }
     }
 
     fn on_response(&mut self, id: ServerId, request: i64, result: Result<Value, String>) {
@@ -3133,8 +4414,14 @@ impl App {
             Ok(value) => value,
             Err(why) => {
                 // A failed request for something the editor asked for on its
-                // own — completions as you type — is not worth a word.
-                if !matches!(ask, Ask::Completion { .. } | Ask::Signature { .. }) {
+                // own — completions as you type, fixes for the problem under
+                // the cursor — is not worth a word.
+                if let Ask::QuickFixes { doc, at } = ask {
+                    // "content modified" is the usual one, and it means the
+                    // server was still catching up when we asked rather than
+                    // that there is nothing to offer. Ask again.
+                    self.retry_fixes(doc, at);
+                } else if !matches!(ask, Ask::Completion { .. } | Ask::Signature { .. }) {
                     self.say_bad(why);
                 }
                 return;
@@ -3149,10 +4436,14 @@ impl App {
             }
             Ask::Completion { doc, at, version } => self.take_completions(doc, at, version, value),
             Ask::Hover { doc, at } => self.take_hover(doc, at, value),
-            Ask::Goto { doc, what } => self.take_goto(doc, what, value),
+            Ask::Goto {
+                doc,
+                what,
+                fallback,
+            } => self.take_goto(doc, what, fallback, value),
             Ask::References => self.take_references(value),
             Ask::Symbols { doc } => self.take_symbols(doc, value),
-            Ask::WorkspaceSymbols => self.take_workspace_symbols(value),
+            Ask::WorkspaceSymbols { going } => self.take_workspace_symbols(going, value),
             Ask::Rename { to } => {
                 let count = self.apply_workspace_edit(&value);
                 match count {
@@ -3162,6 +4453,8 @@ impl App {
             }
             Ask::Format { doc, version } => self.take_format(doc, version, value),
             Ask::CodeActions => self.take_code_actions(id, value),
+            Ask::QuickFixes { doc, at } => self.take_quick_fixes(id, doc, at, value),
+            Ask::ClassFile { uri, line, column } => self.take_class_file(uri, line, column, value),
             Ask::Signature { doc, at } => self.take_signature(doc, at, value),
             Ask::ResolveAction => self.do_code_action(id, value),
             Ask::Command => {}
@@ -3232,11 +4525,20 @@ impl App {
         if lines.is_empty() {
             return;
         }
-        self.hover = Some(Popup {
-            lines,
-            at,
-            scroll: 0,
-        });
+        let mut popup = Popup::new(lines, at);
+        // A hover over something red is a hover over something you may be
+        // about to fix. Saying so here is where a person is already looking.
+        if let Some(fixes) = self.fixes.as_ref().filter(|f| f.doc == doc)
+            && let Some(title) = fixes.headline()
+        {
+            let key = self
+                .keys
+                .shortcut(Cmd::FixIt)
+                .unwrap_or_else(|| "Alt-i".into());
+            popup.lines.push(DocLine::prose(RULE.to_string()));
+            popup.lines.push(DocLine::prose(format!("{key}: {title}")));
+        }
+        self.hover = Some(popup);
     }
 
     fn take_signature(&mut self, doc: DocId, at: usize, value: Value) {
@@ -3266,35 +4568,33 @@ impl App {
                 .into_iter()
                 .take(4),
         );
-        self.signature = Some(Popup {
-            lines,
-            at,
-            scroll: 0,
-        });
+        self.signature = Some(Popup::new(lines, at));
     }
 
-    fn take_goto(&mut self, doc: DocId, what: Goto, value: Value) {
+    fn take_goto(&mut self, doc: DocId, what: Goto, fallback: Option<String>, value: Value) {
         if self.view().doc != doc {
             return;
         }
         let places = locations(&value);
         match places.len() {
-            0 => self.say(format!("no {} found", what.label())),
+            0 => match fallback {
+                Some(name) => self.look_up_by_name(&name),
+                None => self.say(format!("no {} found", what.label())),
+            },
             1 => {
-                let (path, line, column) = places[0].clone();
+                let (target, line, column) = places[0].clone();
                 self.view_mut().mark_jump();
-                self.open_path(&path);
-                self.go_to(line, column);
+                self.go_to_target(target, line, column);
             }
             _ => {
                 let project = self.project.clone();
                 let rows: Vec<Row> = places
                     .into_iter()
-                    .map(|(path, line, column)| {
+                    .map(|(target, line, column)| {
                         Row::new(
-                            short(&path, &project),
-                            Choice::There {
-                                path: path.clone(),
+                            target.label(&project),
+                            Choice::At {
+                                target,
                                 line,
                                 column,
                             },
@@ -3308,6 +4608,56 @@ impl App {
         }
     }
 
+    /// Go where a language server pointed.
+    fn go_to_target(&mut self, target: Target, line: usize, column: usize) {
+        match target {
+            Target::File(path) => {
+                self.open_path(&path);
+                self.go_to(line, column);
+            }
+            Target::Inside(uri) => {
+                // A class inside a jar. Only the server that named it can hand
+                // over the text, so the jump finishes when the answer arrives.
+                if let Some(existing) = self
+                    .docs
+                    .iter()
+                    .find(|d| d.origin.as_deref() == Some(uri.as_str()))
+                    .map(|d| d.id)
+                {
+                    self.show(existing);
+                    self.go_to(line, column);
+                    return;
+                }
+                let (doc, lsp) = self.doc_and_lsp();
+                if lsp.class_file(doc, &uri, line, column).is_none() {
+                    self.say("that is inside a library this server will not open");
+                }
+            }
+        }
+    }
+
+    /// Put the text of a class that lives inside a jar into a buffer.
+    fn take_class_file(&mut self, uri: String, line: usize, column: usize, value: Value) {
+        let Some(text) = value.as_str().filter(|t| !t.is_empty()) else {
+            return self.say("the server had nothing to show for that");
+        };
+        let project = self.project.clone();
+        let name = Target::Inside(uri.clone()).label(&project);
+        let id = self.new_id();
+        let mut doc = Document::scratch(id, name, self.default_indent());
+        doc.set_text(text);
+        doc.language = lang::by_name("java").unwrap_or(LangId::PLAIN);
+        doc.reparse();
+        doc.mark_saved();
+        // There is no file to write it back to, and a decompiled class is not
+        // something anybody means to edit.
+        doc.read_only = true;
+        doc.origin = Some(uri);
+        self.docs.push(doc);
+        self.show(id);
+        self.go_to(line, column);
+    }
+
     fn take_references(&mut self, value: Value) {
         let places = locations(&value);
         if places.is_empty() {
@@ -3316,29 +4666,32 @@ impl App {
         let project = self.project.clone();
         let rows: Vec<Row> = places
             .into_iter()
-            .map(|(path, line, column)| {
+            .map(|(target, line, column)| {
+                let where_ = target.label(&project);
                 // The line of code itself, where the file is one we have.
-                let preview = self
-                    .docs
-                    .iter()
-                    .find(|d| d.path.as_deref() == Some(path.as_path()))
-                    .and_then(|d| {
-                        (line < d.len_lines()).then(|| {
-                            let start = text::line_start(&d.rope, line);
-                            let end = text::line_end(&d.rope, line);
-                            d.rope.slice(start..end).to_string().trim().to_string()
-                        })
-                    })
-                    .unwrap_or_else(|| short(&path, &project));
+                let preview = match &target {
+                    Target::File(path) => self
+                        .docs
+                        .iter()
+                        .find(|d| d.path.as_deref() == Some(path.as_path()))
+                        .and_then(|d| {
+                            (line < d.len_lines()).then(|| {
+                                let start = text::line_start(&d.rope, line);
+                                let end = text::line_end(&d.rope, line);
+                                d.rope.slice(start..end).to_string().trim().to_string()
+                            })
+                        }),
+                    Target::Inside(_) => None,
+                };
                 Row::new(
-                    preview,
-                    Choice::There {
-                        path: path.clone(),
+                    preview.unwrap_or_else(|| where_.clone()),
+                    Choice::At {
+                        target,
                         line,
                         column,
                     },
                 )
-                .detail(format!("{}:{}", short(&path, &project), line + 1))
+                .detail(format!("{where_}:{}", line + 1))
             })
             .collect();
         self.view_mut().mark_jump();
@@ -3350,7 +4703,9 @@ impl App {
             return;
         }
         let mut rows = Vec::new();
-        let Some(document) = self.doc(doc) else { return };
+        let Some(document) = self.doc(doc) else {
+            return;
+        };
         collect_symbols(&value, document, 0, &mut rows);
         if rows.is_empty() {
             return self.say("nothing this file defines that the server will name");
@@ -3359,7 +4714,7 @@ impl App {
         self.overlay = Overlay::Picker(Picker::new(Kind::Symbols, rows));
     }
 
-    fn take_workspace_symbols(&mut self, value: Value) {
+    fn take_workspace_symbols(&mut self, going: Option<String>, value: Value) {
         let Value::Array(items) = &value else { return };
         let project = self.project.clone();
         let rows: Vec<Row> = items
@@ -3368,8 +4723,7 @@ impl App {
                 let name = item.get("name")?.as_str()?.to_string();
                 let location = item.get("location")?;
                 let path = crate::lsp::path_of(location.get("uri")?.as_str()?)?;
-                let (line, column) =
-                    crate::lsp::point_of(location.get("range")?.get("start")?)?;
+                let (line, column) = crate::lsp::point_of(location.get("range")?.get("start")?)?;
                 let mut row = Row::new(
                     name,
                     Choice::There {
@@ -3385,6 +4739,28 @@ impl App {
                 Some(row)
             })
             .collect();
+        // A name followed out of a docstring is a question with one right
+        // answer, not a list to browse: one hit goes there, and the list this
+        // opened with goes away with it.
+        if let Some(name) = going {
+            match rows.len() {
+                0 => {
+                    self.overlay = Overlay::None;
+                    return self.say(format!("nothing in this project called {name}"));
+                }
+                1 => {
+                    if let Choice::There { path, line, column } = &rows[0].choice {
+                        let (path, line, column) = (path.clone(), *line, *column);
+                        self.overlay = Overlay::None;
+                        self.view_mut().mark_jump();
+                        self.open_path(&path);
+                        self.go_to(line, column);
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
         if let Overlay::Picker(picker) = &mut self.overlay
             && picker.kind == Kind::WorkspaceSymbols
         {
@@ -3614,13 +4990,29 @@ pub struct DocLine {
     pub text: String,
     /// Empty for anything that is not code, which is drawn in one colour.
     pub spans: Spans,
+    /// The parts of this line that name something, as character ranges: the
+    /// only parts a pointer can follow.
+    ///
+    /// Documentation is mostly prose, and prose is full of words. "the",
+    /// "cursor", "document" and "primary" are not things to go to the
+    /// definition of, and a box where every word lights up as you sweep across
+    /// it is a box that has stopped meaning anything by lighting up. So this
+    /// is worked out where the markup is read, when it is still known which
+    /// letters were code and which were a sentence.
+    pub links: Vec<std::ops::Range<usize>>,
 }
 
 impl DocLine {
-    fn prose(text: impl Into<String>) -> Self {
+    /// A line of prose. What is followable in it is whatever the markdown
+    /// marked as code: `` `Foo` `` and the text of a `[`Foo`](…)` link, which
+    /// is how every language server writes a name it means as a name.
+    pub fn prose(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let links = code_spans_in_prose(&text);
         Self {
-            text: text.into(),
+            text,
             spans: Vec::new(),
+            links,
         }
     }
 
@@ -3784,7 +5176,18 @@ fn push_code(lines: &mut Vec<DocLine>, code: &str, lang: Option<LangId>) {
             range.end = range.end.min(text.len());
             range.start < range.end
         });
-        lines.push(DocLine { text, spans });
+        // In code, the names are the ones the grammar called names. A
+        // keyword, a string or a number is not somewhere to go.
+        let links = spans
+            .iter()
+            .filter(|(_, role)| names_something(*role))
+            .filter_map(|(range, _)| {
+                let start = text.get(..range.start)?.chars().count();
+                let len = text.get(range.clone())?.chars().count();
+                Some(start..start + len)
+            })
+            .collect();
+        lines.push(DocLine { text, spans, links });
     }
 }
 
@@ -3826,8 +5229,42 @@ fn code_spans(code: &str, lang: LangId) -> Option<Vec<Spans>> {
 }
 
 /// `Location`, `Location[]`, or `LocationLink[]`, as places.
-fn locations(value: &Value) -> Vec<(PathBuf, usize, usize)> {
-    fn one(value: &Value, out: &mut Vec<(PathBuf, usize, usize)>) {
+/// Somewhere a language server can point at.
+///
+/// Nearly always a file. Java is the exception worth the enum: `jdtls` answers
+/// "where is this defined" for anything out of a jar with a `jdt://` URI,
+/// which is not a file and never will be — the class is inside an archive, and
+/// the only way to see it is to ask the server to hand the text over.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    File(PathBuf),
+    /// A URI only the server that gave it out can make sense of.
+    Inside(String),
+}
+
+impl Target {
+    /// What to call it in a list of places.
+    fn label(&self, project: &Path) -> String {
+        match self {
+            Target::File(path) => short(path, project),
+            // `jdt://contents/rt.jar/java.util/List.class?=…` — everything
+            // after the `?` is for the server, and everything a person wants
+            // is the two parts before it.
+            Target::Inside(uri) => {
+                let head = uri.split('?').next().unwrap_or(uri);
+                let mut parts = head.rsplit('/');
+                let file = parts.next().unwrap_or(head);
+                match parts.next() {
+                    Some(package) => format!("{package}.{}", file.trim_end_matches(".class")),
+                    None => head.to_string(),
+                }
+            }
+        }
+    }
+}
+
+fn locations(value: &Value) -> Vec<(Target, usize, usize)> {
+    fn one(value: &Value, out: &mut Vec<(Target, usize, usize)>) {
         // A `LocationLink` names the target differently from a `Location`,
         // and servers pick whichever they like.
         let uri = value
@@ -3839,12 +5276,13 @@ fn locations(value: &Value) -> Vec<(PathBuf, usize, usize)> {
             .or_else(|| value.get("targetSelectionRange"))
             .or_else(|| value.get("targetRange"));
         if let (Some(uri), Some(range)) = (uri, range)
-            && let (Some(path), Some(start)) = (
-                crate::lsp::path_of(uri),
-                range.get("start").and_then(crate::lsp::point_of),
-            )
+            && let Some(start) = range.get("start").and_then(crate::lsp::point_of)
         {
-            out.push((path, start.0, start.1));
+            let target = match crate::lsp::path_of(uri) {
+                Some(path) => Target::File(path),
+                None => Target::Inside(uri.to_string()),
+            };
+            out.push((target, start.0, start.1));
         }
     }
     let mut out = Vec::new();
@@ -4067,11 +5505,8 @@ fn collect_symbols(value: &Value, doc: &Document, depth: usize, out: &mut Vec<Ro
             continue;
         };
         let at = doc.char_at_lsp_point(line, column);
-        let mut row = Row::new(
-            format!("{}{name}", "  ".repeat(depth)),
-            Choice::Here(at),
-        )
-        .detail(format!("line {}", line + 1));
+        let mut row = Row::new(format!("{}{name}", "  ".repeat(depth)), Choice::Here(at))
+            .detail(format!("line {}", line + 1));
         if let Some(kind) = item.get("kind").and_then(Value::as_u64) {
             row = row.tag(symbol_kind(kind));
         }
@@ -4113,26 +5548,8 @@ impl App {
             MouseEventKind::ScrollDown => self.wheel(column, row, 3),
             MouseEventKind::ScrollLeft => self.pan(column, row, -4),
             MouseEventKind::ScrollRight => self.pan(column, row, 4),
-            MouseEventKind::Moved => {
-                // Sitting still over a word is a question. Moving is not.
-                match self.resting {
-                    Some((_, c, r)) if c == column && r == row => {}
-                    _ => {
-                        self.resting = Some((Instant::now(), column, row));
-                        if self.hover.is_some() {
-                            self.hover = None;
-                        }
-                    }
-                }
-            }
-            // The right button asks what can be done here, which is the one
-            // thing a context menu is actually for.
-            MouseEventKind::Down(MouseButton::Right) => {
-                if let Some(at) = self.position_at(column, row) {
-                    self.place_cursor(at, false, false);
-                    self.run(Cmd::CodeAction);
-                }
-            }
+            MouseEventKind::Moved => self.mouse_moved(column, row),
+            MouseEventKind::Down(MouseButton::Right) => self.right_click(column, row),
             MouseEventKind::Down(MouseButton::Middle) => {
                 if let Some(at) = self.position_at(column, row) {
                     self.place_cursor(at, false, false);
@@ -4159,11 +5576,58 @@ impl App {
         };
         self.last_click = Some((now, column, row, count));
 
+        // The context menu is on top of everything, including the list.
+        if let Overlay::Menu(m) = &mut self.overlay {
+            let area = m.area;
+            let chosen = hits(area, column, row).then(|| {
+                m.point_at((row - area.y) as usize);
+                m.chosen()
+            });
+            self.overlay = Overlay::None;
+            if let Some(Some(action)) = chosen {
+                self.do_menu(action);
+            }
+            return;
+        }
+
+        // A hover you can see is a hover you can click into: clicking it puts
+        // the keyboard in it rather than moving the cursor to whatever text is
+        // behind it, and Ctrl-clicking a name in it goes looking for that name
+        // the way Ctrl-clicking a name in the code does.
+        if let Some(hover) = &mut self.hover
+            && matches!(self.overlay, Overlay::None)
+            && hits(hover.outer, column, row)
+        {
+            let link = hover.link_at(column, row);
+            hover.focused = true;
+            hover.pointer = Some((column, row));
+            if mods.contains(KeyModifiers::CONTROL)
+                && let Some(link) = link
+            {
+                self.hover = None;
+                return self.look_up(&link.word);
+            }
+            // Otherwise it is text, and clicking text is where a selection
+            // starts — the same gesture as in the editor, because from where
+            // you are sitting it is the same thing.
+            if let Some(spot) = hover.spot_at(column, row) {
+                hover.select = Some((spot, spot));
+                if count >= 2 {
+                    hover.take_word();
+                } else {
+                    self.drag = Some(Drag::Popup);
+                }
+            }
+            return;
+        }
+
         // A list on top of everything gets the click, and a click outside it
         // closes it — which is what clicking away from a menu means.
         if let Overlay::Picker(picker) = &mut self.overlay {
             let area = picker.area;
-            if row >= area.y && row < area.y + area.height && column >= area.x
+            if row >= area.y
+                && row < area.y + area.height
+                && column >= area.x
                 && column < area.x + area.width
             {
                 let at = picker.top + (row - area.y) as usize;
@@ -4310,6 +5774,96 @@ impl App {
         self.dismiss_popups();
     }
 
+    /// The pointer went past, without any button held.
+    ///
+    /// Three things want to know: a menu, whose highlight follows the pointer
+    /// the way every menu's does; a hover, which lights up the name under the
+    /// pointer and stays open while you are inside it; and the editor itself,
+    /// where sitting still over a word is a question.
+    fn mouse_moved(&mut self, column: u16, row: u16) {
+        if let Overlay::Menu(menu) = &mut self.overlay {
+            let area = menu.area;
+            if hits(area, column, row) {
+                menu.point_at((row - area.y) as usize);
+            }
+            return;
+        }
+        if let Some(hover) = &mut self.hover
+            && hits(hover.outer, column, row)
+        {
+            // Inside the box. It stays, whether or not it has the keyboard,
+            // because a box that vanished as you reached for it could never be
+            // clicked on at all.
+            hover.pointer = Some((column, row));
+            self.resting = None;
+            return;
+        }
+        if let Some(hover) = &mut self.hover {
+            hover.pointer = None;
+        }
+        // Sitting still over a word is a question. Moving is not.
+        match self.resting {
+            Some((_, c, r)) if c == column && r == row => {}
+            _ => {
+                self.resting = Some((Instant::now(), column, row));
+                // A hover you have asked to read stays while you move about;
+                // one that appeared on its own goes as soon as you look away.
+                if self.hover.as_ref().is_some_and(|h| !h.focused) {
+                    self.hover = None;
+                }
+            }
+        }
+    }
+
+    /// The right button asks what can be done here.
+    ///
+    /// On a tab that is about the file; anywhere in the text it is about the
+    /// code under the pointer. Clicking inside a selection keeps it, because
+    /// "select this, then right-click, then copy" is the whole reason the menu
+    /// is there and moving the cursor first would throw the selection away.
+    fn right_click(&mut self, column: u16, row: u16) {
+        // A menu already open is closed by a second right click, the way a
+        // second press of any key that opens something closes it.
+        if matches!(self.overlay, Overlay::Menu(_)) {
+            self.overlay = Overlay::None;
+            return;
+        }
+        if !matches!(self.overlay, Overlay::None) {
+            return;
+        }
+        if let Some(id) = self
+            .tab_hits
+            .iter()
+            .find(|(area, _, _)| hits(*area, column, row))
+            .map(|(_, id, _)| *id)
+        {
+            let menu = self.tab_menu(id, (column, row));
+            self.overlay = Overlay::Menu(menu);
+            return;
+        }
+        let Some(pane) = self.pane_at(column, row) else {
+            return;
+        };
+        if pane != self.focus {
+            self.focus = pane;
+            self.completion = None;
+        }
+        self.dismiss_popups();
+        if let Some(at) = self.position_at(column, row) {
+            let inside = self
+                .view()
+                .sel
+                .ranges()
+                .iter()
+                .any(|range| !range.is_empty() && range.start() <= at && at < range.end());
+            if !inside {
+                self.place_cursor(at, false, false);
+            }
+        }
+        let menu = self.text_menu((column, row));
+        self.overlay = Overlay::Menu(menu);
+    }
+
     /// Put the cursor somewhere. `extend` keeps the anchor, `add` leaves the
     /// cursors that were already there — Alt-click, which is how you get a
     /// second cursor without leaving the mouse.
@@ -4329,6 +5883,21 @@ impl App {
 
     fn drag_to(&mut self, column: u16, row: u16) {
         match self.drag {
+            Some(Drag::Popup) => {
+                let Some(hover) = &mut self.hover else { return };
+                // Dragging off the top or bottom scrolls, so a selection can
+                // be longer than the box is tall.
+                if row < hover.area.y {
+                    hover.scroll_by(-1);
+                } else if row >= hover.area.y + hover.area.height {
+                    hover.scroll_by(1);
+                }
+                if let Some(spot) = hover.spot_at(column, row)
+                    && let Some((anchor, _)) = hover.select
+                {
+                    hover.select = Some((anchor, spot));
+                }
+            }
             Some(Drag::Scrollbar) => self.scroll_to_bar(row),
             Some(Drag::Text) => {
                 let Some(at) = self.position_at(column, row) else {
@@ -4393,6 +5962,7 @@ impl App {
                 *scroll = (*scroll as isize + by * 2).max(0) as usize;
                 return;
             }
+            Overlay::Menu(menu) => return menu.step(by.signum()),
             _ => {}
         }
         // The wheel over the tabs walks along them. A vertical wheel is what
@@ -4407,8 +5977,11 @@ impl App {
             completion.step(by.signum());
             return;
         }
-        if let Some(hover) = &mut self.hover {
-            hover.scroll = (hover.scroll as isize + by).max(0) as usize;
+        // The wheel over a hover scrolls the hover, not the file behind it.
+        if let Some(hover) = &mut self.hover
+            && (hover.focused || hits(hover.outer, column, row))
+        {
+            hover.scroll_by(by);
             return;
         }
         let Some(pane) = self.pane_at(column, row) else {
@@ -4483,7 +6056,9 @@ impl App {
         let doc = self.doc(view.doc)?;
         // A click left of the text is the start of the line, not nothing:
         // clicking the line numbers should still put you somewhere.
-        let across = column.saturating_sub(area.x).min(area.width.saturating_sub(1));
+        let across = column
+            .saturating_sub(area.x)
+            .min(area.width.saturating_sub(1));
         Some(view::position_at_screen(
             view,
             doc,
@@ -4524,11 +6099,8 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "textfold-app-{}-{}",
-            std::process::id(),
-            name
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("textfold-app-{}-{}", std::process::id(), name));
         std::fs::create_dir_all(&dir).expect("a place to work");
         dir.join(name)
     }
@@ -4724,11 +6296,394 @@ mod tests {
             }
         }
         assert!(
-            lines.iter().any(|l| l
-                .spans
+            lines
                 .iter()
-                .any(|(_, role)| *role == Role::String)),
+                .any(|l| l.spans.iter().any(|(_, role)| *role == Role::String)),
             "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn coming_back_to_a_tab_comes_back_to_where_you_were_in_it() {
+        let (mut app, _rx) = editor();
+        let one = scratch("place-one.txt");
+        let two = scratch("place-two.txt");
+        std::fs::write(&one, "line\n".repeat(400)).expect("written");
+        std::fs::write(&two, "other\n".repeat(400)).expect("written");
+
+        app.open_path(&one);
+        app.go_to_line(300);
+        let (top, at) = (app.view().top, app.view().cursor());
+        assert!(top > 0, "line 300 of 400 is not at the top of the screen");
+
+        app.open_path(&two);
+        assert_eq!(
+            app.view().top,
+            0,
+            "a file never seen before opens at the top"
+        );
+
+        app.open_path(&one);
+        assert_eq!(app.view().top, top, "the view came back somewhere else");
+        assert_eq!(
+            app.view().cursor(),
+            at,
+            "the cursor came back somewhere else"
+        );
+        std::fs::remove_dir_all(one.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_file_written_by_something_else_is_noticed_and_read_again() {
+        let (mut app, _rx) = editor();
+        let path = scratch("changed-underneath.txt");
+        std::fs::write(&path, "before\n").expect("written");
+        app.open_path(&path);
+        assert_eq!(app.here().on_disk, OnDisk::Same);
+
+        // A formatter, a `git checkout`, the same file open next door.
+        std::fs::write(&path, "after\n").expect("written");
+        app.check_disk();
+
+        assert_eq!(app.here().rope.to_string(), "after\n");
+        assert!(
+            !app.here().is_modified(),
+            "reading a file is not editing it"
+        );
+        assert_eq!(app.here().on_disk, OnDisk::Same);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_file_with_unsaved_changes_is_marked_rather_than_overwritten() {
+        let (mut app, _rx) = editor();
+        let path = scratch("clash.txt");
+        std::fs::write(&path, "before\n").expect("written");
+        app.open_path(&path);
+        typed(&mut app, "mine ");
+
+        std::fs::write(&path, "theirs\n").expect("written");
+        app.check_disk();
+
+        assert!(
+            app.here().rope.to_string().starts_with("mine "),
+            "unsaved work was thrown away"
+        );
+        assert_eq!(app.here().on_disk, OnDisk::Changed);
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_file_that_has_gone_is_not_read_as_an_empty_one() {
+        let (mut app, _rx) = editor();
+        let path = scratch("vanishing.txt");
+        std::fs::write(&path, "here for now\n").expect("written");
+        app.open_path(&path);
+        std::fs::remove_file(&path).expect("removed");
+        app.check_disk();
+
+        assert_eq!(app.here().on_disk, OnDisk::Gone);
+        assert_eq!(app.here().rope.to_string(), "here for now\n");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn re_reading_a_file_can_be_undone() {
+        let (mut app, _rx) = editor();
+        let path = scratch("undo-reload.txt");
+        std::fs::write(&path, "one\n").expect("written");
+        app.open_path(&path);
+        std::fs::write(&path, "two\n").expect("written");
+        app.do_reload(app.view().doc);
+        assert_eq!(app.here().rope.to_string(), "two\n");
+
+        app.run(Cmd::Undo);
+        assert_eq!(app.here().rope.to_string(), "one\n");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_line_you_have_changed_since_the_commit_is_marked_and_can_be_jumped_to() {
+        use std::process::{Command, Stdio};
+        let dir = std::env::temp_dir().join(format!("textfold-appgit-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("a place to work");
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(&dir)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .ok()
+                .filter(|s| s.success())
+        };
+        // No git on this machine is not a failing test.
+        let Some(_) = run(&["init", "-q"])
+            .and_then(|_| run(&["config", "user.email", "nobody@example.invalid"]))
+            .and_then(|_| run(&["config", "user.name", "Nobody"]))
+        else {
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        };
+        let path = dir.join("tracked.txt");
+        std::fs::write(&path, "one\ntwo\nthree\n").expect("written");
+        if run(&["add", "tracked.txt"])
+            .and_then(|_| run(&["commit", "-qm", "first"]))
+            .is_none()
+        {
+            std::fs::remove_dir_all(&dir).ok();
+            return;
+        }
+
+        let (mut app, _rx) = editor();
+        app.project = dir.clone();
+        app.git.open(&dir);
+        app.open_path(&path);
+        app.refresh_git();
+        assert_eq!(
+            app.git.changed_lines(app.view().doc),
+            0,
+            "nothing changed yet"
+        );
+
+        app.go_to_line(1);
+        typed(&mut app, "changed ");
+        app.refresh_git();
+
+        let id = app.view().doc;
+        assert_eq!(app.git.mark(id, 1), Some(crate::git::Mark::Changed));
+        assert_eq!(app.git.mark(id, 0), None);
+
+        app.run(Cmd::MoveDocStart);
+        app.run(Cmd::NextChange);
+        assert_eq!(
+            text::line_of(&app.here().rope, app.view().cursor()),
+            1,
+            "the jump did not land on the changed line"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_search_box_opens_empty_but_the_last_search_is_still_there() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "alpha beta alpha");
+        app.last_search = "alpha".into();
+        app.run(Cmd::Find);
+        match &app.overlay {
+            Overlay::Prompt(p) => assert_eq!(p.input, "", "the box kept the last search"),
+            other => panic!("no search box: {:?}", matches!(other, Overlay::None)),
+        }
+        // Which is not the same as forgetting it.
+        assert_eq!(app.last_search, "alpha");
+    }
+
+    #[test]
+    fn enter_in_the_search_box_walks_the_matches_without_closing_it() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "alpha beta alpha gamma alpha");
+        app.run(Cmd::MoveDocStart);
+        app.run(Cmd::Find);
+        typed_into_prompt(&mut app, "alpha");
+        let first = app.view().sel.primary().start();
+
+        keyed(&mut app, "enter");
+        assert!(
+            matches!(&app.overlay, Overlay::Prompt(p) if p.kind == PromptKind::Find),
+            "Enter closed the box"
+        );
+        let second = app.view().sel.primary().start();
+        assert!(
+            second > first,
+            "Enter did not move on: {first} then {second}"
+        );
+
+        keyed(&mut app, "enter");
+        let third = app.view().sel.primary().start();
+        assert!(third > second);
+
+        // And back the way it came.
+        keyed(&mut app, "shift-enter");
+        assert_eq!(app.view().sel.primary().start(), second);
+    }
+
+    #[test]
+    fn leaving_the_search_box_keeps_where_enter_took_you() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "alpha beta alpha");
+        app.run(Cmd::MoveDocStart);
+        app.run(Cmd::Find);
+        typed_into_prompt(&mut app, "alpha");
+        keyed(&mut app, "enter");
+        let landed = app.view().sel.primary().start();
+        keyed(&mut app, "esc");
+        assert_eq!(app.view().sel.primary().start(), landed);
+    }
+
+    #[test]
+    fn changing_your_mind_about_a_search_puts_the_cursor_back() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "alpha beta alpha");
+        app.run(Cmd::MoveDocStart);
+        let was = app.view().sel.primary().start();
+        app.run(Cmd::Find);
+        typed_into_prompt(&mut app, "beta");
+        assert_ne!(
+            app.view().sel.primary().start(),
+            was,
+            "typing did not search"
+        );
+        keyed(&mut app, "esc");
+        assert_eq!(app.view().sel.primary().start(), was);
+    }
+
+    #[test]
+    fn closing_the_other_tabs_keeps_the_one_you_are_in() {
+        let (mut app, _rx) = editor();
+        for name in ["a.txt", "b.txt", "c.txt"] {
+            let path = scratch(name);
+            std::fs::write(&path, "text\n").expect("written");
+            app.open_path(&path);
+        }
+        let here = app.view().doc;
+        assert_eq!(app.docs().len(), 3);
+        app.run(Cmd::CloseOthers);
+        assert_eq!(app.docs().len(), 1);
+        assert_eq!(app.view().doc, here);
+        std::fs::remove_dir_all(scratch("a.txt").parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn closing_everything_leaves_unsaved_work_open() {
+        let (mut app, _rx) = editor();
+        let saved = scratch("saved.txt");
+        std::fs::write(&saved, "on disk\n").expect("written");
+        app.open_path(&saved);
+        app.run(Cmd::New);
+        typed(&mut app, "not saved anywhere");
+
+        app.run(Cmd::CloseAll);
+        let left: Vec<String> = app.docs().iter().map(|d| d.name.clone()).collect();
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(app.here().is_modified());
+        std::fs::remove_dir_all(saved.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn right_clicking_inside_a_selection_keeps_it() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "one two three");
+        app.run(Cmd::SelectAll);
+        let was = app.view().sel.primary();
+
+        // Somewhere in the middle of the line, which is inside the selection.
+        app.right_click(10, 1);
+        assert!(matches!(app.overlay, Overlay::Menu(_)), "no menu opened");
+        assert_eq!(
+            app.view().sel.primary(),
+            was,
+            "the selection was thrown away"
+        );
+    }
+
+    #[test]
+    fn right_clicking_a_tab_offers_things_about_that_tab() {
+        let (mut app, _rx) = editor();
+        let path = scratch("tab-menu.txt");
+        std::fs::write(&path, "text\n").expect("written");
+        app.open_path(&path);
+        let id = app.view().doc;
+        app.tab_hits = vec![(Rect::new(0, 0, 10, 1), id, false)];
+
+        app.right_click(3, 0);
+        let Overlay::Menu(menu) = &app.overlay else {
+            panic!("no menu");
+        };
+        assert!(
+            menu.items
+                .iter()
+                .any(|i| matches!(i.action, crate::menu::Action::RunOn(_, Cmd::CloseOthers))),
+            "a tab menu with nothing about tabs in it"
+        );
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// The parts of a rendered line a pointer would offer to follow.
+    fn followable(line: &DocLine) -> Vec<String> {
+        line.links
+            .iter()
+            .map(|range| line.text.chars().skip(range.start).take(range.len()).collect())
+            .collect()
+    }
+
+    #[test]
+    fn only_what_the_markup_called_code_is_worth_following() {
+        let line = DocLine::prose("There is always at least one, and they are in order.");
+        assert!(followable(&line).is_empty(), "prose is not a set of names");
+
+        let line = DocLine::prose("assume, and [`Selections::normalise`](https://x/y) keeps it");
+        assert_eq!(followable(&line), vec!["Selections::normalise"]);
+
+        let line = DocLine::prose("A `HashMap` of `String` to `u32`, and a [bracket] in prose");
+        assert_eq!(followable(&line), vec!["HashMap", "String", "u32"]);
+
+        // The backtick that closed a link's name must not be read as one
+        // opening another, or the rest of the line becomes a name.
+        let line = DocLine::prose("[`Eq`](https://x/y) and then `Ord` and more prose");
+        assert_eq!(followable(&line), vec!["Eq", "Ord"]);
+    }
+
+    #[test]
+    fn a_name_in_a_docstring_is_followed_and_the_prose_around_it_is_not() {
+        let line = DocLine::prose("see `Selections` for that");
+        let at = |column| {
+            line.links
+                .iter()
+                .any(|r| r.contains(&column))
+                .then(|| word_span(&line.text, column).map(|(w, ..)| w))
+                .flatten()
+        };
+        assert_eq!(at(6), Some("Selections".into()));
+        assert_eq!(at(1), None, "`see` is a word, not a name");
+        assert_eq!(at(19), None, "`for` is a word, not a name");
+    }
+
+    #[test]
+    fn in_code_the_names_are_followed_and_the_keywords_are_not() {
+        let rust = lang::by_name("rust").expect("rust");
+        let mut lines = Vec::new();
+        push_code(&mut lines, "let it: HashMap<String, u32> = HashMap::new();\n", Some(rust));
+        let line = lines.first().expect("a line");
+        let names = followable(line);
+        assert!(names.contains(&"HashMap".to_string()), "{names:?}");
+        assert!(names.contains(&"String".to_string()), "{names:?}");
+        assert!(!names.contains(&"let".to_string()), "a keyword is not a name");
+        assert!(!names.contains(&"it".to_string()), "a local is not a name");
+    }
+
+    #[test]
+    fn a_word_in_a_docstring_is_the_word_and_not_the_punctuation() {
+        let word_in = |line: &str, column: usize| word_span(line, column).map(|(w, ..)| w);
+        let line = "fn take(list: Vec<Widget>)";
+        assert_eq!(word_in(line, 15), Some("Vec".into()));
+        assert_eq!(word_in(line, 18), Some("Widget".into()));
+        assert_eq!(word_in(line, 17), None, "`<` is not a word");
+        assert_eq!(
+            word_in(line, line.len()),
+            None,
+            "past the end is not a word"
+        );
+        // A single letter is `T` or `a`, which is everywhere in a paragraph
+        // of prose, and a bare number is a length rather than a type.
+        assert_eq!(word_in("a Vec of T items", 0), None);
+        assert_eq!(word_in("a Vec of T items", 9), None);
+        assert_eq!(word_in("at most 4096 bytes", 8), None);
+        assert_eq!(word_in("a Vec of T items", 2), Some("Vec".into()));
+        assert_eq!(
+            word_in("see [`Selections::normalise`]", 7),
+            Some("Selections".into()),
+            "markdown punctuation is not part of the name"
         );
     }
 
@@ -4784,8 +6739,8 @@ mod tests {
     fn a_lower_case_search_ignores_case_and_a_capital_means_it() {
         let (mut app, _rx) = editor();
         typed(&mut app, "Thing thing THING");
-        assert_eq!(app.count_matches_of("thing"), 3);
-        assert_eq!(app.count_matches_of("Thing"), 1);
+        assert_eq!(app.count_matches("thing"), 3);
+        assert_eq!(app.count_matches("Thing"), 1);
     }
 
     #[test]

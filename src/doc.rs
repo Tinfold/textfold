@@ -13,7 +13,7 @@
 //! function returns, so nothing can quietly fall out of step with the text.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result};
 use ropey::Rope;
@@ -171,6 +171,11 @@ pub struct Document {
     pub version: i32,
     /// Whether the file was read-only on disk.
     pub read_only: bool,
+    /// Where the text came from, where that is not a file: the URI a language
+    /// server handed it over under. Kept so that going to the same class in a
+    /// jar twice comes back to the tab that is already open rather than making
+    /// a second one.
+    pub origin: Option<String>,
     /// The parse tree, kept in step with the rope by [`Document::apply`]
     /// itself rather than by whoever calls it — a tree that has fallen behind
     /// its text is worse than no tree, so nobody gets the chance to forget.
@@ -183,6 +188,12 @@ pub struct Document {
     /// `None` means either that it is coloured or that textfold has no grammar
     /// for it, which the language shown beside it already says.
     pub colours_off: Option<&'static str>,
+    /// The file as it was when we last read or wrote it. What a later `stat`
+    /// is compared against to notice somebody else writing it.
+    stamp: Option<Stamp>,
+    /// What that comparison last said. Kept rather than worked out on demand
+    /// because the drawing asks every frame and the answer costs a `stat`.
+    pub on_disk: OnDisk,
 
     done: Vec<Revision>,
     undone: Vec<Revision>,
@@ -254,6 +265,45 @@ impl Severity {
     }
 }
 
+/// What the file looked like on disk the last time we touched it: when it was
+/// written and how big it was.
+///
+/// Two facts rather than one because a filesystem with a one-second timestamp
+/// can rewrite a file inside the same second, and a rewrite that changes the
+/// length is caught by the length even when the time says nothing happened.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Stamp {
+    modified: Option<SystemTime>,
+    len: u64,
+}
+
+impl Stamp {
+    /// The file as it is right now, or `None` if it is not there.
+    pub fn of(path: &Path) -> Option<Self> {
+        let meta = std::fs::metadata(path).ok()?;
+        if !meta.is_file() {
+            return None;
+        }
+        Some(Self {
+            modified: meta.modified().ok(),
+            len: meta.len(),
+        })
+    }
+}
+
+/// What has happened to the file behind a buffer since we last read or wrote
+/// it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum OnDisk {
+    /// Nothing. What is on disk is what we last read or wrote.
+    Same,
+    /// Somebody else wrote it: a build, a formatter, a `git checkout`, the
+    /// same file open in another editor.
+    Changed,
+    /// It is not there any more.
+    Gone,
+}
+
 /// What one level of indentation is in this file.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Indent {
@@ -294,6 +344,7 @@ impl Document {
             indent,
             version: 0,
             read_only: false,
+            origin: None,
             done: Vec::new(),
             undone: Vec::new(),
             saved_at: Some(0),
@@ -301,6 +352,8 @@ impl Document {
             syntax: None,
             diagnostics: Vec::new(),
             colours_off: None,
+            stamp: None,
+            on_disk: OnDisk::Same,
         }
     }
 
@@ -337,6 +390,7 @@ impl Document {
         let rope = Rope::from_str(&text);
         let indent = detect_indent(&rope).unwrap_or(fallback_indent);
         let language = crate::lang::detect(&path, &rope);
+        let stamp = existed.then(|| Stamp::of(&path)).flatten();
 
         let mut doc = Self {
             id,
@@ -349,6 +403,7 @@ impl Document {
             indent,
             version: 0,
             read_only,
+            origin: None,
             done: Vec::new(),
             undone: Vec::new(),
             saved_at: Some(0),
@@ -356,6 +411,8 @@ impl Document {
             syntax: None,
             diagnostics: Vec::new(),
             colours_off: None,
+            stamp,
+            on_disk: OnDisk::Same,
         };
         doc.reparse();
         Ok(doc)
@@ -374,6 +431,15 @@ impl Document {
 
     pub fn is_modified(&self) -> bool {
         self.saved_at != Some(self.done.len())
+    }
+
+    /// Say that what is in the rope is what is on disk, without writing
+    /// anything. For a buffer that was just re-read: the text changed, so it
+    /// is a revision you can undo, but it is not an unsaved change.
+    pub fn mark_saved(&mut self) {
+        self.close_revision();
+        self.saved_at = Some(self.done.len());
+        self.accept_disk();
     }
 
     /// Take the edits nothing has looked at yet. Whoever calls this is
@@ -467,6 +533,16 @@ impl Document {
         if let Some(last) = self.done.last_mut() {
             last.open = false;
         }
+    }
+
+    /// Whether there is anything to undo, for a menu row that should be there
+    /// but greyed rather than missing.
+    pub fn can_undo(&self) -> bool {
+        !self.done.is_empty()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        !self.undone.is_empty()
     }
 
     /// Undo one action, returning the edits it made and where the cursors were
@@ -592,6 +668,18 @@ impl Document {
     /// long enough to look like a hang, and every keystroke afterwards pays
     /// for it again; a generated file that size is being looked at, not
     /// written, and looking at it in black and white beats waiting for it.
+    /// Put text into a buffer wholesale, with no undo step and nobody told.
+    ///
+    /// Only for a buffer the editor has just made and nothing else can be
+    /// looking at yet. Anything already on the screen has to change through
+    /// [`Document::apply_atomic`], so that cursors and language servers come
+    /// along with it.
+    pub fn set_text(&mut self, text: &str) {
+        self.rope = Rope::from_str(text);
+        self.version += 1;
+        self.reparse();
+    }
+
     pub fn reparse(&mut self) {
         let language = lang::get(self.language);
         if self.rope.len_bytes() > COLOUR_LIMIT {
@@ -705,7 +793,41 @@ impl Document {
             self.path = Some(path);
         }
         self.read_only = false;
+        // What we just wrote is what is there, so a later check has nothing to
+        // complain about.
+        self.stamp = Stamp::of(path);
+        self.on_disk = OnDisk::Same;
         Ok(())
+    }
+
+    /// Look at the file and say whether somebody else has written it.
+    ///
+    /// A `stat`, which is cheap, rather than a read. Called on a timer for
+    /// every open file, so it has to stay that way.
+    pub fn check_disk(&mut self) -> OnDisk {
+        let Some(path) = self.path.as_deref() else {
+            return OnDisk::Same;
+        };
+        let now = Stamp::of(path);
+        self.on_disk = match (self.stamp, now) {
+            // A buffer for a file that does not exist yet is not a file that
+            // has gone missing.
+            (None, None) => OnDisk::Same,
+            (None, Some(_)) => OnDisk::Changed,
+            (Some(_), None) => OnDisk::Gone,
+            (Some(was), Some(is)) if was == is => OnDisk::Same,
+            (Some(_), Some(_)) => OnDisk::Changed,
+        };
+        self.on_disk
+    }
+
+    /// Take what is on disk now as the truth, without reading it. For a
+    /// conflict the person has looked at and decided to keep their side of.
+    pub fn accept_disk(&mut self) {
+        if let Some(path) = self.path.as_deref() {
+            self.stamp = Stamp::of(path);
+        }
+        self.on_disk = OnDisk::Same;
     }
 
     /// The whole text, for a language server that wants a copy.

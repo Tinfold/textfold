@@ -76,6 +76,12 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_pairs: Option<bool>,
 
+    /// Whether a file changed on disk by something else is read again on its
+    /// own. Absent means it is, but only where the buffer has no unsaved
+    /// changes of its own — a conflict is always yours to settle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reload_on_change: Option<bool>,
+
     /// Whether the mouse is captured at all. Off hands clicks and drags back
     /// to the terminal, which is what you want if you select text with it to
     /// copy into something else.
@@ -217,6 +223,10 @@ impl Config {
 
     pub fn mouse(&self) -> bool {
         self.mouse.unwrap_or(true)
+    }
+
+    pub fn reload_on_change(&self) -> bool {
+        self.reload_on_change.unwrap_or(true)
     }
 
     pub fn show_whitespace(&self) -> bool {

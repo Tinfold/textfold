@@ -12,11 +12,26 @@
 //! click needs to know what row twelve was. Both walk the same wrapping, so
 //! they cannot disagree about where a folded line broke.
 
+use std::collections::HashMap;
+
 use ratatui::layout::Rect;
 use ropey::Rope;
 
 use crate::doc::{AppliedEdit, DocId, Document};
 use crate::text::{self, Range, Selections};
+
+/// Where a pane was in a file it is no longer showing.
+///
+/// Coming back to a tab and finding it at line one is the sort of thing that
+/// makes a person stop using tabs. A pane remembers a spot per file, so
+/// switching away and back is switching away and back rather than reopening.
+#[derive(Clone, Default)]
+pub struct Spot {
+    pub sel: Selections,
+    pub top: usize,
+    pub top_row: usize,
+    pub left: usize,
+}
 
 /// One place you jumped from, so you can get back.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -57,6 +72,11 @@ pub struct View {
     /// past, which is what every browser does and what everyone expects.
     pub jumps: Vec<Jump>,
     pub jump_at: usize,
+
+    /// Where this pane was in each file it has shown. Kept per pane rather
+    /// than per document because two panes on the same file are two places in
+    /// it, and each one should come back to its own.
+    spots: HashMap<DocId, Spot>,
 }
 
 impl View {
@@ -74,7 +94,31 @@ impl View {
             wrap,
             jumps: Vec::new(),
             jump_at: 0,
+            spots: HashMap::new(),
         }
+    }
+
+    /// Where the pane is right now, in the file it is showing.
+    pub fn spot(&self) -> Spot {
+        Spot {
+            sel: self.sel.clone(),
+            top: self.top,
+            top_row: self.top_row,
+            left: self.left,
+        }
+    }
+
+    /// Put away where the pane is, so that coming back to this file comes back
+    /// here. Called before the pane is pointed at something else.
+    pub fn remember(&mut self) {
+        let spot = self.spot();
+        self.spots.insert(self.doc, spot);
+    }
+
+    /// Forget a file, because it has been closed. Otherwise a document id that
+    /// came round again would be met with somebody else's scroll position.
+    pub fn forget(&mut self, doc: DocId) {
+        self.spots.remove(&doc);
     }
 
     /// Where the cursor is, as a character index.
@@ -91,14 +135,34 @@ impl View {
         self.area.width.max(1) as usize
     }
 
-    /// Show a different file, keeping the pane's own settings.
+    /// Show a different file, keeping the pane's own settings, and landing
+    /// where this pane last was in that file.
     pub fn show(&mut self, doc: DocId, sel: Selections) {
+        if self.doc != doc {
+            self.remember();
+        }
         self.doc = doc;
         self.sel = sel;
         self.top = 0;
         self.top_row = 0;
         self.left = 0;
         self.goal = None;
+    }
+
+    /// Show a file and put the pane back exactly where it was in it.
+    ///
+    /// A file this pane has not shown before starts at the top with whatever
+    /// selection it was handed, which is what `show` alone does.
+    pub fn revisit(&mut self, doc: DocId, sel: Selections, len: usize) {
+        let spot = self.spots.get(&doc).cloned();
+        self.show(doc, sel);
+        if let Some(spot) = spot {
+            self.sel = spot.sel;
+            self.sel.clamp(len);
+            self.top = spot.top;
+            self.top_row = spot.top_row;
+            self.left = spot.left;
+        }
     }
 
     /// Take in edits made to the document this pane shows.

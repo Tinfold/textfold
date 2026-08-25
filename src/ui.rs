@@ -35,7 +35,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let theme = app.theme;
     let paint = app.config.background();
-    let ground = if paint { theme.background } else { Color::Reset };
+    let ground = if paint {
+        theme.background
+    } else {
+        Color::Reset
+    };
     frame
         .buffer_mut()
         .set_style(area, Style::new().bg(ground).fg(theme.foreground));
@@ -101,6 +105,10 @@ fn place_panes(app: &mut App, body: Rect) {
             // there is something wrong on this line.
             _ => (digits(lines) + 3) as u16,
         };
+        // And one more for the bar that says this line is not what git has,
+        // but only for a file git has something to say about — a column of
+        // nothing down every buffer would be a column wasted.
+        let numbers = numbers + u16::from(app.git.tracking(id));
         // A column of its own for the rule that says which pane has the
         // focus, rather than borrowing one from the line numbers — which for
         // a file long enough would have taken a digit with it.
@@ -373,9 +381,7 @@ fn draw_row(
                 .underline_color(severity_colour(severity, theme));
         }
         if Some(at) == it.partner || (it.partner.is_some() && at == view.sel.primary().head) {
-            style = style
-                .add_modifier(Modifier::BOLD)
-                .fg(theme.bracket_match);
+            style = style.add_modifier(Modifier::BOLD).fg(theme.bracket_match);
         }
 
         // What to actually draw: a tab is spaces, and whitespace shows itself
@@ -517,20 +523,44 @@ fn draw_gutter(buf: &mut Buffer, app: &App, view: &View, doc: &Document, it: Gut
         } else {
             Color::Reset
         })
-        .fg(if here { theme.gutter_current } else { theme.gutter });
+        .fg(if here {
+            theme.gutter_current
+        } else {
+            theme.gutter
+        });
 
-    // ` 42 ` and then the mark, hard against the text.
-    let text = if width >= 2 {
-        format!("{label:>width$} ", width = width - 2)
+    // ` 42 ` and then the marks, hard against the text: git's bar, and then
+    // whatever is wrong on this line.
+    let tracked = app.git.tracking(doc.id);
+    let reserved = 1 + usize::from(tracked);
+    let text = if width > reserved {
+        format!("{label:>room$} ", room = width - reserved - 1)
     } else {
         String::new()
     };
     buf.set_stringn(x, screen, &text, width, style);
+    if tracked
+        && let Some(mark) = app.git.mark(doc.id, line)
+        && let Some(cell) = buf.cell_mut(Position::new(frame.x + view.gutter - 2, screen))
+    {
+        cell.set_style(style.fg(git_colour(mark, theme)));
+        cell.set_char(mark.glyph());
+    }
     if let Some(severity) = worst
         && let Some(cell) = buf.cell_mut(Position::new(frame.x + view.gutter - 1, screen))
     {
         cell.set_style(style.fg(severity_colour(severity, theme)));
         cell.set_char(severity.mark().chars().next().unwrap_or('*'));
+    }
+}
+
+/// What colour a line's history is drawn in. Green for new, blue for changed,
+/// red for gone — the three every diff has used since diffs were in colour.
+fn git_colour(mark: crate::git::Mark, theme: &Theme) -> Color {
+    match mark {
+        crate::git::Mark::Added => theme.added,
+        crate::git::Mark::Changed => theme.changed,
+        crate::git::Mark::Removed => theme.removed,
     }
 }
 
@@ -570,9 +600,12 @@ fn mark_focus(buf: &mut Buffer, view: &View, theme: &Theme, focused: bool) {
     }
     for row in 0..frame.height {
         if let Some(cell) = buf.cell_mut(Position::new(frame.x, frame.y + row)) {
-            cell.set_char('\u{2503}').set_style(
-                Style::new().fg(if focused { theme.accent } else { theme.chrome() }),
-            );
+            cell.set_char('\u{2503}')
+                .set_style(Style::new().fg(if focused {
+                    theme.accent
+                } else {
+                    theme.chrome()
+                }));
         }
     }
 }
@@ -598,15 +631,11 @@ fn draw_tabs(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
     // are there no completions" has an answer on the screen. It takes its room
     // off the end of the strip rather than being drawn over it, or a tab and a
     // server would fight for the same columns.
-    let busy = app
-        .lsp
-        .all()
-        .iter()
-        .find_map(|server| {
-            server
-                .busy_with()
-                .map(|what| format!(" {} {what} ", server.name))
-        });
+    let busy = app.lsp.all().iter().find_map(|server| {
+        server
+            .busy_with()
+            .map(|what| format!(" {} {what} ", server.name))
+    });
     let busy = busy.filter(|said| area.width > text::str_width(said) as u16 + 12);
     let aside = busy.as_ref().map_or(0, |said| text::str_width(said) as u16);
     let window = area.width - aside;
@@ -617,8 +646,8 @@ fn draw_tabs(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
     }
 
     // Every tab, at its place along a strip as wide as all of them together.
-    // ` name • ` — the dot is the close cross, and the mark that says there are
-    // unsaved changes, because they are never both wanted at once and one
+    // ` name • ` — the dot is the close cross, and the mark that says what
+    // state the file is in, because they are never both wanted at once and one
     // column is one column.
     let here = app.view().doc;
     let mut tabs = Vec::new();
@@ -626,7 +655,7 @@ fn draw_tabs(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
     for doc in app.docs() {
         let label = format!(" {} ", doc.name);
         let width = (text::str_width(&label) + 2) as u16;
-        tabs.push((doc.id, label, doc.is_modified(), total, width));
+        tabs.push((doc.id, label, tab_state(doc), total, width));
         total = total.saturating_add(width);
     }
 
@@ -650,8 +679,8 @@ fn draw_tabs(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
     // knowing about the edges; this way only the copy does.
     let mut strip = Buffer::empty(Rect::new(0, 0, total.max(1), 1));
     strip.set_style(strip.area, plain);
-    for (id, label, modified, at, width) in &tabs {
-        let style = if *id == here {
+    for (id, label, state, at, width) in &tabs {
+        let mut style = if *id == here {
             Style::new()
                 .bg(theme.background)
                 .fg(theme.foreground)
@@ -659,15 +688,14 @@ fn draw_tabs(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
         } else {
             plain
         };
+        // A file with an error in it says so in the name, so that a mistake in
+        // a file you are not looking at is still on the screen.
+        if let Some(worst) = state.worst {
+            style = style.fg(severity_colour(worst, &theme));
+        }
         strip.set_stringn(*at, 0, label, (width - 2) as usize, style);
-        let mark = if *modified { '\u{25cf}' } else { '\u{00d7}' };
-        strip.set_stringn(
-            at + width - 2,
-            0,
-            format!("{mark} "),
-            2,
-            style.fg(if *modified { theme.warning } else { theme.faint }),
-        );
+        let (mark, colour) = state.mark(&theme);
+        strip.set_stringn(at + width - 2, 0, format!("{mark} "), 2, style.fg(colour));
     }
 
     let buf = frame.buffer_mut();
@@ -715,8 +743,7 @@ fn draw_tabs(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
     if scroll > 0 {
         let back = starts().filter(|at| *at < scroll).next_back().unwrap_or(0);
         arrow(buf, area.x, area.y, '\u{2039}', theme);
-        app.tab_nudges
-            .push((Rect::new(area.x, area.y, 1, 1), back));
+        app.tab_nudges.push((Rect::new(area.x, area.y, 1, 1), back));
     }
     if scroll < furthest {
         let on = starts()
@@ -728,6 +755,46 @@ fn draw_tabs(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
         app.tab_nudges.push((Rect::new(x, area.y, 1, 1), on));
     }
     let _ = ground;
+}
+
+/// What a tab has to say about its file beyond its name: whether it is worth
+/// looking at, and what the one column at its right edge should be.
+struct TabState {
+    modified: bool,
+    on_disk: crate::doc::OnDisk,
+    /// The worst thing a language server has said about it, if anything.
+    worst: Option<Severity>,
+}
+
+fn tab_state(doc: &Document) -> TabState {
+    TabState {
+        modified: doc.is_modified(),
+        on_disk: doc.on_disk,
+        // Only the two that mean something is wrong. A hint colouring a tab
+        // would leave half the row lit up and say nothing.
+        worst: doc
+            .diagnostics
+            .iter()
+            .map(|d| d.severity)
+            .filter(|s| matches!(s, Severity::Error | Severity::Warning))
+            .min(),
+    }
+}
+
+impl TabState {
+    /// The one column at the right of a tab, which is also its close cross.
+    ///
+    /// Most urgent first: a file that is not there any more, then one that has
+    /// been written behind your back, then one with changes of yours in it,
+    /// and otherwise the cross.
+    fn mark(&self, theme: &Theme) -> (char, Color) {
+        match (self.on_disk, self.modified) {
+            (crate::doc::OnDisk::Gone, _) => ('\u{0021}', theme.error),
+            (crate::doc::OnDisk::Changed, _) => ('\u{2260}', theme.error),
+            (_, true) => ('\u{25cf}', theme.warning),
+            _ => ('\u{00d7}', theme.faint),
+        }
+    }
 }
 
 /// One of the ‹ › at the ends of the tab row: there is more this way.
@@ -773,7 +840,12 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
         .iter()
         .filter(|d| d.range.contains(at) || d.range.start() == at)
         .min_by_key(|d| d.severity)
-        .map(|d| (d.severity, d.message.lines().next().unwrap_or("").to_string()));
+        .map(|d| {
+            (
+                d.severity,
+                d.message.lines().next().unwrap_or("").to_string(),
+            )
+        });
 
     let buf = frame.buffer_mut();
     buf.set_style(area, Style::new().bg(theme.chrome()).fg(theme.muted));
@@ -817,7 +889,11 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
         }
         chips.push((
             said,
-            if errors > 0 { theme.error } else { theme.warning },
+            if errors > 0 {
+                theme.error
+            } else {
+                theme.warning
+            },
             Cmd::Diagnostics,
         ));
     }
@@ -832,6 +908,46 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
     }
     if doc.read_only {
         chips.push(("read-only".into(), theme.warning, Cmd::About));
+    }
+    // What can be done about the problem under the cursor, in the words the
+    // server used for it: `Import 'List' (java.util)`, and a key to press.
+    // This is the difference between a red squiggle and a red squiggle you can
+    // do something about without knowing there was anything to try.
+    if let Some(fixes) = app.fixes.as_ref().filter(|f| f.doc == doc.id)
+        && let Some(title) = fixes.headline()
+    {
+        let key = app
+            .keys
+            .shortcut(Cmd::FixIt)
+            .unwrap_or_else(|| "Alt-i".into());
+        // Long enough to recognise the fix, short enough to leave the line
+        // and column at the end of the bar where they always are.
+        let title = text::truncate(title, 42);
+        let said = match fixes.actions.len() {
+            1 => format!("{key}: {title}"),
+            n => format!("{key}: {title} (+{})", n - 1),
+        };
+        chips.push((said, theme.success, Cmd::FixIt));
+    }
+
+    // Which branch, and how much of this file is not in it. Clicking it steps
+    // to the next of your own changes, which is the thing you want from a
+    // branch name often enough to be worth the click.
+    if let Some(head) = app.git.head() {
+        let changed = app.git.changed_lines(doc.id);
+        let said = match changed {
+            0 => head.to_string(),
+            n => format!("{head} +{n}"),
+        };
+        chips.push((
+            said,
+            if changed > 0 {
+                theme.changed
+            } else {
+                theme.muted
+            },
+            Cmd::NextChange,
+        ));
     }
     if let Some(why) = doc.colours_off {
         chips.push((format!("no colours: {why}"), theme.faint, Cmd::About));
@@ -883,6 +999,7 @@ fn plural(n: usize) -> &'static str {
 // What floats over the top.
 // ---------------------------------------------------------------------------
 
+use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Clear};
 
 fn draw_floating(frame: &mut Frame, app: &mut App, ground: Color) -> Option<Position> {
@@ -906,6 +1023,10 @@ fn draw_floating(frame: &mut Frame, app: &mut App, ground: Color) -> Option<Posi
             draw_help(frame, app, ground);
             None
         }
+        Overlay::Menu(_) => {
+            draw_menu(frame, app, ground);
+            None
+        }
         Overlay::None => None,
     }
 }
@@ -913,6 +1034,12 @@ fn draw_floating(frame: &mut Frame, app: &mut App, ground: Color) -> Option<Posi
 /// Where the cursor is on the screen, if it is on the screen at all.
 fn cursor_screen(app: &App) -> Option<Position> {
     screen_position_of(app, app.view().sel.primary().head)
+}
+
+/// The same, as a plain pair, for anything that wants a place to hang a box
+/// off rather than a place to put the caret.
+pub fn cursor_cell(app: &App) -> Option<(u16, u16)> {
+    cursor_screen(app).map(|at| (at.x, at.y))
 }
 
 /// Where a place in the file is on the screen. `None` for one scrolled out of
@@ -979,7 +1106,9 @@ fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color
         })
         .max()
         .unwrap_or(20);
-    let width = (widest as u16).clamp(20, screen.width.saturating_sub(4)).min(72);
+    let width = (widest as u16)
+        .clamp(20, screen.width.saturating_sub(4))
+        .min(72);
     // The list lines up under the word being completed rather than under the
     // cursor, so the text you are matching against sits above its matches.
     let start_column = at.x.saturating_sub(
@@ -1037,7 +1166,11 @@ fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color
             y,
             text::truncate(label, room),
             room,
-            style.fg(if chosen { theme.accent } else { theme.foreground }),
+            style.fg(if chosen {
+                theme.accent
+            } else {
+                theme.foreground
+            }),
         );
         // The type, right up against the right edge, dimmed — it is there to
         // be glanced at, not read.
@@ -1099,22 +1232,79 @@ fn draw_hover(frame: &mut Frame, app: &mut App, at: Position, ground: Color) {
     // comfortable line of prose.
     let room = screen.width.saturating_sub(4).min(84);
     let width = ((widest + 2) as u16).min(room).max(24.min(room));
-    let rows = hover.lines.len().saturating_sub(hover.scroll).clamp(1, 14) as u16;
+    // A glance gets fourteen rows; something you have asked to read gets as
+    // much of the screen as there is, because scrolling a paragraph at a time
+    // through a fourteen-row window is the thing that makes documentation in
+    // a terminal not worth reading.
+    let most = if hover.focused {
+        screen.height.saturating_sub(6).max(6) as usize
+    } else {
+        14
+    };
+    // How much there is to show, not how much is left below where you have
+    // scrolled to. A box that shrinks as you read down it is a box that pulls
+    // itself out from under you, and one that ends up a single row is no
+    // longer showing you anything.
+    let rows = hover.lines.len().clamp(1, most) as u16;
     let area = beside(screen, at, width, rows + 2);
+    // Never scrolled further than the last line on the bottom row. The
+    // keyboard and the wheel both clamp as they go, but the box can also grow
+    // — the screen is resized, or a glance becomes something you asked to read
+    // — and then a scroll that was at the end is past it.
+    let shown = area.height.saturating_sub(2) as usize;
+    let scroll = hover.scroll.min(hover.lines.len().saturating_sub(shown));
 
     frame.render_widget(Clear, area);
-    let block = Block::bordered()
+    let border = if hover.focused {
+        theme.accent
+    } else {
+        theme.faint
+    };
+    let mut block = Block::bordered()
         .border_type(BorderType::Rounded)
-        .border_style(Style::new().fg(theme.faint))
+        .border_style(Style::new().fg(border))
         .style(box_style(&theme, ground));
+    // How far down a long one you are, and what the keys do, along the bottom
+    // edge — where a border is already being drawn and no row of text is lost
+    // to saying it.
+    let more = hover.lines.len().saturating_sub(scroll + shown);
+    // A name under the pointer is the thing you are about to do, so it says
+    // what would happen and everything else waits.
+    let under = hover
+        .pointer
+        .and_then(|(column, row)| hover.link_at(column, row))
+        .map(|link| link.word);
+    let dragged = hover
+        .select
+        .is_some_and(|(anchor, head)| anchor != head);
+    let hint = match (&under, dragged, hover.focused, more) {
+        (Some(word), ..) => Some(format!(" Ctrl-click to go to {word} ")),
+        (None, true, ..) => Some(" Ctrl-C copies what you dragged over ".to_string()),
+        (None, false, true, 0) => Some(" drag to select · Enter opens a tab ".to_string()),
+        (None, false, true, n) => Some(format!(" {n} more · Enter opens a tab ")),
+        (None, false, false, 0) => None,
+        (None, false, false, n) => Some(format!(" {n} more ")),
+    };
+    if let Some(hint) = hint.filter(|h| area.width as usize > text::str_width(h) + 2) {
+        let colour = if under.is_some() || dragged {
+            theme.accent
+        } else {
+            theme.faint
+        };
+        block = block.title_bottom(Line::from(hint).style(Style::new().fg(colour)));
+    }
     let inside = block.inner(area);
     frame.render_widget(block, area);
+
+    let link = hover
+        .pointer
+        .and_then(|(column, row)| hover.link_at(column, row));
 
     let buf = frame.buffer_mut();
     for (row, line) in hover
         .lines
         .iter()
-        .skip(hover.scroll)
+        .skip(scroll)
         .take(inside.height as usize)
         .enumerate()
     {
@@ -1164,6 +1354,41 @@ fn draw_hover(frame: &mut Frame, app: &mut App, at: Position, ground: Color) {
             at = range.end;
         }
     }
+
+    // What has been dragged over, behind the words, in the colour selected
+    // text has everywhere else in the editor.
+    for row in 0..inside.height {
+        let Some((from, to)) = hover.selected_on(scroll + row as usize) else {
+            continue;
+        };
+        let y = inside.y + row;
+        let from = inside.x + (from as u16).min(inside.width);
+        let to = inside.x + (to as u16).min(inside.width);
+        for x in from..to {
+            if let Some(cell) = buf.cell_mut(Position::new(x, y)) {
+                let style = cell.style();
+                cell.set_style(style.bg(theme.selection));
+            }
+        }
+    }
+
+    // The name under the pointer, drawn the way a link is drawn everywhere:
+    // underlined and in the colour that means "this does something". Done last
+    // so that it sits over whatever colour the code underneath was given.
+    if let Some(link) = &link {
+        for x in link.from..link.to.min(inside.x + inside.width) {
+            if let Some(cell) = buf.cell_mut(Position::new(x, link.row)) {
+                let style = cell.style();
+                cell.set_style(style.fg(theme.accent).add_modifier(Modifier::UNDERLINED));
+            }
+        }
+    }
+
+    if let Some(hover) = &mut app.hover {
+        hover.area = inside;
+        hover.outer = area;
+        hover.scroll = scroll;
+    }
 }
 
 /// Stands in for the span after the last one, so that the text past the end of
@@ -1181,7 +1406,10 @@ fn draw_signature(frame: &mut Frame, app: &mut App, at: Position, ground: Color)
     let Some(label) = signature.lines.first() else {
         return;
     };
-    let shown = format!(" {} ", text::truncate(&label.text, screen.width as usize - 4));
+    let shown = format!(
+        " {} ",
+        text::truncate(&label.text, screen.width as usize - 4)
+    );
     let width = text::str_width(&shown) as u16;
     // Always above: the thing being typed is below, and covering it would
     // defeat the purpose.
@@ -1207,6 +1435,93 @@ struct Shown {
     key: Option<String>,
     severity: Option<Severity>,
     matched: Vec<u32>,
+}
+
+/// The context menu: a short list where the pointer was.
+fn draw_menu(frame: &mut Frame, app: &mut App, ground: Color) {
+    let Overlay::Menu(menu) = &app.overlay else {
+        return;
+    };
+    let theme = app.theme;
+    let screen = app.screen;
+    let width = menu.width();
+    let height = (menu.len() as u16 + 2).min(screen.height.saturating_sub(1));
+    let (x, y) = menu.anchor;
+    let area = beside(screen, Position::new(x, y), width, height);
+
+    frame.render_widget(Clear, area);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.faint))
+        .style(box_style(&theme, ground));
+    let inside = block.inner(area);
+    frame.render_widget(block, area);
+
+    let buf = frame.buffer_mut();
+    let room = inside.width as usize;
+    for (row, item) in menu.items.iter().take(inside.height as usize).enumerate() {
+        let y = inside.y + row as u16;
+        if matches!(item.action, crate::menu::Action::Divide) {
+            buf.set_stringn(
+                inside.x,
+                y,
+                "\u{2500}".repeat(room),
+                room,
+                box_style(&theme, ground).fg(theme.faint),
+            );
+            continue;
+        }
+        let here = row == menu.cursor;
+        let chosen = here && item.enabled;
+        // The highlighted row is the accent colour behind it rather than a
+        // marker beside it, which is what a menu looks like everywhere and
+        // leaves the whole width for the words. A row you are pointing at but
+        // cannot choose is lit more quietly, so that the pointer is never
+        // somewhere the highlight is not, and never promises a click will do
+        // something when it will not.
+        let base = if chosen {
+            Style::new().bg(theme.accent).fg(theme.on_accent)
+        } else if here {
+            Style::new().bg(theme.selection).fg(theme.faint)
+        } else if item.enabled {
+            box_style(&theme, ground).fg(theme.foreground)
+        } else {
+            box_style(&theme, ground).fg(theme.faint)
+        };
+        for x in inside.x..inside.x + inside.width {
+            if let Some(cell) = buf.cell_mut(Position::new(x, y)) {
+                cell.set_char(' ').set_style(base);
+            }
+        }
+        // The key on the right, where the eye can run down the column, and
+        // only where the label leaves room for it.
+        let mut left = room.saturating_sub(1);
+        if let Some(key) = item.key.as_deref() {
+            let width = text::str_width(key);
+            if left > width + text::str_width(&item.label) + 3 {
+                let at = inside.x + inside.width - width as u16 - 1;
+                buf.set_stringn(
+                    at,
+                    y,
+                    key,
+                    width,
+                    if chosen { base } else { base.fg(theme.faint) },
+                );
+                left -= width + 2;
+            }
+        }
+        buf.set_stringn(
+            inside.x + 1,
+            y,
+            text::truncate(&item.label, left.saturating_sub(1)),
+            left.saturating_sub(1),
+            base,
+        );
+    }
+
+    if let Overlay::Menu(menu) = &mut app.overlay {
+        menu.area = inside;
+    }
 }
 
 fn draw_picker(frame: &mut Frame, app: &mut App, ground: Color) -> Option<Position> {
@@ -1269,7 +1584,12 @@ fn draw_picker(frame: &mut Frame, app: &mut App, ground: Color) -> Option<Positi
 
     // The box you type in.
     let query_row = inside.y;
-    buf.set_string(inside.x, query_row, "\u{203a} ", Style::new().fg(theme.accent));
+    buf.set_string(
+        inside.x,
+        query_row,
+        "\u{203a} ",
+        Style::new().fg(theme.accent),
+    );
     buf.set_stringn(
         inside.x + 2,
         query_row,
@@ -1361,7 +1681,8 @@ fn draw_picker(frame: &mut Frame, app: &mut App, ground: Color) -> Option<Positi
             }
         }
         if let Some(detail) = detail {
-            let room = (right.saturating_sub(x) as usize).saturating_sub(text::str_width(label) + 3);
+            let room =
+                (right.saturating_sub(x) as usize).saturating_sub(text::str_width(label) + 3);
             if room > 6 {
                 let shown = text::truncate(detail, room);
                 let width = text::str_width(&shown) as u16;
@@ -1381,9 +1702,7 @@ fn draw_picker(frame: &mut Frame, app: &mut App, ground: Color) -> Option<Positi
             if column < right as usize
                 && let Some(cell) = buf.cell_mut(Position::new(column as u16, y))
             {
-                cell.set_style(
-                    base.fg(theme.accent).add_modifier(Modifier::BOLD),
-                );
+                cell.set_style(base.fg(theme.accent).add_modifier(Modifier::BOLD));
             }
         }
     }
@@ -1438,16 +1757,16 @@ fn draw_prompt(frame: &mut Frame, app: &mut App) -> Option<Position> {
 
     // For a search, how many there are — the thing you actually want to know
     // while typing one.
-    if matches!(prompt.kind, PromptKind::Find | PromptKind::ReplaceFind)
-        && !prompt.input.is_empty()
+    if matches!(prompt.kind, PromptKind::Find | PromptKind::ReplaceFind) && !prompt.input.is_empty()
     {
-        let count = app.count_matches_of(&prompt.input);
+        let (place, count) = app.match_place_of(&prompt.input);
         let said = format!(
             " {} ",
-            match count {
-                0 => "none".to_string(),
-                1 => "1 match".to_string(),
-                n => format!("{n} matches"),
+            match (place, count) {
+                (_, 0) => "none".to_string(),
+                (Some(at), n) => format!("{at} of {n}"),
+                (None, 1) => "1 match".to_string(),
+                (None, n) => format!("{n} matches"),
             }
         );
         let width = text::str_width(&said) as u16;
@@ -1669,9 +1988,15 @@ fn help_lines(app: &App) -> Vec<HelpLine> {
         ("Right click", "what can be done here"),
         ("Wheel", "scroll the pane under the pointer"),
         ("Click a tab", "switch to it; the × closes it"),
-        ("Wheel over the tabs", "walk along them when there are more than fit"),
+        (
+            "Wheel over the tabs",
+            "walk along them when there are more than fit",
+        ),
         ("Click a ‹ or ›", "the next tab that way"),
-        ("Click the status bar", "the language, the position and the problems are buttons"),
+        (
+            "Click the status bar",
+            "the language, the position and the problems are buttons",
+        ),
     ] {
         lines.push(HelpLine::Item(what.into(), does.into()));
     }
@@ -1701,8 +2026,7 @@ mod tests {
         let mut app = App::new(Config::default(), tx);
         app.here_mut().rope = ropey::Rope::from_str(text);
         then(&mut app);
-        let mut terminal =
-            Terminal::new(TestBackend::new(60, 12)).expect("a terminal to draw on");
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).expect("a terminal to draw on");
         terminal
             .draw(|frame| super::draw(frame, &mut app))
             .expect("drawn");
@@ -1758,6 +2082,406 @@ mod tests {
         })));
     }
 
+    /// Everything on one row, as text, for a test that cares what a row says.
+    fn row_text(buffer: &Buffer, y: u16) -> String {
+        (0..buffer.area.width)
+            .map(|x| buffer[(x, y)].symbol())
+            .collect()
+    }
+
+    #[test]
+    fn a_tab_whose_file_has_changed_on_disk_says_so_rather_than_looking_saved() {
+        let (buffer, _app) = screen("text\n", |app| {
+            app.here_mut().on_disk = crate::doc::OnDisk::Changed;
+        });
+        assert!(
+            row_text(&buffer, 0).contains('\u{2260}'),
+            "{:?}",
+            row_text(&buffer, 0)
+        );
+    }
+
+    #[test]
+    fn a_tab_whose_file_is_gone_says_something_louder() {
+        let (buffer, _app) = screen("text\n", |app| {
+            app.here_mut().on_disk = crate::doc::OnDisk::Gone;
+        });
+        let row = row_text(&buffer, 0);
+        assert!(row.contains('!'), "{row:?}");
+    }
+
+    #[test]
+    fn a_tab_with_an_error_in_it_is_drawn_in_the_error_colour() {
+        let (buffer, app) = screen("text\n", |app| {
+            let range = Range::new(0, 4);
+            app.here_mut().diagnostics = vec![crate::doc::Diagnostic {
+                range,
+                severity: crate::doc::Severity::Error,
+                message: "no".into(),
+                source: None,
+                code: None,
+                server: 0,
+            }];
+        });
+        let coloured = (0..buffer.area.width)
+            .filter(|x| buffer[(*x, 0)].style().fg == Some(app.theme.error))
+            .count();
+        assert!(coloured > 1, "only the mark was coloured, not the name");
+    }
+
+    #[test]
+    fn a_context_menu_is_drawn_where_you_right_clicked() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(Config::default(), tx);
+        app.here_mut().rope = ropey::Rope::from_str("one two three\n");
+        app.screen = Rect::new(0, 0, 60, 12);
+        let mut terminal = Terminal::new(TestBackend::new(60, 12)).expect("a terminal to draw on");
+        terminal
+            .draw(|frame| super::draw(frame, &mut app))
+            .expect("drawn");
+
+        app.handle(crate::app::Event::Term(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 8,
+            row: 1,
+            modifiers: KeyModifiers::NONE,
+        })));
+        terminal
+            .draw(|frame| super::draw(frame, &mut app))
+            .expect("drawn");
+
+        let buffer = terminal.backend().buffer();
+        let all: String = (0..buffer.area.height)
+            .map(|y| row_text(buffer, y))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(all.contains("Copy"), "no menu on the screen:\n{all}");
+        assert!(all.contains("Go to definition"), "{all}");
+    }
+
+    /// The rows of a drawn menu that are painted in the accent colour: the
+    /// one the highlight is on.
+    fn highlighted(buffer: &Buffer, accent: Color) -> Vec<u16> {
+        (0..buffer.area.height)
+            .filter(|y| (0..buffer.area.width).any(|x| buffer[(x, *y)].style().bg == Some(accent)))
+            .collect()
+    }
+
+    /// An editor with a context menu open at (8, 6), and a terminal to draw it
+    /// on again after moving the pointer about.
+    fn menu_on_screen() -> (App, Terminal<TestBackend>) {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(Config::default(), tx);
+        app.here_mut().rope = ropey::Rope::from_str("one two three\n".repeat(20).as_str());
+        app.screen = Rect::new(0, 0, 60, 24);
+        let mut terminal =
+            Terminal::new(TestBackend::new(60, 24)).expect("a terminal to draw on");
+        terminal.draw(|frame| super::draw(frame, &mut app)).expect("drawn");
+        app.handle(crate::app::Event::Term(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: 8,
+            row: 6,
+            modifiers: KeyModifiers::NONE,
+        })));
+        terminal.draw(|frame| super::draw(frame, &mut app)).expect("drawn");
+        (app, terminal)
+    }
+
+    fn move_pointer(app: &mut App, column: u16, row: u16) {
+        app.handle(crate::app::Event::Term(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Moved,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })));
+    }
+
+    #[test]
+    fn a_menu_opens_with_its_first_row_highlighted() {
+        let (app, terminal) = menu_on_screen();
+        let lit = highlighted(terminal.backend().buffer(), app.theme.accent);
+        assert_eq!(lit.len(), 1, "one row highlighted, got {lit:?}");
+    }
+
+    #[test]
+    fn the_menu_highlight_follows_the_pointer() {
+        let (mut app, mut terminal) = menu_on_screen();
+        let accent = app.theme.accent;
+        let first = highlighted(terminal.backend().buffer(), accent);
+        let row = first[0];
+
+        // Cut, then Copy: the row below, and one anything can do.
+        move_pointer(&mut app, 12, row + 1);
+        terminal.draw(|frame| super::draw(frame, &mut app)).expect("drawn");
+        let now = highlighted(terminal.backend().buffer(), accent);
+        assert_eq!(now, vec![row + 1], "was {first:?}");
+    }
+
+    #[test]
+    fn pointing_at_a_row_that_can_do_nothing_does_not_light_it_up_as_though_it_could() {
+        let (mut app, mut terminal) = menu_on_screen();
+        let accent = app.theme.accent;
+        let row = highlighted(terminal.backend().buffer(), accent)[0];
+
+        // Cut, Copy, Paste, a divider, then Undo — which a buffer nobody has
+        // typed in cannot do.
+        move_pointer(&mut app, 12, row + 4);
+        terminal.draw(|frame| super::draw(frame, &mut app)).expect("drawn");
+        assert!(
+            highlighted(terminal.backend().buffer(), accent).is_empty(),
+            "an unavailable row was lit as though it were available"
+        );
+        // The highlight has still moved there, so a click knows where it is.
+        let Overlay::Menu(menu) = &app.overlay else {
+            panic!("the menu closed")
+        };
+        assert_eq!(menu.cursor, 4);
+        assert!(menu.chosen().is_none(), "and choosing it does nothing");
+    }
+
+    #[test]
+    fn the_menu_highlight_stays_put_over_a_divider() {
+        let (mut app, mut terminal) = menu_on_screen();
+        let accent = app.theme.accent;
+        let row = highlighted(terminal.backend().buffer(), accent)[0];
+        // Cut, Copy, Paste, then a divider.
+        move_pointer(&mut app, 12, row + 3);
+        terminal.draw(|frame| super::draw(frame, &mut app)).expect("drawn");
+        assert_eq!(highlighted(terminal.backend().buffer(), accent), vec![row]);
+    }
+
+    /// An editor with a long hover open, and a terminal to draw it on.
+    fn hover_on_screen(lines: usize) -> (App, Terminal<TestBackend>) {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(Config::default(), tx);
+        app.here_mut().rope = ropey::Rope::from_str("fn main() {}\n");
+        app.screen = Rect::new(0, 0, 60, 24);
+        // Backticks, because that is how a language server says "this word is
+        // a name" and the only thing a hover offers to follow.
+        let text: Vec<crate::app::DocLine> = (0..lines)
+            .map(|n| crate::app::DocLine::prose(format!("line {n} about `Selections` here")))
+            .collect();
+        let mut popup = crate::app::Popup::new(text, 0);
+        popup.focused = true;
+        app.hover = Some(popup);
+        let terminal = Terminal::new(TestBackend::new(60, 24)).expect("a terminal");
+        (app, terminal)
+    }
+
+    /// How tall the drawn hover is, measured by its rounded corners.
+    fn hover_height(buffer: &Buffer) -> usize {
+        let corners: Vec<u16> = (0..buffer.area.height)
+            .filter(|y| {
+                (0..buffer.area.width)
+                    .any(|x| matches!(buffer[(x, *y)].symbol(), "\u{256d}" | "\u{2570}"))
+            })
+            .collect();
+        match corners.as_slice() {
+            [top, bottom] => (bottom - top + 1) as usize,
+            _ => 0,
+        }
+    }
+
+    #[test]
+    fn a_hover_stays_the_same_size_however_far_down_it_you_read() {
+        let (mut app, mut terminal) = hover_on_screen(60);
+        terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
+        let was = hover_height(terminal.backend().buffer());
+        assert!(was > 4, "nothing was drawn");
+
+        for _ in 0..80 {
+            app.hover.as_mut().expect("a hover").scroll_by(1);
+            terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
+            assert_eq!(
+                hover_height(terminal.backend().buffer()),
+                was,
+                "the box changed size while being read"
+            );
+        }
+    }
+
+    #[test]
+    fn a_hover_cannot_be_scrolled_past_its_last_line() {
+        let (mut app, mut terminal) = hover_on_screen(60);
+        terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
+        for _ in 0..200 {
+            app.hover.as_mut().expect("a hover").scroll_by(1);
+        }
+        terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
+
+        let hover = app.hover.as_ref().expect("a hover");
+        let rows = hover.area.height as usize;
+        assert_eq!(
+            hover.scroll,
+            60 - rows,
+            "the last line should sit on the bottom row and no further"
+        );
+        // And the box is still full of text rather than empty from the top.
+        let text: String = (hover.area.y..hover.area.y + hover.area.height)
+            .map(|y| row_text(terminal.backend().buffer(), y))
+            .collect();
+        assert!(text.contains("line 59"), "the end is not on the screen");
+        assert!(!text.trim().is_empty());
+    }
+
+    #[test]
+    fn the_name_under_the_pointer_in_a_hover_is_drawn_as_something_you_can_follow() {
+        let (mut app, mut terminal) = hover_on_screen(20);
+        terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
+        let area = app.hover.as_ref().expect("a hover").area;
+
+        // "line 0 about `Selections` here" — point at the S.
+        let column = area.x + "line 0 about `".len() as u16;
+        move_pointer(&mut app, column, area.y);
+        terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
+
+        let buffer = terminal.backend().buffer();
+        let underlined: String = (0..buffer.area.width)
+            .filter(|x| {
+                buffer[(*x, area.y)]
+                    .style()
+                    .add_modifier
+                    .contains(Modifier::UNDERLINED)
+            })
+            .map(|x| buffer[(x, area.y)].symbol())
+            .collect();
+        assert_eq!(underlined, "Selections");
+    }
+
+    fn nothing_underlined(buffer: &Buffer, y: u16) -> bool {
+        !(0..buffer.area.width).any(|x| {
+            buffer[(x, y)]
+                .style()
+                .add_modifier
+                .contains(Modifier::UNDERLINED)
+        })
+    }
+
+    #[test]
+    fn pointing_at_prose_rather_than_a_name_underlines_nothing() {
+        let (mut app, mut terminal) = hover_on_screen(20);
+        terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
+        let area = app.hover.as_ref().expect("a hover").area;
+
+        // "about" is an ordinary word in a sentence, not a name in backticks,
+        // and a box where every word lights up says nothing by lighting up.
+        move_pointer(&mut app, area.x + "line 0 a".len() as u16, area.y);
+        terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
+        assert!(nothing_underlined(terminal.backend().buffer(), area.y));
+
+        // Nor does the space between words.
+        move_pointer(&mut app, area.x + 6, area.y);
+        terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
+        assert!(nothing_underlined(terminal.backend().buffer(), area.y));
+    }
+
+    /// Press, move, release — a drag across a hover, the way the terminal
+    /// sends one.
+    fn drag_over(app: &mut App, from: (u16, u16), to: (u16, u16)) {
+        for (kind, at) in [
+            (MouseEventKind::Down(MouseButton::Left), from),
+            (MouseEventKind::Drag(MouseButton::Left), to),
+            (MouseEventKind::Up(MouseButton::Left), to),
+        ] {
+            app.handle(crate::app::Event::Term(TermEvent::Mouse(MouseEvent {
+                kind,
+                column: at.0,
+                row: at.1,
+                modifiers: KeyModifiers::NONE,
+            })));
+        }
+    }
+
+    #[test]
+    fn dragging_over_a_hover_selects_what_you_dragged_over() {
+        let (mut app, mut terminal) = hover_on_screen(20);
+        terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
+        let area = app.hover.as_ref().expect("a hover").area;
+
+        // "line 0 about `Selections` here" — take "0 about".
+        drag_over(&mut app, (area.x + 5, area.y), (area.x + 12, area.y));
+        assert_eq!(
+            app.hover.as_ref().expect("a hover").selected_text(),
+            Some("0 about".into())
+        );
+
+        // And it is painted, so you can see what you took.
+        terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
+        let buffer = terminal.backend().buffer();
+        let lit: String = (0..buffer.area.width)
+            .filter(|x| buffer[(*x, area.y)].style().bg == Some(app.theme.selection))
+            .map(|x| buffer[(x, area.y)].symbol())
+            .collect();
+        assert_eq!(lit, "0 about");
+    }
+
+    #[test]
+    fn a_selection_across_lines_takes_the_line_breaks_with_it() {
+        let (mut app, mut terminal) = hover_on_screen(20);
+        terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
+        let area = app.hover.as_ref().expect("a hover").area;
+
+        drag_over(&mut app, (area.x, area.y), (area.x + 6, area.y + 2));
+        let took = app
+            .hover
+            .as_ref()
+            .expect("a hover")
+            .selected_text()
+            .expect("something selected");
+        assert_eq!(took.lines().count(), 3, "{took:?}");
+        assert!(took.starts_with("line 0 about"), "{took:?}");
+        assert!(took.ends_with("line 2"), "{took:?}");
+    }
+
+    #[test]
+    fn ctrl_c_in_a_hover_copies_what_was_dragged_over_and_nothing_else() {
+        let (mut app, mut terminal) = hover_on_screen(20);
+        terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
+        let area = app.hover.as_ref().expect("a hover").area;
+        drag_over(&mut app, (area.x, area.y), (area.x + 6, area.y));
+
+        let key = crate::keys::Key::parse("ctrl-c").expect("a key");
+        app.handle(crate::app::Event::Term(TermEvent::Key(
+            ratatui::crossterm::event::KeyEvent::new(key.code, key.mods),
+        )));
+        assert_eq!(app.clipboard, "line 0");
+    }
+
+    #[test]
+    fn double_clicking_a_hover_takes_the_word() {
+        let (mut app, mut terminal) = hover_on_screen(20);
+        terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
+        let area = app.hover.as_ref().expect("a hover").area;
+        let column = area.x + "line 0 ab".len() as u16;
+        for _ in 0..2 {
+            app.handle(crate::app::Event::Term(TermEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            })));
+        }
+        assert_eq!(
+            app.hover.as_ref().expect("a hover").selected_text(),
+            Some("about".into())
+        );
+    }
+
+    #[test]
+    fn moving_the_pointer_into_a_hover_does_not_dismiss_it() {
+        let (mut app, mut terminal) = hover_on_screen(20);
+        app.hover.as_mut().expect("a hover").focused = false;
+        terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
+        let area = app.hover.as_ref().expect("a hover").outer;
+
+        move_pointer(&mut app, area.x + 2, area.y + 1);
+        assert!(app.hover.is_some(), "it vanished as the pointer reached it");
+
+        // Away from it, and an unasked-for hover goes as it always did.
+        move_pointer(&mut app, 0, 23);
+        assert!(app.hover.is_none());
+    }
+
     #[test]
     fn the_tab_of_the_file_you_are_looking_at_is_always_on_the_screen() {
         // Twelve files across forty columns: most of them are off the side, and
@@ -1794,7 +2518,11 @@ mod tests {
         // Clicking the left one moves back by a whole tab, not by a column.
         let was = app.tab_scroll;
         click(&mut app, 0, 0);
-        assert!(app.tab_scroll < was, "{} is not before {was}", app.tab_scroll);
+        assert!(
+            app.tab_scroll < was,
+            "{} is not before {was}",
+            app.tab_scroll
+        );
         // And it did not switch file, which is what the tab under it would do.
         assert_eq!(app.here().name, app.docs()[6].name);
     }
@@ -1860,10 +2588,8 @@ mod tests {
         // the block first and the character lands on top of it, and a
         // multi-cursor edit becomes one you cannot see.
         let (buffer, app) = screen("alpha\nbravo\ncharlie\n", |app| {
-            app.view_mut().sel = Selections::many(
-                vec![Range::point(2), Range::point(8), Range::point(14)],
-                0,
-            );
+            app.view_mut().sel =
+                Selections::many(vec![Range::point(2), Range::point(8), Range::point(14)], 0);
         });
         let blocks = cells_on(&buffer, app.theme.cursor);
         // The primary is the terminal's own cursor and is not painted, so two.

@@ -36,7 +36,12 @@
                 "typeHints": { "enable": true },
                 "parameterHints": { "enable": true }
               },
-              "procMacro": { "enable": true }
+              "procMacro": { "enable": true },
+              "workspace": {
+                "symbol": {
+                  "search": { "scope": "workspace_and_dependencies", "kind": "all_symbols" }
+                }
+              }
             }
           }
         }
@@ -172,11 +177,24 @@
                 "importOrder": ["java", "javax", "com", "org"],
                 "guessMethodArguments": true
               },
-              "signatureHelp": { "enabled": true },
+              "signatureHelp": { "enabled": true, "description": { "enabled": true } },
               "implementationsCodeLens": { "enabled": false },
               "referencesCodeLens": { "enabled": false },
               "inlayHints": { "parameterNames": { "enabled": "literals" } },
-              "format": { "enabled": true }
+              "format": { "enabled": true },
+              "autobuild": { "enabled": true },
+              "import": { "maven": { "enabled": true }, "gradle": { "enabled": true } },
+              "maven": { "downloadSources": true },
+              "eclipse": { "downloadSources": true },
+              "references": { "includeDecompiledSources": true },
+              "contentProvider": { "preferred": "fernflower" }
+            }
+          },
+          "init_options": {
+            "extendedClientCapabilities": {
+              "classFileContentsSupport": true,
+              "advancedOrganizeImportsSupport": true,
+              "resolveAdditionalTextEditsSupport": true
             }
           }
         }

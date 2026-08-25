@@ -83,6 +83,14 @@ pub struct Theme {
     /// The vertical rules down the columns you asked to be warned about.
     pub ruler: Color,
 
+    // ---- git: what has happened to a line since the last commit ----
+    /// A line that was not there before.
+    pub added: Color,
+    /// A line that is not what it was.
+    pub changed: Color,
+    /// Where a line used to be.
+    pub removed: Color,
+
     /// The colours code is drawn in.
     pub syntax: Syntax,
 }
@@ -411,6 +419,10 @@ pub const FALLBACK: Theme = Theme {
     whitespace: Color::DarkGray,
     ruler: Color::DarkGray,
 
+    added: Color::Green,
+    changed: Color::Blue,
+    removed: Color::Red,
+
     syntax: Syntax {
         keyword: Color::Magenta,
         keyword_control: Color::LightMagenta,
@@ -708,6 +720,12 @@ struct FileEditor {
     whitespace: Option<Colour>,
     #[serde(default)]
     ruler: Option<Colour>,
+    #[serde(default)]
+    added: Option<Colour>,
+    #[serde(default)]
+    changed: Option<Colour>,
+    #[serde(default)]
+    removed: Option<Colour>,
 }
 
 #[derive(Deserialize, Default)]
@@ -866,6 +884,9 @@ impl FileTheme {
             bracket_match: base.bracket_match,
             whitespace: base.whitespace,
             ruler: base.ruler,
+            added: base.added,
+            changed: base.changed,
+            removed: base.removed,
             syntax: base.syntax,
         };
 
@@ -937,6 +958,12 @@ impl FileTheme {
         theme.bracket_match = first([ed.and_then(|e| e.bracket_match), None], theme.accent);
         theme.whitespace = first([ed.and_then(|e| e.whitespace), None], theme.faint);
         theme.ruler = first([ed.and_then(|e| e.ruler), None], theme.faint);
+        // A theme that says nothing about git gets the three colours every
+        // diff has used since diffs were in colour, taken from the tones it
+        // did name so that they belong to it rather than to the terminal.
+        theme.added = first([ed.and_then(|e| e.added), None], theme.success);
+        theme.changed = first([ed.and_then(|e| e.changed), None], theme.info);
+        theme.removed = first([ed.and_then(|e| e.removed), None], theme.error);
         theme
     }
 }

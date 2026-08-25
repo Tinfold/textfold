@@ -113,6 +113,9 @@ impl Key {
             "end" => KeyCode::End,
             "pageup" | "pgup" => KeyCode::PageUp,
             "pagedown" | "pgdn" => KeyCode::PageDown,
+            // The key beside the right Ctrl on a full keyboard, which has
+            // meant "context menu" since 1994.
+            "menu" | "apps" => KeyCode::Menu,
             _ => {
                 if let Some(n) = lower.strip_prefix('f')
                     && let Ok(n) = n.parse::<u8>()
@@ -293,7 +296,18 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::FindPrev, &["shift-f3"]),
     (Cmd::FindWordUnderCursor, &["alt-f"]),
     (Cmd::Replace, &["ctrl-h"]),
-    (Cmd::Grep, &["ctrl-shift-f"]),
+    // Ctrl-Shift-F is the key everyone reaches for, and it is also the one
+    // most likely never to arrive: a terminal without the extended keyboard
+    // protocol cannot tell it from Ctrl-F, and tmux, screen and a fair number
+    // of desktops take it for themselves. So it is bound, and so are two keys
+    // that always get through — Alt-G, and F7 for anything driving the
+    // terminal down a pipe. Alt-G is shown in the help, because a key in the
+    // help that does nothing on your machine is worse than no help.
+    (Cmd::Grep, &["alt-g", "ctrl-shift-f", "f7"]),
+    // Beside the keys for the next problem, since stepping through your own
+    // changes is the same shape of thing as stepping through the compiler's.
+    (Cmd::NextChange, &["f9"]),
+    (Cmd::PrevChange, &["shift-f9"]),
 
     // Language servers.
     (Cmd::Completion, &["ctrl-space"]),
@@ -302,6 +316,9 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::Hover, &["alt-k"]),
     (Cmd::Rename, &["f2"]),
     (Cmd::CodeAction, &["alt-enter", "ctrl-."]),
+    // The one that puts the missing import in without a list in between,
+    // which is what you want ninety times out of a hundred.
+    (Cmd::FixIt, &["alt-i"]),
     (Cmd::Format, &["alt-shift-f"]),
     (Cmd::NextDiagnostic, &["f8"]),
     (Cmd::PrevDiagnostic, &["shift-f8"]),
@@ -319,6 +336,10 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::ThemePicker, &["alt-t"]),
     (Cmd::ToggleLineNumbers, &["alt-n"]),
     (Cmd::ToggleWrap, &["alt-z"]),
+
+    // What a keyboard with a menu key sends, and the key Windows and GTK have
+    // both meant by it for thirty years for keyboards without one.
+    (Cmd::ContextMenu, &["shift-f10", "menu"]),
 
     (Cmd::Escape, &["esc"]),
 ];

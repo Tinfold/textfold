@@ -39,6 +39,13 @@ pub enum Choice {
         line: usize,
         column: usize,
     },
+    /// Somewhere a language server pointed at that is not necessarily a file
+    /// — a class inside a jar, say.
+    At {
+        target: crate::app::Target,
+        line: usize,
+        column: usize,
+    },
     Theme(String),
     Language(LangId),
     /// Something a language server offered to do about the code.
@@ -186,6 +193,16 @@ impl Picker {
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
         };
         it.refilter();
+        it
+    }
+
+    /// A list that opens with something already typed into it, for a search
+    /// somebody started somewhere else — Ctrl-clicking a name in a docstring,
+    /// say, which is a question with its query already in it.
+    pub fn searching(kind: Kind, query: &str) -> Self {
+        let mut it = Self::new(kind, Vec::new());
+        it.query = query.to_string();
+        it.caret = it.query.chars().count();
         it
     }
 

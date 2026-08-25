@@ -87,6 +87,11 @@ commands! {
     Reload => "reload", File, "Read this file again, throwing away changes";
     Close => "close", File, "Close this buffer, asking about unsaved changes";
     CloseForce => "close!", File, "Close this buffer, changes and all";
+    CloseOthers => "close-others", File, "Close every buffer but this one";
+    CloseSaved => "close-saved", File, "Close every buffer with nothing unsaved in it";
+    CloseAll => "close-all", File, "Close every buffer";
+    CopyPath => "copy-path", File, "Copy this file's full path";
+    CopyRelativePath => "copy-relative-path", File, "Copy this file's path from the project root";
     NextBuffer => "next-buffer", File, "The buffer after this one";
     PrevBuffer => "prev-buffer", File, "The buffer before this one";
     Buffers => "buffers", File, "Pick from the open buffers";
@@ -170,6 +175,8 @@ commands! {
     FindPrev => "find-prev", Search, "The one before";
     FindWordUnderCursor => "find-word", Search, "Search for the word the cursor is on";
     Replace => "replace", Search, "Search and replace in this file";
+    NextChange => "next-change", Search, "To the next line that differs from the last commit";
+    PrevChange => "prev-change", Search, "To the change before";
     Grep => "grep", Search, "Search every file in the project";
 
     // ---- Language servers ----
@@ -181,6 +188,7 @@ commands! {
     Hover => "hover", Code, "What the language server knows about this";
     Rename => "rename", Code, "Rename this everywhere it appears";
     CodeAction => "code-action", Code, "What the language server offers to do about this";
+    FixIt => "fix-it", Code, "Do the obvious thing about the problem here: add the import, fix the typo";
     Format => "format", Code, "Reformat the file";
     Symbols => "symbols", Code, "Pick from what this file defines";
     WorkspaceSymbols => "workspace-symbols", Code, "Pick from what the project defines";
@@ -210,6 +218,8 @@ commands! {
     Settings => "settings", View, "Change a setting, and keep it";
 
     // ---- Getting out of things ----
+    ContextMenu => "context-menu", Edit, "What can be done where the cursor is";
+
     Escape => "escape", Help, "Close what is open, or drop back to one cursor";
     Help => "help", Help, "The keys, and what they do";
     About => "about", Help, "Which textfold this is";
@@ -247,6 +257,7 @@ impl Cmd {
                 | Cmd::Rename
                 | Cmd::Format
                 | Cmd::CodeAction
+                | Cmd::FixIt
         )
     }
 

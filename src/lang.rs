@@ -264,10 +264,10 @@ pub fn by_tag(tag: &str) -> Option<LangId> {
         .filter(|id| *id != LangId::PLAIN)
 }
 
-/// A language by name. Nothing in the editor asks by name — a picker holds
-/// the id it is offering — but the tests do, constantly, and a lookup that
-/// only the tests use is still a lookup worth having in one place.
-#[cfg(test)]
+/// A language by name. A picker holds the id it is offering, so nothing that
+/// a person drives asks this — but a buffer the editor makes for itself knows
+/// what it is putting in and has only the name to say so with, and the tests
+/// ask constantly.
 pub fn by_name(name: &str) -> Option<LangId> {
     let wanted = name.trim().to_lowercase();
     all()

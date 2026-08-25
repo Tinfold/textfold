@@ -69,12 +69,18 @@ pub enum Ask {
     Goto {
         doc: DocId,
         what: Goto,
+        /// A name to search the project for if the server has no definition
+        /// at that position.
+        fallback: Option<String>,
     },
     References,
     Symbols {
         doc: DocId,
     },
-    WorkspaceSymbols,
+    WorkspaceSymbols {
+        /// Set when one hit should be gone to rather than listed.
+        going: Option<String>,
+    },
     Rename {
         /// The new name, to say so afterwards.
         to: String,
@@ -84,6 +90,13 @@ pub enum Ask {
         version: i32,
     },
     CodeActions,
+    /// Fixes for whatever is wrong under the cursor, asked for by the editor
+    /// rather than by a person, so that they can be offered before anyone
+    /// thinks to go looking for them.
+    QuickFixes {
+        doc: DocId,
+        at: usize,
+    },
     Signature {
         doc: DocId,
         at: usize,
@@ -94,6 +107,13 @@ pub enum Ask {
     /// A command we asked the server to run. The answer is usually nothing;
     /// what matters arrives separately as `workspace/applyEdit`.
     Command,
+    /// The text of a class that lives inside a jar, and where in it we were
+    /// going when we asked.
+    ClassFile {
+        uri: String,
+        line: usize,
+        column: usize,
+    },
 }
 
 /// Which kind of "where is this" was asked.
@@ -625,6 +645,21 @@ impl Servers {
     }
 
     pub fn goto(&mut self, doc: &Document, at: usize, what: Goto) -> Option<ServerId> {
+        self.goto_or(doc, at, what, None)
+    }
+
+    /// Go to a definition, with something to try if there is not one there.
+    ///
+    /// `fallback` is a name to search the project for when the server has
+    /// nothing at that position — how following a name out of a docstring
+    /// keeps working for a name the file itself never mentions.
+    pub fn goto_or(
+        &mut self,
+        doc: &Document,
+        at: usize,
+        what: Goto,
+        fallback: Option<String>,
+    ) -> Option<ServerId> {
         let capability = match what {
             Goto::Definition => "definitionProvider",
             Goto::Type => "typeDefinitionProvider",
@@ -635,7 +670,11 @@ impl Servers {
             at,
             what.method(),
             capability,
-            Ask::Goto { doc: doc.id, what },
+            Ask::Goto {
+                doc: doc.id,
+                what,
+                fallback,
+            },
             json!({}),
         )
     }
@@ -676,6 +715,35 @@ impl Servers {
     /// What the server offers to do about the selection: fix an error, import
     /// a name, fill in a match.
     pub fn code_actions(&mut self, doc: &Document, range: Range) -> Option<ServerId> {
+        self.ask_actions(doc, range, None, Ask::CodeActions)
+    }
+
+    /// Only the fixes: what the server would do about a diagnostic, and
+    /// nothing about the code that is already fine.
+    ///
+    /// Asked for on its own because it is asked for constantly — every time
+    /// the cursor lands on a red squiggle — and `only` is what keeps that from
+    /// meaning "work out every refactoring available at this position", which
+    /// for a large project is not a question you want asked on a timer.
+    pub fn quick_fixes(&mut self, doc: &Document, range: Range) -> Option<ServerId> {
+        self.ask_actions(
+            doc,
+            range,
+            Some(json!(["quickfix"])),
+            Ask::QuickFixes {
+                doc: doc.id,
+                at: range.start(),
+            },
+        )
+    }
+
+    fn ask_actions(
+        &mut self,
+        doc: &Document,
+        range: Range,
+        only: Option<Value>,
+        ask: Ask,
+    ) -> Option<ServerId> {
         let path = doc.path.clone()?;
         let id = self.primary_for(doc)?;
         let here: Vec<Value> = doc
@@ -690,6 +758,13 @@ impl Servers {
         if !server.can("codeActionProvider") {
             return None;
         }
+        let mut context = json!({ "diagnostics": here });
+        if let Some(only) = only {
+            context["only"] = only;
+            // "The editor asked rather than the person" — servers that care
+            // use it to leave out the expensive answers.
+            context["triggerKind"] = json!(2);
+        }
         server.request(
             "textDocument/codeAction",
             json!({
@@ -698,9 +773,41 @@ impl Servers {
                     "start": { "line": from_line, "character": from_char },
                     "end": { "line": to_line, "character": to_char },
                 },
-                "context": { "diagnostics": here },
+                "context": context,
             }),
-            Ask::CodeActions,
+            ask,
+        );
+        Some(id)
+    }
+
+    /// Ask for the text of something that is not a file.
+    ///
+    /// `jdtls` only. Java's answer to "where is `List` defined" is inside
+    /// `rt.jar`, which is not a path and cannot be opened; the server offers
+    /// this instead, and hands back the source or a decompilation of it. It is
+    /// not in the protocol — it is an extension jdtls invented and every Java
+    /// editor implements, because without it going to a definition in a
+    /// library simply does not work.
+    pub fn class_file(
+        &mut self,
+        doc: &Document,
+        uri: &str,
+        line: usize,
+        column: usize,
+    ) -> Option<ServerId> {
+        if !uri.starts_with("jdt://") {
+            return None;
+        }
+        let id = self.primary_for(doc)?;
+        let server = self.get_mut(id)?;
+        server.request(
+            "java/classFileContents",
+            json!({ "uri": uri }),
+            Ask::ClassFile {
+                uri: uri.to_string(),
+                line,
+                column,
+            },
         );
         Some(id)
     }
@@ -746,7 +853,17 @@ impl Servers {
         Some(id)
     }
 
-    pub fn workspace_symbols(&mut self, doc: &Document, query: &str) -> Option<ServerId> {
+    /// Search the project for a name.
+    ///
+    /// `going` is set when the answer is meant to be gone to rather than
+    /// browsed — a name followed out of a docstring — and carries the name so
+    /// that "there is nothing called that" can say what "that" was.
+    pub fn workspace_symbols(
+        &mut self,
+        doc: &Document,
+        query: &str,
+        going: Option<String>,
+    ) -> Option<ServerId> {
         let id = self.primary_for(doc)?;
         let server = self.get_mut(id)?;
         if !server.can("workspaceSymbolProvider") {
@@ -755,7 +872,7 @@ impl Servers {
         server.request(
             "workspace/symbol",
             json!({ "query": query }),
-            Ask::WorkspaceSymbols,
+            Ask::WorkspaceSymbols { going },
         );
         Some(id)
     }

@@ -31,6 +31,9 @@ textfold                         # an empty buffer
 - [Language servers](#language-servers)
 - [Settings](#settings)
 - [Colours](#colours)
+- [Files that change underneath you](#files-that-change-underneath-you)
+- [Git](#git)
+- [Reading what a language server says](#reading-what-a-language-server-says)
 - [Teaching it a language](#teaching-it-a-language)
 - [When something is wrong](#when-something-is-wrong)
 - [How it is put together](#how-it-is-put-together)
@@ -98,6 +101,13 @@ never the only way in.
 | Alt-, / Alt-. | previous / next buffer |
 | Ctrl-Q | leave |
 
+Right-clicking a tab offers the rest: close the others, close the saved ones,
+close them all, copy the path, open it in another pane. They are commands like
+any other — `close-others`, `close-saved`, `close-all`, `copy-path`,
+`copy-relative-path` — so they can be bound to keys or run from the palette.
+Closing several at once never asks about unsaved changes; it leaves those
+buffers open and says how many it kept.
+
 ### Moving
 
 | Key | |
@@ -148,10 +158,28 @@ Shift with any movement extends the selection, as everywhere else.
 | Key | |
 |---|---|
 | Ctrl-F | find, as you type |
-| F3 / Shift-F3 | next / previous |
+| Enter / Shift-Enter | while finding: the next hit / the one before |
+| F3 / Shift-F3 | next / previous, with the box closed |
 | Alt-F | find the word under the cursor |
 | Ctrl-H | find and replace |
-| Ctrl-Shift-F | search every file in the project |
+| Alt-G | search every file in the project |
+| F9 / Shift-F9 | next / previous change since the last commit |
+
+Ctrl-F opens an empty box. The last search is not lost — F3 still finds it, and
+pressing Enter in an empty box brings it back — but starting a search is nearly
+always starting a different one, and a box you have to clear before you can
+type is a box in the way.
+
+Inside the box, Enter walks the matches and leaves the box open; the count
+beside it says which one you are on, `3 of 12`. Escape closes it, and puts the
+cursor back where it started unless you pressed Enter, which is you saying you
+meant to go there.
+
+Project-wide search is also on Ctrl-Shift-F and F7. Alt-G is the one in the
+tables because it is the one that always arrives: Ctrl-Shift-F is
+indistinguishable from Ctrl-F on a terminal without the extended keyboard
+protocol, and tmux, screen and several desktops take it before the terminal
+ever sees it.
 
 A lower-case search ignores case; a search with a capital in it means the
 capital. Replacing with something selected replaces only inside the selection.
@@ -163,9 +191,11 @@ capital. Replacing with something selected replaces only inside the selection.
 | Ctrl-Space | suggest |
 | F12 | go to the definition |
 | Shift-F12 | everywhere this is used |
-| Alt-K | what the language server knows about this |
+| Alt-K | what the language server knows about this; again to read it |
 | F2 | rename, everywhere |
+| Alt-I | do the obvious thing about the problem here — usually add the import |
 | Alt-Enter | what can be done here (quick fixes, imports, refactorings) |
+| Shift-F10 | what can be done here, as a menu |
 | Alt-Shift-F | reformat the file |
 | F8 / Shift-F8 | next / previous problem |
 | Alt-D | all the problems, as a list |
@@ -226,10 +256,13 @@ them wrong.
 | Shift-click | extend the selection |
 | Alt-click | another cursor there |
 | Ctrl-click | go to the definition |
-| right click | what can be done here |
+| right click | a menu of what can be done here — the highlight follows the pointer |
+| right click a tab | a menu about that file |
 | middle click | paste |
 | wheel | scroll the pane the pointer is over |
 | hover | what the language server knows about the word under the pointer |
+| click a hover | put the keyboard in it; drag to select, double click for a word |
+| Ctrl-click a name in a hover | open where it is defined, in a tab |
 | click a tab | switch to it — the × closes it |
 | wheel over the tabs | walk along them, when there are more open than fit |
 | click a ‹ or › | the next tab that way |
@@ -242,9 +275,42 @@ Run it from the palette (or bind a key) and you can select and copy the way you
 normally would; run it again to take it back. `textfold --no-mouse` starts that
 way, and `"mouse": false` in the settings makes it permanent.
 
-Copying inside textfold puts the text on your system clipboard even over
-`ssh`, by asking the terminal to do it. If your terminal does not support that,
-textfold's own clipboard still works between its own buffers.
+### The right button
+
+Right-clicking is a menu rather than a single command. In the text it offers
+cut, copy and paste, undo and redo, the language server's answers — go to the
+definition, find the uses, rename, what can be done here — and select, comment
+and reformat. Right-clicking inside a selection keeps the selection, since
+"select this, then copy it" is most of what the menu is for.
+
+Right-clicking a tab offers the things that are about a file rather than about
+a place in one: save, read again from disk, close, close the others, close the
+saved ones, close them all, copy its path, open it in another pane.
+
+Every row is a command the editor already has, and shows the key that also does
+it. There is nothing in a menu that a keystroke cannot do, which is what keeps
+the two from drifting apart. Shift-F10 — or the menu key, if your keyboard has
+one — opens the text menu at the cursor without a mouse.
+
+### Copying, and where it goes
+
+Ctrl-C puts the text in three places at once, so that at least one of them is
+the one you meant:
+
+* textfold's own clipboard, which is what Ctrl-V puts back.
+* Your terminal's, by OSC 52. This is the one that works over `ssh`: a copy
+  made in an editor running on a server lands on the clipboard of the machine
+  in front of you. Not every terminal implements it, and several that do have
+  it off by default or ask first — tmux needs `set -g set-clipboard on`, and
+  Ghostty, kitty and Alacritty each have a setting for it.
+* Whatever your desktop ships for the job — `wl-copy`, `xclip`, `xsel`,
+  `pbcopy`, `clip.exe`, `termux-clipboard-set` — where there is one and there
+  is a display to talk to. This is the one that always works locally.
+
+The first copy of a session says which of these it found, so you do not have to
+guess. Ctrl-V reads the desktop's clipboard back where it can, so a copy made
+in a browser pastes into textfold without going through the terminal's own
+paste key.
 
 ---
 
@@ -431,6 +497,7 @@ than repeating forty things you did not.
   "format_on_save": false,
   "trim_trailing_whitespace": false,
   "final_newline": true,
+  "reload_on_change": true,
   "mouse": true,
   "background": true,
   "enhanced_keys": true
@@ -452,6 +519,7 @@ than repeating forty things you did not.
 | `format_on_save` | run the language server's formatter first |
 | `trim_trailing_whitespace` | drop trailing spaces on save |
 | `final_newline` | give a file one if it has none |
+| `reload_on_change` | read a file again when something else writes it — see [Files that change underneath you](#files-that-change-underneath-you) |
 | `mouse` | whether textfold captures the mouse at all |
 | `background` | paint the theme's background, or leave the terminal's own |
 | `enhanced_keys` | ask for the extended keyboard protocol |
@@ -498,12 +566,13 @@ anyway: every kind of code has a tone that already means it. Strings are the
 colour of things that worked. Comments are the colour of things deliberately in
 the background. Numbers and types are the colour of something worth noticing.
 
-`editor` is the pane the text is in. Eight roles, all worked out from `ui` if
+`editor` is the pane the text is in. Eleven roles, all worked out from `ui` if
 you leave them out:
 
 `selection`, `current_line`, `gutter`, `gutter_current`, `cursor` (the block an
 extra cursor is drawn as), `bracket_match`, `whitespace` (the dots and arrows,
-when they are being shown) and `ruler`.
+when they are being shown), `ruler`, and the three git draws a line's history
+in: `added`, `changed` and `removed`.
 
 `syntax` is the code, and there are thirty-one of them:
 
@@ -551,6 +620,141 @@ file listing nor a terminal. The names above win where a file uses both.
 Shipped: `terminal`, `catppuccin`, `dracula`, `nord`, `tokyonight`, `gruvbox`,
 `everforest`, `solarized`, `onedark`, `monokai`, `kanagawa`, `rosepine`,
 `mariana`, `afterglow`, `darcula`, `ayu`, `solarized-light`, `latte`.
+
+
+---
+
+## Files that change underneath you
+
+textfold looks at the files it has open about once a second, and notices when
+something else has written one — a build that reformats, a `git checkout`, the
+same file open in another window.
+
+* A buffer with nothing unsaved in it is simply read again. There is nothing to
+  lose, and looking at text that is no longer in the file is worse than useless.
+  Your cursor and your scroll position stay where they were, and the re-read is
+  an ordinary undo step, so Ctrl-Z puts back what you were looking at.
+* A buffer with unsaved changes of your own is **left exactly alone** and its
+  tab is marked. Only you can say which side wins. `reload` takes theirs;
+  Ctrl-S keeps yours.
+* A file that has been deleted is marked and kept. An empty screen is not what
+  "your file is gone" should look like.
+
+`"reload_on_change": false` turns the first of those off; the marks stay either
+way.
+
+### What a tab is telling you
+
+The one column at the right of a tab is its close cross and its state, since
+they are never both wanted at once:
+
+| | |
+|---|---|
+| `×` | nothing to report — click it to close the tab |
+| `●` | unsaved changes |
+| `≠` | something else has written this file since you last read or saved it |
+| `!` | the file is not there any more |
+
+The tab's **name** is drawn in the error or warning colour when a language
+server has said something about that file, so a mistake in a file you are not
+looking at is still on the screen.
+
+---
+
+## Git
+
+textfold reads git; it does not write it. There is no committing, staging or
+stashing here, and there never will be — that is what `git` is for, and it is
+one window away.
+
+What it does show is the two things you cannot get from the text alone:
+
+* **Which branch you are on**, in the status bar, with a count of how many
+  lines of this file differ from the last commit. Clicking it steps to the next
+  one.
+* **Which lines you have touched**, as a bar down the gutter: green for a line
+  that was not there before, blue for one that is not what it was, red where
+  something was deleted. F9 and Shift-F9 walk them — a run of changed lines
+  counts as one change, so this steps through your edits rather than through
+  the lines they happened to touch.
+
+The comparison is against `HEAD`, worked out from the committed text rather
+than by asking `git` on every keystroke, so typing costs a diff and not a
+process. A commit, a checkout or a rebase in another window is noticed, and
+everything is worked out again from the new head.
+
+A file git has never seen gets no marks and no column, rather than every line
+of it drawn as new.
+
+---
+
+## Reading what a language server says
+
+Hovering over something — with the pointer, or with Alt-K — shows what the
+language server knows about it in a box beside the code. That box is a glance.
+
+Pressing Alt-K again, or clicking the box, puts the keyboard **in** it: it
+grows to the height of the screen, stays put while you move the pointer, and:
+
+| | |
+|---|---|
+| arrows, PgUp/PgDn, Home/End | scroll it |
+| drag across it | select part of it |
+| double click | select a word |
+| Ctrl-C | copy what you selected — or the line, if you only clicked |
+| Enter | open the whole thing in a tab |
+| Esc, or any other key | back to the text |
+| Ctrl-click a name in it | open where it is defined, in a tab |
+
+The box keeps its size while you read it — it does not shrink as you scroll,
+and it stops with the last line on the bottom row rather than emptying itself
+out from the top.
+
+Copying out of it is the same gesture as copying out of code: drag across the
+part you want and press Ctrl-C. Nothing about it is a special "copy the
+documentation" command, because it did not need to be one.
+
+### Following a name
+
+Names in a hover behave like links, and only names do. The words of a sentence
+are not lit up: what a pointer will follow is what the markup said was code —
+a run in backticks, the text of a link — and, inside a fenced example, the
+parts the grammar called a type, a function, a method or a namespace. A
+keyword, a string, a number and a local variable are not places to go.
+
+Moving the pointer over one underlines it and the bottom edge says what a click
+would do. Following it asks the language server the same question Ctrl-clicking
+the code would: where is this defined? Where the file you are in uses that name
+somewhere, that is exactly the question asked, at exactly that spot — which is
+how `HashMap` in a docstring opens `std`'s own source, in another crate, rather
+than a list of the nine things in your dependency tree that happen to be called
+`HashMap`. Where the file never mentions it, textfold falls back to searching
+the project by name: one hit opens it, several open a list, none says so.
+
+This works whether or not the box has the keyboard — moving the pointer *into*
+a hover no longer dismisses it, which is what makes it reachable with the mouse
+at all.
+
+"Open it in a tab" is the one that matters for anything longer than a
+paragraph. Rather than teaching a floating box to be an editor — selection,
+search, copying a fragment — the box becomes a buffer, which is the thing this
+editor already knows how to do all of that to. It stays open in a tab while you
+go back to the code it is about.
+
+### Imports you have not written yet
+
+When the cursor comes to rest on something the language server has complained
+about, textfold quietly asks what could be done about it. If there is an
+answer, it appears in the status bar in the server's own words —
+`Alt-i: Import 'List' (java.util)` — and at the bottom of the hover.
+
+**Alt-I** does it. One fix means one keystroke: the import goes in and you
+carry on typing. Several means a list. Nothing means it says so.
+
+This is deliberately narrower than Alt-Enter, which asks for everything the
+server can offer here including refactorings. Fixes are cheap to ask for and
+are the answer to a question you did not know you were asking; refactorings are
+expensive and are the answer to one you did.
 
 ---
 
@@ -640,6 +844,29 @@ palette's `set-language` fixes that for the file in front of you, and
 **I want my terminal's mouse back.** `toggle-mouse`, or `--no-mouse`, or
 `"mouse": false`.
 
+**Copying does not reach anything else on my machine.** The first copy of a
+session says which routes it found. If it says "OSC 52 only", install
+`wl-clipboard` or `xclip` and it will use that instead; if you are inside tmux,
+`set -g set-clipboard on` is what lets OSC 52 through. Some terminals ask
+before letting a program write the clipboard, and some have it off entirely —
+Ghostty's `clipboard-write`, kitty's `clipboard_control`, xterm's
+`allowWindowOps`.
+
+**Ctrl-Shift-F does nothing.** Your terminal or your desktop took it. Alt-G and
+F7 do the same thing and always arrive. The same is true of any
+Ctrl-Shift-something: `f1` shows what is actually bound on this machine.
+
+**Java hovers only say which jar something came from.** jdtls has the class but
+not its source or its javadoc. textfold asks it to fetch both
+(`java.maven.downloadSources`, `java.eclipse.downloadSources`) and to decompile
+what it cannot fetch (`java.references.includeDecompiledSources`), but the
+first of those needs a working Maven or Gradle setup and a network, and it
+happens in the background — the first hover after opening a project can be the
+jar name and the second the real thing. If it never improves, `server-status`
+says whether jdtls is still importing, and `--log-path` says where it wrote its
+complaints. Going to a definition inside a jar opens the class in a read-only
+tab, which works whether the source was downloaded or decompiled.
+
 **A theme of mine is missing.** A file with a typo in it is complained about
 once at startup, with the reason.
 
@@ -666,7 +893,15 @@ undoing. Quick typing merges into one action; a paste, a format or a rename
 stands alone.
 
 **Cursors belong to the pane, not the file.** The same file open in two panes
-is two sets of cursors, and an edit made in one is told to both.
+is two sets of cursors, and an edit made in one is told to both. A pane also
+remembers where it was in every file it has shown, so switching tabs is
+switching back rather than reopening.
+
+**Anything the editor does to a buffer, it does through the same door.** Reading
+a file again from disk is not a fresh `Document` replacing the old one — it is
+an ordinary edit, so cursors are carried by the code that carries them across a
+paste, language servers are told what changed rather than left holding stale
+text, and the whole thing can be undone.
 
 **Nothing waits on anything.** Keystrokes, mouse events, language server
 messages and the results of walking the project all arrive on one channel, in
@@ -677,11 +912,18 @@ scrolling to a cursor costs the height of the pane, not the size of the file.
 Ctrl-End on a two-hundred-thousand-line file is the same amount of work as
 pressing Down.
 
+**A menu is a second way to reach the keys, not a second implementation.**
+Every row of every context menu is a `Cmd` the editor already has, shown beside
+the key that also runs it. There is nothing a menu can do that a keystroke
+cannot, which is what keeps the two from drifting.
+
 The modules: `text` (positions and selections), `doc` (the rope, undo, files),
 `edit` (every operation), `view` (panes, scrolling, folding, the screen↔text
 map), `syntax` (tree-sitter), `lang` (the language table), `lsp` (the client),
-`picker` (the fuzzy list), `keys` and `cmd` (the vocabulary), `app` (state and
-dispatch), `ui` (drawing), `theme`, `config`.
+`git` (branch and diff), `picker` (the fuzzy list), `menu` (the context menus),
+`keys` and `cmd` (the vocabulary), `app` (state and dispatch), `ui` (drawing),
+`theme`, `config`, `term` (the clipboard, and what else the terminal is asked
+for).
 
 ---
 
