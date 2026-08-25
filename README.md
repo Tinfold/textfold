@@ -100,14 +100,25 @@ never the only way in.
 | Ctrl-W | close this buffer |
 | Ctrl-B | pick from the open buffers |
 | Alt-, / Alt-. | previous / next buffer |
+| Ctrl-Shift-PgUp / PgDn | move this tab along the row |
 | Ctrl-Q | leave |
 
-Right-clicking a tab offers the rest: close the others, close the saved ones,
-close them all, copy the path, open it in another pane. They are commands like
-any other — `close-others`, `close-saved`, `close-all`, `copy-path`,
-`copy-relative-path` — so they can be bound to keys or run from the palette.
-Closing several at once never asks about unsaved changes; it leaves those
-buffers open and says how many it kept.
+Tabs are in the order you want them in: **drag one along the row** with the
+mouse, or move the one you are on with Ctrl-Shift-PgUp and Ctrl-Shift-PgDn. A
+tab being carried is drawn in the accent colour, and it swaps with a neighbour
+once the pointer is past the middle of it rather than the moment it touches it
+— which is what keeps a narrow tab dropped onto a wide one from trading places
+back and forth under a stationary mouse. With more tabs than fit, holding one
+against the ‹ or › at the end walks it that way and scrolls the row along to
+follow.
+
+Right-clicking a tab offers the rest: move it left or right, close the others,
+close the saved ones, close them all, copy the path, open it in another pane.
+They are commands like any other — `move-tab-left`, `move-tab-right`,
+`close-others`, `close-saved`, `close-all`, `copy-path`, `copy-relative-path` —
+so they can be bound to keys or run from the palette. Closing several at once
+never asks about unsaved changes; it leaves those buffers open and says how
+many it kept.
 
 ### Moving
 
@@ -295,6 +306,7 @@ them wrong.
 | click a hover | put the keyboard in it; drag to select, double click for a word |
 | Ctrl-click a name in a hover | open where it is defined, in a tab |
 | click a tab | switch to it — the × closes it |
+| drag a tab | move it along the row |
 | wheel over the tabs | walk along them, when there are more open than fit |
 | click a ‹ or › | the next tab that way |
 | drag the scroll bar | move through the file |
@@ -315,8 +327,9 @@ and reformat. Right-clicking inside a selection keeps the selection, since
 "select this, then copy it" is most of what the menu is for.
 
 Right-clicking a tab offers the things that are about a file rather than about
-a place in one: save, read again from disk, close, close the others, close the
-saved ones, close them all, copy its path, open it in another pane.
+a place in one: save, read again from disk, move it left or right, close, close
+the others, close the saved ones, close them all, copy its path, open it in
+another pane.
 
 Every row is a command the editor already has, and shows the key that also does
 it. There is nothing in a menu that a keystroke cannot do, which is what keeps

@@ -701,8 +701,17 @@ fn draw_tabs(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
     // knowing about the edges; this way only the copy does.
     let mut strip = Buffer::empty(Rect::new(0, 0, total.max(1), 1));
     strip.set_style(strip.area, plain);
+    let carried = app.dragging_tab();
     for (id, label, state, at, width) in &tabs {
-        let mut style = if *id == here {
+        // A tab being carried is drawn as picked up, in the accent colour: the
+        // row is reordering itself under the pointer, and which one is doing
+        // the moving should not be something you have to work out.
+        let mut style = if carried == Some(*id) {
+            Style::new()
+                .bg(theme.accent)
+                .fg(theme.on_accent)
+                .add_modifier(Modifier::BOLD)
+        } else if *id == here {
             Style::new()
                 .bg(theme.background)
                 .fg(theme.foreground)
@@ -711,8 +720,11 @@ fn draw_tabs(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
             plain
         };
         // A file with an error in it says so in the name, so that a mistake in
-        // a file you are not looking at is still on the screen.
-        if let Some(worst) = state.worst {
+        // a file you are not looking at is still on the screen. Not while it
+        // is being carried, where the colour is saying something else.
+        if let Some(worst) = state.worst
+            && carried != Some(*id)
+        {
             style = style.fg(severity_colour(worst, &theme));
         }
         strip.set_stringn(*at, 0, label, (width - 2) as usize, style);
@@ -2210,6 +2222,59 @@ mod tests {
         })));
     }
 
+    /// The left button held and moved, the way it arrives from the terminal.
+    fn drag(app: &mut App, column: u16, row: u16) {
+        app.handle(crate::app::Event::Term(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })));
+    }
+
+    /// An editor with tabs of the names given, in that order.
+    ///
+    /// Names of different lengths on purpose: tabs are as wide as what is
+    /// written on them, and dragging a narrow one onto a wide one is the case
+    /// that a naive reordering gets wrong.
+    fn tabs_named(names: &[&str], width: u16) -> App {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(Config::default(), tx);
+        for (n, name) in names.iter().enumerate() {
+            if n > 0 {
+                app.run(Cmd::New);
+            }
+            app.here_mut().name = (*name).to_string();
+        }
+        app.screen = Rect::new(0, 0, width, 12);
+        app
+    }
+
+    fn order(app: &App) -> Vec<String> {
+        app.docs().iter().map(|d| d.name.clone()).collect()
+    }
+
+    /// Where a tab is on the screen, from what the drawing last worked out.
+    fn tab_at(app: &App, name: &str) -> (u16, u16) {
+        let id = app
+            .docs()
+            .iter()
+            .find(|d| d.name == name)
+            .map(|d| d.id)
+            .expect("no such tab");
+        let mut span: Option<(u16, u16)> = None;
+        for (area, seen, _) in &app.tab_hits {
+            if *seen != id {
+                continue;
+            }
+            span = Some(match span {
+                Some((from, to)) => (from.min(area.x), to.max(area.x + area.width)),
+                None => (area.x, area.x + area.width),
+            });
+        }
+        span.expect("that tab is not on the screen")
+    }
+
     /// Everything on one row, as text, for a test that cares what a row says.
     fn row_text(buffer: &Buffer, y: u16) -> String {
         (0..buffer.area.width)
@@ -2766,6 +2831,102 @@ mod tests {
         // Away from it, and an unasked-for hover goes as it always did.
         move_pointer(&mut app, 0, 23);
         assert!(app.hover.is_none());
+    }
+
+    #[test]
+    fn dragging_a_tab_along_the_row_reorders_it() {
+        let mut app = tabs_named(&["aaa", "bbbbbbbbbbbb", "ccc"], 80);
+        tab_row(&mut app, 80);
+        let (from, to) = tab_at(&app, "aaa");
+
+        click(&mut app, from + 1, 0);
+        assert_eq!(app.here().name, "aaa", "the press did not switch to it");
+
+        // Past the middle of the tab beside it.
+        let (their_from, their_to) = tab_at(&app, "bbbbbbbbbbbb");
+        let _ = to;
+        drag(&mut app, their_from + (their_to - their_from) / 2 + 1, 0);
+        assert_eq!(order(&app), vec!["bbbbbbbbbbbb", "aaa", "ccc"]);
+        assert_eq!(app.here().name, "aaa", "it stopped being the current tab");
+    }
+
+    #[test]
+    fn a_tab_does_not_move_until_the_pointer_is_past_the_middle_of_the_next_one() {
+        let mut app = tabs_named(&["aaa", "bbbbbbbbbbbb", "ccc"], 80);
+        tab_row(&mut app, 80);
+        let (from, _) = tab_at(&app, "aaa");
+        click(&mut app, from + 1, 0);
+
+        // Just inside its neighbour, but not yet halfway across it.
+        let (their_from, _) = tab_at(&app, "bbbbbbbbbbbb");
+        drag(&mut app, their_from + 1, 0);
+        assert_eq!(
+            order(&app),
+            vec!["aaa", "bbbbbbbbbbbb", "ccc"],
+            "it jumped as soon as the pointer touched the next tab"
+        );
+    }
+
+    #[test]
+    fn a_narrow_tab_dragged_onto_a_wide_one_settles_instead_of_trading_places() {
+        // The bug this rule exists for. Put a narrow tab where a wide one was
+        // and the pointer is left sitting over the wide one again — which, on
+        // the obvious rule of "move it to whatever is under the pointer", asks
+        // for the swap back, and the two flicker for as long as you hold still.
+        let mut app = tabs_named(&["aaa", "bbbbbbbbbbbbbbbbbbbb"], 80);
+        tab_row(&mut app, 80);
+        let (from, _) = tab_at(&app, "aaa");
+        click(&mut app, from + 1, 0);
+
+        let (their_from, their_to) = tab_at(&app, "bbbbbbbbbbbbbbbbbbbb");
+        let past = their_from + (their_to - their_from) / 2 + 1;
+        drag(&mut app, past, 0);
+        assert_eq!(order(&app), vec!["bbbbbbbbbbbbbbbbbbbb", "aaa"]);
+
+        // Now hold it there. Every further report of the same position must
+        // leave the row exactly as it is.
+        for _ in 0..8 {
+            tab_row(&mut app, 80);
+            drag(&mut app, past, 0);
+            assert_eq!(
+                order(&app),
+                vec!["bbbbbbbbbbbbbbbbbbbb", "aaa"],
+                "the two tabs traded places again while the pointer held still"
+            );
+        }
+    }
+
+    #[test]
+    fn a_tab_dragged_off_the_row_is_left_where_it_was() {
+        let mut app = tabs_named(&["aaa", "bbb"], 80);
+        tab_row(&mut app, 80);
+        let (from, _) = tab_at(&app, "aaa");
+        click(&mut app, from + 1, 0);
+        // Down into the text, which is not the row of tabs.
+        drag(&mut app, 40, 6);
+        assert_eq!(order(&app), vec!["aaa", "bbb"]);
+    }
+
+    #[test]
+    fn moving_a_tab_by_key_walks_it_and_stops_at_the_ends() {
+        let mut app = tabs_named(&["aaa", "bbb", "ccc"], 80);
+        // The current tab is the last one made.
+        assert_eq!(app.here().name, "ccc");
+        app.run(Cmd::MoveTabLeft);
+        assert_eq!(order(&app), vec!["aaa", "ccc", "bbb"]);
+        app.run(Cmd::MoveTabLeft);
+        assert_eq!(order(&app), vec!["ccc", "aaa", "bbb"]);
+        assert_eq!(app.here().name, "ccc", "it stopped being the current tab");
+
+        // And no further: moving a tab does not wrap it round to the far end,
+        // which is never what nudging one along meant.
+        app.run(Cmd::MoveTabLeft);
+        assert_eq!(order(&app), vec!["ccc", "aaa", "bbb"]);
+        app.run(Cmd::MoveTabRight);
+        app.run(Cmd::MoveTabRight);
+        assert_eq!(order(&app), vec!["aaa", "bbb", "ccc"]);
+        app.run(Cmd::MoveTabRight);
+        assert_eq!(order(&app), vec!["aaa", "bbb", "ccc"]);
     }
 
     #[test]

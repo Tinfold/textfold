@@ -213,6 +213,12 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::Buffers, &["ctrl-b"]),
     (Cmd::NextBuffer, &["alt-."]),
     (Cmd::PrevBuffer, &["alt-,"]),
+    // The keys VS Code and every browser use for moving a tab along, and a
+    // modified special key rather than a modified letter — those always
+    // encode which modifiers were held, so this arrives on a plain terminal
+    // as well as on one with the extended protocol.
+    (Cmd::MoveTabLeft, &["ctrl-shift-pageup"]),
+    (Cmd::MoveTabRight, &["ctrl-shift-pagedown"]),
     (Cmd::CommandPalette, &["alt-x", "ctrl-shift-p"]),
     (Cmd::Help, &["f1"]),
 

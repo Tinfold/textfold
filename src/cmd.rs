@@ -94,6 +94,8 @@ commands! {
     CopyRelativePath => "copy-relative-path", File, "Copy this file's path from the project root";
     NextBuffer => "next-buffer", File, "The buffer after this one";
     PrevBuffer => "prev-buffer", File, "The buffer before this one";
+    MoveTabLeft => "move-tab-left", File, "Move this tab one place towards the front";
+    MoveTabRight => "move-tab-right", File, "Move this tab one place towards the back";
     Buffers => "buffers", File, "Pick from the open buffers";
     Quit => "quit", File, "Leave, asking about unsaved changes";
     QuitForce => "quit!", File, "Leave, changes and all";

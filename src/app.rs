@@ -82,6 +82,10 @@ const DISK_CHECK_EVERY: Duration = Duration::from_millis(1200);
 /// typing a word is one request rather than six.
 const COMPLETION_DELAY: Duration = Duration::from_millis(120);
 
+/// How fast a tab held against the end of the row walks along. Slow enough to
+/// stop on the one you meant, quick enough not to be a wait.
+const TAB_STEP_EVERY: Duration = Duration::from_millis(140);
+
 /// What is open over the editor.
 pub enum Overlay {
     None,
@@ -716,6 +720,18 @@ enum Drag {
     Lines { anchor: usize },
     /// Moving the view with the scroll bar.
     Scrollbar,
+    /// Carrying a tab along the row, to put it somewhere else in the order.
+    Tab {
+        id: DocId,
+        /// Where the pointer is, kept so that holding still over an arrow at
+        /// the end of the row keeps the tab moving. A drag only reports when
+        /// the pointer moves, so without this, "keep going that way" would
+        /// mean waggling the mouse.
+        at: (u16, u16),
+        /// When the last such step happened, so holding it there walks the tab
+        /// along at a readable pace rather than firing it off the end.
+        stepped: Instant,
+    },
     /// Dragging over the text of a hover, to copy part of it.
     Popup,
 }
@@ -1152,6 +1168,7 @@ impl App {
             || self.resting.is_some()
             || self.status.showing()
             || self.docs.iter().any(|d| d.wants_recolour())
+            || matches!(self.drag, Some(Drag::Tab { .. }))
         {
             Duration::from_millis(60)
         } else {
@@ -1177,12 +1194,52 @@ impl App {
         self.check_fixes();
         self.check_colours();
         self.check_diff();
+        self.check_dragged_tab();
         if self.disk_checked.elapsed() >= DISK_CHECK_EVERY {
             self.disk_checked = Instant::now();
             self.check_disk();
             self.git.poll_head();
         }
         self.check_git();
+    }
+
+    /// A tab held over one of the arrows at the end of the row keeps moving
+    /// that way.
+    ///
+    /// Without this, a row with more tabs than fit could only be reordered as
+    /// far as the edge of the screen: the tab you are carrying is the one the
+    /// drawing keeps in view, so its neighbour on the far side is off the
+    /// screen and there is nothing to compare the pointer against. Holding it
+    /// over the arrow says "keep going", and every step scrolls the row along
+    /// to follow, because the tab being carried is also the current one.
+    ///
+    /// On a timer rather than on pointer movement: a drag is only reported
+    /// when the mouse moves, and "hold it here" should not mean "waggle it
+    /// here".
+    fn check_dragged_tab(&mut self) {
+        let Some(Drag::Tab { id, at, stepped }) = self.drag else {
+            return;
+        };
+        if stepped.elapsed() < TAB_STEP_EVERY {
+            return;
+        }
+        let Some((_, to)) = self
+            .tab_nudges
+            .iter()
+            .find(|(area, _)| hits(*area, at.0, at.1))
+        else {
+            return;
+        };
+        // Which arrow it is, by which way it would scroll from here.
+        let step: isize = if *to < self.tab_scroll { -1 } else { 1 };
+        let now = self.docs.iter().position(|d| d.id == id).unwrap_or(0) as isize;
+        if now + step < 0 || now + step >= self.docs.len() as isize {
+            return;
+        }
+        self.move_tab(id, (now + step) as usize);
+        if let Some(Drag::Tab { stepped, .. }) = &mut self.drag {
+            *stepped = Instant::now();
+        }
     }
 
     /// Colour again anything a parse gave up on.
@@ -1863,6 +1920,8 @@ impl App {
             Cmd::QuitForce => self.leave(true),
             Cmd::NextBuffer => self.step_buffer(1),
             Cmd::PrevBuffer => self.step_buffer(-1),
+            Cmd::MoveTabLeft => self.step_tab(-1),
+            Cmd::MoveTabRight => self.step_tab(1),
             Cmd::Buffers => self.open_buffers_picker(),
 
             // ---- Searching ----
@@ -2454,6 +2513,130 @@ impl App {
         let len = self.docs.len() as isize;
         let next = self.docs[(at + by).rem_euclid(len) as usize].id;
         self.show(next);
+    }
+
+    // ---- The order of the tabs ----
+
+    /// Put a buffer at a particular place in the row of tabs.
+    ///
+    /// The row is the order of `docs`, so this is that list being reordered.
+    /// Nothing anywhere holds onto a position in it — a buffer is named by its
+    /// [`DocId`] everywhere else — which is what makes moving one about a
+    /// question of moving one about, rather than of finding everything that
+    /// would now be pointing at the wrong file.
+    ///
+    /// Answers whether anything moved.
+    fn move_tab(&mut self, id: DocId, to: usize) -> bool {
+        let Some(from) = self.docs.iter().position(|d| d.id == id) else {
+            return false;
+        };
+        let to = to.min(self.docs.len().saturating_sub(1));
+        if from == to {
+            return false;
+        }
+        let doc = self.docs.remove(from);
+        self.docs.insert(to, doc);
+        true
+    }
+
+    /// Move the tab you are looking at one place along.
+    ///
+    /// It stops at the ends rather than wrapping. Stepping *between* buffers
+    /// wraps, because going round is how you visit them all; moving one wraps
+    /// a file from the front of the row to the back, which is never what
+    /// somebody nudging a tab along meant.
+    fn step_tab(&mut self, by: isize) {
+        if self.docs.len() < 2 {
+            return;
+        }
+        let here = self.view().doc;
+        let at = self.docs.iter().position(|d| d.id == here).unwrap_or(0) as isize;
+        let to = at + by;
+        if to < 0 || to >= self.docs.len() as isize {
+            return self.say(match by < 0 {
+                true => "this tab is already first",
+                false => "this tab is already last",
+            });
+        }
+        self.move_tab(here, to as usize);
+    }
+
+    /// The tab being carried about, for the drawing to show as picked up.
+    pub fn dragging_tab(&self) -> Option<DocId> {
+        match self.drag {
+            Some(Drag::Tab { id, .. }) => Some(id),
+            _ => None,
+        }
+    }
+
+    /// Where each tab is on the screen: one span per file, rather than the two
+    /// hit boxes — the name and the cross — it is drawn as.
+    ///
+    /// In screen order, and only the ones on the screen: a tab scrolled off
+    /// the end has no span, which is why dragging past the edge is answered by
+    /// the arrows there rather than by this.
+    fn tab_spans(&self) -> Vec<(DocId, u16, u16)> {
+        let mut out: Vec<(DocId, u16, u16)> = Vec::new();
+        for (area, id, _) in &self.tab_hits {
+            match out.iter_mut().find(|(seen, ..)| seen == id) {
+                Some(span) => {
+                    span.1 = span.1.min(area.x);
+                    span.2 = span.2.max(area.x + area.width);
+                }
+                None => out.push((*id, area.x, area.x + area.width)),
+            }
+        }
+        out.sort_by_key(|(_, from, _)| *from);
+        out
+    }
+
+    /// Carry a tab to where the pointer is.
+    ///
+    /// The rule is the one that makes this feel right rather than the obvious
+    /// one. "Move it to whichever tab the pointer is over" oscillates: put a
+    /// narrow tab where a wide one was and the pointer is left over the wide
+    /// one again, which asks for the swap back, and the two trade places for
+    /// as long as you hold the mouse still. So a tab only ever moves one place
+    /// at a time, and only once the pointer is past the *middle* of the
+    /// neighbour it would trade with — which is far enough that after the
+    /// trade the pointer is not past the middle of anything, and it settles.
+    fn drag_tab(&mut self, id: DocId, column: u16, row: u16) {
+        if !self.tab_row(column, row) {
+            return;
+        }
+        let spans = self.tab_spans();
+        let Some(here) = spans.iter().position(|(seen, ..)| *seen == id) else {
+            return;
+        };
+        let (_, from, to) = spans[here];
+        let step = if column >= to {
+            1
+        } else if column < from {
+            -1
+        } else {
+            return;
+        };
+        let Some(neighbour) = here
+            .checked_add_signed(step)
+            .and_then(|next| spans.get(next))
+        else {
+            // The far end of the row, or a neighbour scrolled off the screen.
+            // Holding it over the arrow there is what keeps it going.
+            return;
+        };
+        let (_, their_from, their_to) = *neighbour;
+        let middle = their_from + (their_to - their_from) / 2;
+        let past = match step {
+            1 => column >= middle,
+            _ => column <= middle,
+        };
+        if !past {
+            return;
+        }
+        let at = self.docs.iter().position(|d| d.id == id).unwrap_or(0);
+        if let Some(to) = at.checked_add_signed(step) {
+            self.move_tab(id, to);
+        }
     }
 
     // ---- Panes ----
@@ -3101,11 +3284,18 @@ impl App {
         let others = self.docs.len() > 1;
         let any_saved = self.docs.iter().any(|d| !d.is_modified());
 
+        let at = self.docs.iter().position(|d| d.id == id);
+        let first = at == Some(0);
+        let last = at.is_some_and(|at| at + 1 == self.docs.len());
+
         let row = |label: &str, cmd: Cmd| menu::Item::on(id, label, cmd).key(self.key_for(cmd));
         Menu::new(
             vec![
                 row("Save", Cmd::Save).enabled(modified || !named),
                 row("Read again from disk", Cmd::Reload).enabled(named),
+                menu::Item::divider(),
+                row("Move left", Cmd::MoveTabLeft).enabled(!first),
+                row("Move right", Cmd::MoveTabRight).enabled(!last),
                 menu::Item::divider(),
                 row("Close", Cmd::Close),
                 row("Close the others", Cmd::CloseOthers).enabled(others),
@@ -6233,6 +6423,14 @@ impl App {
                 }
             } else {
                 self.show(id);
+                // And it is now held, so moving the pointer carries it along
+                // the row. A press that never moves is just a click, because
+                // a tab that has not gone anywhere has not been reordered.
+                self.drag = Some(Drag::Tab {
+                    id,
+                    at: (column, row),
+                    stepped: Instant::now(),
+                });
             }
             return;
         }
@@ -6452,6 +6650,12 @@ impl App {
                 }
             }
             Some(Drag::Scrollbar) => self.scroll_to_bar(row),
+            Some(Drag::Tab { id, .. }) => {
+                if let Some(Drag::Tab { at, .. }) = &mut self.drag {
+                    *at = (column, row);
+                }
+                self.drag_tab(id, column, row);
+            }
             Some(Drag::Text) => {
                 let Some(at) = self.position_at(column, row) else {
                     return;
@@ -7485,6 +7689,101 @@ mod tests {
             was,
             "the selection was thrown away"
         );
+    }
+
+    #[test]
+    fn a_tab_held_against_the_end_of_a_full_row_keeps_moving() {
+        let (mut app, _rx) = editor();
+        for _ in 0..4 {
+            app.run(Cmd::New);
+        }
+        let id = app.view().doc;
+        let was = app.docs.iter().position(|d| d.id == id).expect("open");
+        assert!(was > 0, "there is nowhere to move it from");
+
+        // The row as the drawing would have left it with more tabs than fit:
+        // an arrow at the left end, whose scroll target is behind where the
+        // row is now, and the pointer holding the tab over it.
+        app.tab_scroll = 8;
+        app.tab_nudges = vec![(Rect::new(0, 0, 1, 1), 0)];
+        app.drag = Some(Drag::Tab {
+            id,
+            at: (0, 0),
+            stepped: Instant::now() - TAB_STEP_EVERY,
+        });
+
+        app.tick();
+        assert_eq!(
+            app.docs.iter().position(|d| d.id == id),
+            Some(was - 1),
+            "holding a tab against the arrow did not walk it along"
+        );
+
+        // And not again straight away: it walks at a pace you can stop at.
+        app.tick();
+        assert_eq!(app.docs.iter().position(|d| d.id == id), Some(was - 1));
+    }
+
+    #[test]
+    fn a_tab_held_against_the_end_does_not_walk_off_it() {
+        let (mut app, _rx) = editor();
+        app.run(Cmd::New);
+        let id = app.docs[0].id;
+        app.show(id);
+        app.tab_scroll = 4;
+        app.tab_nudges = vec![(Rect::new(0, 0, 1, 1), 0)];
+        app.drag = Some(Drag::Tab {
+            id,
+            at: (0, 0),
+            stepped: Instant::now() - TAB_STEP_EVERY,
+        });
+        app.tick();
+        assert_eq!(
+            app.docs.iter().position(|d| d.id == id),
+            Some(0),
+            "the first tab was moved before the first tab"
+        );
+    }
+
+    #[test]
+    fn letting_go_of_a_tab_ends_the_drag() {
+        let (mut app, _rx) = editor();
+        app.run(Cmd::New);
+        let id = app.view().doc;
+        app.drag = Some(Drag::Tab {
+            id,
+            at: (0, 0),
+            stepped: Instant::now(),
+        });
+        assert_eq!(app.dragging_tab(), Some(id));
+        app.handle(Event::Term(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        })));
+        assert!(app.drag.is_none(), "the tab is still being carried");
+        assert_eq!(app.dragging_tab(), None);
+    }
+
+    #[test]
+    fn a_tab_menu_offers_moving_it_and_says_where_it_cannot_go() {
+        let (mut app, _rx) = editor();
+        app.run(Cmd::New);
+        app.run(Cmd::New);
+        let first = app.docs[0].id;
+        let menu = app.tab_menu(first, (0, 0));
+        let row = |cmd: Cmd| {
+            menu.items
+                .iter()
+                .find(|i| i.action == crate::menu::Action::RunOn(first, cmd))
+                .unwrap_or_else(|| panic!("no row for {cmd:?}"))
+        };
+        assert!(
+            !row(Cmd::MoveTabLeft).enabled,
+            "the first tab was offered a move left"
+        );
+        assert!(row(Cmd::MoveTabRight).enabled);
     }
 
     #[test]
