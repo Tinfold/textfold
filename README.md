@@ -26,6 +26,7 @@ textfold                         # an empty buffer
 - [The first five minutes](#the-first-five-minutes)
 - [Keys](#keys)
 - [The mouse](#the-mouse)
+- [Comparing two panes](#comparing-two-panes)
 - [One box, several lists](#one-box-several-lists)
 - [Several cursors](#several-cursors)
 - [Language servers](#language-servers)
@@ -189,7 +190,7 @@ capital. Replacing with something selected replaces only inside the selection.
 | Key | |
 |---|---|
 | Ctrl-Space | suggest |
-| F12 | go to the definition |
+| F12, Ctrl-Enter | go to the definition |
 | Shift-F12 | everywhere this is used |
 | Alt-K | what the language server knows about this; again to read it |
 | F2 | rename, everywhere |
@@ -202,6 +203,17 @@ capital. Replacing with something selected replaces only inside the selection.
 | Alt-O | what this file defines |
 | Alt-P | what arguments this call takes |
 
+Ctrl-Enter needs a terminal that implements the extended keyboard protocol —
+without one, Ctrl-Enter and Enter are the same bytes down the wire and no
+program can tell them apart. F12 works everywhere.
+
+Pointing at something a language server has complained about shows what it
+said, above whatever else it knows about that spot. It works on a bracket or a
+stretch of whitespace as well as on a name: a warning is not always about a
+word, and pointing at the squiggle is how you ask what is wrong there. Alt-K
+does the same from the keyboard, and both work with no server running at all,
+because the message has already arrived.
+
 ### Panes and the view
 
 | Key | |
@@ -210,6 +222,7 @@ capital. Replacing with something selected replaces only inside the selection.
 | Alt-W | into the next pane |
 | Alt-Q | close this pane |
 | Alt-\ | side by side, or one above the other |
+| Alt-C | compare the two panes |
 | Alt-T | pick colours |
 | Alt-N | line numbers on and off |
 | Alt-Z | fold long lines, or let them run off the side |
@@ -218,6 +231,24 @@ Up to four panes. Each pane has its own cursor, its own scroll position and its
 own idea of whether lines fold — the same file open twice is two views of one
 document, and typing in either moves the other's cursor along with the text it
 was pointing at.
+
+### Comparing two panes
+
+Alt-C compares the pane you are in with the one beside it. The bar in the
+margin — the one that usually says how a line differs from the last commit —
+says instead how it differs from the other pane, on both sides at once, and the
+pane you are *not* in scrolls to keep its matching lines level with yours. A
+block of lines that only one side has pushes the other side's view along, so
+the two stay lined up through an insertion rather than drifting a screen apart.
+
+F9 and Shift-F9 step to the next and previous difference while a comparison is
+on, the same keys that step through your own changes when one is not. The
+status bar says how many lines differ, and clicking it steps too.
+
+It keeps up on its own: edit either side and the comparison is worked out
+again, so fixing a difference makes it disappear rather than leaving a stale
+diff on the screen. Closing a pane, or showing another file in one, ends it.
+Alt-C again turns it off.
 
 ### Changing them
 
@@ -302,7 +333,10 @@ the one you meant:
   made in an editor running on a server lands on the clipboard of the machine
   in front of you. Not every terminal implements it, and several that do have
   it off by default or ask first — tmux needs `set -g set-clipboard on`, and
-  Ghostty, kitty and Alacritty each have a setting for it.
+  Ghostty, kitty and Alacritty each have a setting for it. Inside tmux or
+  `screen` the sequence is wrapped so that the multiplexer passes it on rather
+  than eating it, which is otherwise the usual reason a copy made over `ssh`
+  goes nowhere.
 * Whatever your desktop ships for the job — `wl-copy`, `xclip`, `xsel`,
   `pbcopy`, `clip.exe`, `termux-clipboard-set` — where there is one and there
   is a display to talk to. This is the one that always works locally.
@@ -311,6 +345,14 @@ The first copy of a session says which of these it found, so you do not have to
 guess. Ctrl-V reads the desktop's clipboard back where it can, so a copy made
 in a browser pastes into textfold without going through the terminal's own
 paste key.
+
+Every copy says `copied N characters` in the status bar, and that line is the
+thing to look at when a copy comes out wrong. If it is missing, the keystroke
+never reached textfold — some terminals, Windows Terminal among them, bind
+Ctrl-C to their *own* copy command whenever there is a selection in the
+terminal, so what lands on the clipboard is whatever was selected there rather
+than what was selected here. Clearing the terminal's selection first, or using
+the right-button menu's Copy, tells the two apart.
 
 ---
 
@@ -455,6 +497,51 @@ it, minus the intelligence.
 Run `server-status` from the palette to see what is running and what it is
 doing, and `restart-servers` after installing one.
 
+A language with two servers has two for a reason, and the reason is that they
+answer different questions: `ruff` finds problems, `pyright-langserver` knows
+where a name is defined. So each question goes to the first server attached to
+the file that says it can answer *that one*, rather than to the first server
+there is. It matters more than it sounds: `ruff` is up and answering in
+milliseconds and pyright takes seconds to read a project, so "the first one"
+is, for the whole of that time, the one that cannot answer anything.
+
+### Python, and which Python
+
+A Python project is almost never the Python on your `PATH`. It is the one in
+the virtual environment beside it, and every package the file imports lives in
+there. A type checker pointed at the wrong interpreter does not merely lose a
+few completions — it reads a different set of libraries, or none, and then
+reports at length on code that is perfectly correct.
+
+So textfold looks for the environment and points the servers at it: the one
+your shell is already in (`VIRTUAL_ENV`), then `.venv`, `venv`, `env` and the
+rest of the usual names beside the project, then anything else in the project
+with a `pyvenv.cfg` in it, then conda. The interpreter goes over as
+`python.pythonPath`, and the environment's `bin` goes on the server's `PATH`.
+
+`python-environment` in the palette lists what it found and lets you pick,
+which is what a project with two of them needs — only you know which one you
+meant. The choice is written to your settings and used again next time, and the
+servers restart on the spot.
+
+This is also the answer to a checker complaining that
+`Settings()` is missing its arguments when `Settings` is a `pydantic-settings`
+class that takes its values from a `.env` file. `pydantic-settings` declares an
+`__init__` that accepts none, and a checker that cannot see the installed
+package has no way to know that — it falls back to the fields and reports every
+one of them as missing. Point it at the environment the package is installed in
+and the complaint goes with it. If it survives that, it is a real disagreement
+with the checker rather than a misconfiguration, and it belongs in the
+project's own `pyrightconfig.json` or in `languages.json`:
+
+```json
+{ "languages": { "python": { "servers": [
+  { "command": "pyright-langserver", "args": ["--stdio"],
+    "settings": { "python": { "analysis": {
+      "diagnosticSeverityOverrides": { "reportCallIssue": "none" } } } } }
+] } } }
+```
+
 ### Colouring
 
 Colouring is tree-sitter, with the grammar kept in step with your text
@@ -474,6 +561,16 @@ node of their own, and everything else a plain variable.
 A file that would take longer than a moment to parse — a minified bundle, a
 megabyte of something the grammar cannot make sense of — is opened without
 colours rather than kept waiting for, and the status bar says so.
+
+That budget is wall-clock, and wall-clock is not a measure of work: a language
+server waking up and taking every core on the machine for a second can make a
+parse miss a deadline it was never given the chance to meet. So missing it once
+is not the end of it. The file is tried again when things are quiet, with a
+budget suited to not being in a hurry, and only a file that fails that several
+times over is written off — the status bar says `colouring this file again`
+while it is still trying and `this file parses too slowly` once it has given
+up. Without that, a busy second while a server started up left a file grey
+until you closed and reopened it.
 
 ---
 
@@ -695,6 +792,12 @@ of it drawn as new.
 Hovering over something — with the pointer, or with Alt-K — shows what the
 language server knows about it in a box beside the code. That box is a glance.
 
+If a server has complained about that spot, what it said is at the top of the
+box, worst first, each one saying which tool said it. That works over a bracket
+or a run of whitespace as well as over a name — a warning is not always about a
+word — and it works with no server running, since the message arrived long
+before you pointed at it.
+
 Pressing Alt-K again, or clicking the box, puts the keyboard **in** it: it
 grows to the height of the screen, stays put while you move the pointer, and:
 
@@ -829,6 +932,24 @@ Per language: `extensions`, `filenames` (for the many files with no extension),
 `grammar`. Per server: `command`, `args`, `roots`, `settings`,
 `init_options`, `env`.
 
+A server's `args`, `env`, `settings` and `init_options` may use placeholders,
+which is how Python's servers are told where the project's virtual environment
+is without any of that being written into the editor as a special case:
+
+| | |
+|---|---|
+| `${venv}` | the project's Python environment |
+| `${venv_bin}` | the `bin` (or `Scripts`) inside it |
+| `${python}` | the interpreter inside it |
+| `${root}` | the project root |
+| `${env:NAME}` | an environment variable, as textfold was started with |
+
+A value naming an environment on a project that has none is dropped whole
+rather than half-filled — the setting simply is not sent, which is right: a
+`pythonPath` pointing at nothing because a substitution left a hole is worse
+than no `pythonPath`. A server that mentions no placeholder is never even
+looked up, so this costs nothing for every other language.
+
 `roots` matters more than it looks. It is the marker files that say where a
 project starts; the nearest ancestor holding one is the directory the server is
 told about. A server given the wrong root indexes either far too much or
@@ -855,9 +976,12 @@ installed.
 not the screen. `textfold --log-path` says where.
 
 **No colours.** The status bar says why when there is a reason worth giving.
-Otherwise the language shown beside it is probably not what you thought — the
-palette's `set-language` fixes that for the file in front of you, and
-`languages.json` fixes it for good.
+`colouring this file again` means a parse ran out of time and another attempt
+is coming — usually because something else on the machine was busy — and it
+sorts itself out. `this file parses too slowly` means it tried several times
+and stopped. Otherwise the language shown beside it is probably not what you
+thought — the palette's `set-language` fixes that for the file in front of you,
+and `languages.json` fixes it for good.
 
 **I want my terminal's mouse back.** `toggle-mouse`, or `--no-mouse`, or
 `"mouse": false`.
@@ -869,6 +993,19 @@ session says which routes it found. If it says "OSC 52 only", install
 before letting a program write the clipboard, and some have it off entirely —
 Ghostty's `clipboard-write`, kitty's `clipboard_control`, xterm's
 `allowWindowOps`.
+
+**Ctrl-C pastes something I did not copy.** Look for `copied N characters` in
+the status bar. If it is not there, textfold never saw the keystroke: some
+terminals take Ctrl-C for their own copy command while anything is selected in
+the terminal itself, so what reaches the clipboard is that selection instead.
+Clear the terminal's selection, or use the right-button menu's Copy, which
+cannot be intercepted.
+
+**Go to definition or find references does nothing.** The row is lit only when
+a server attached to the file says it can answer that particular question, so a
+row you can click is a row that works. If it is greyed out, `server-status`
+says which servers are up — for Python, `ruff` arrives seconds before pyright
+does and answers none of these.
 
 **Ctrl-Shift-F does nothing.** Your terminal or your desktop took it. Alt-G and
 F7 do the same thing and always arrive. The same is true of any

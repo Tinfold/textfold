@@ -31,6 +31,17 @@ const COLOUR_LIMIT: usize = 4 * 1024 * 1024;
 /// two.
 const MERGE_WINDOW: Duration = Duration::from_millis(500);
 
+/// How long to leave a file alone before trying to colour it again after a
+/// parse gave up. Long enough that the burst of work that starved the last
+/// attempt — a language server waking up and indexing a project — has had a
+/// chance to be over.
+const RECOLOUR_AFTER: Duration = Duration::from_millis(750);
+
+/// How many times to try before believing it. A file that misses a two-second
+/// budget four times running, spread over several seconds, really is a file
+/// this parser cannot get through.
+const RECOLOUR_TRIES: u8 = 4;
+
 /// Which document, as everything outside holds onto one. An index would go
 /// wrong the moment a buffer in the middle is closed.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -203,6 +214,16 @@ pub struct Document {
     saved_at: Option<usize>,
     /// Edits nothing has picked up yet. Drained by whatever needs them.
     pending: Vec<AppliedEdit>,
+    /// When to try colouring this file again, after a parse ran out of time.
+    ///
+    /// A parse missing its deadline is very often a fact about how busy the
+    /// machine was rather than about the file, so giving up on it for good is
+    /// wrong: it turns a busy second into a file that is grey until you close
+    /// and reopen it. `None` means there is nothing to retry — either the
+    /// colours are fine or textfold has properly given up.
+    recolour: Option<Instant>,
+    /// How many attempts have run out of time in a row.
+    recolour_tries: u8,
 }
 
 /// Something a language server said about this file.
@@ -349,6 +370,8 @@ impl Document {
             undone: Vec::new(),
             saved_at: Some(0),
             pending: Vec::new(),
+            recolour: None,
+            recolour_tries: 0,
             syntax: None,
             diagnostics: Vec::new(),
             colours_off: None,
@@ -408,6 +431,8 @@ impl Document {
             undone: Vec::new(),
             saved_at: Some(0),
             pending: Vec::new(),
+            recolour: None,
+            recolour_tries: 0,
             syntax: None,
             diagnostics: Vec::new(),
             colours_off: None,
@@ -653,9 +678,10 @@ impl Document {
         {
             // The reparse ran out of time, so the tree no longer describes the
             // text. Better no colours than colours belonging to text that has
-            // moved.
+            // moved — but only until the machine is quiet enough to try again.
             self.syntax = None;
-            self.colours_off = Some("this file parses too slowly");
+            self.colours_off = Some("colouring this file again");
+            self.recolour = Some(Instant::now() + RECOLOUR_AFTER);
         }
         self.pending.extend(edits.iter().cloned());
         (edits, inverse)
@@ -681,19 +707,66 @@ impl Document {
     }
 
     pub fn reparse(&mut self) {
+        self.recolour = None;
+        self.recolour_tries = 0;
+        self.parse_now(false);
+    }
+
+    /// Is it time to try colouring this file again?
+    ///
+    /// Asked every time round the loop, so it is a comparison and nothing
+    /// else. [`Document::recolour`] is what does the work.
+    pub fn wants_recolour(&self) -> bool {
+        self.recolour.is_some_and(|due| due <= Instant::now())
+    }
+
+    /// Try again, with the patience of something running while nothing else
+    /// is. Gives up for good after [`RECOLOUR_TRIES`].
+    pub fn recolour(&mut self) {
+        self.recolour = None;
+        self.parse_now(true);
+        if self.syntax.is_some() {
+            self.recolour_tries = 0;
+            return;
+        }
+        self.recolour_tries = self.recolour_tries.saturating_add(1);
+        if self.recolour_tries < RECOLOUR_TRIES {
+            // Not beaten yet, so it must not say it is: `parse_now` wrote the
+            // final answer and there is another attempt to come.
+            self.colours_off = Some("colouring this file again");
+            self.recolour = Some(Instant::now() + RECOLOUR_AFTER * self.recolour_tries as u32);
+        }
+    }
+
+    /// Build the tree, now, and say why there is none if there is none.
+    ///
+    /// `patient` is the difference between a parse racing the next keystroke
+    /// and one with the machine to itself.
+    fn parse_now(&mut self, patient: bool) {
         let language = lang::get(self.language);
         if self.rope.len_bytes() > COLOUR_LIMIT {
             self.syntax = None;
+            self.recolour = None;
             self.colours_off = language.has_grammar().then_some("this file is very large");
             return;
         }
-        self.syntax = language
-            .grammar()
-            .and_then(|grammar| Syntax::new(grammar, &self.rope));
+        self.syntax = language.grammar().and_then(|grammar| match patient {
+            true => Syntax::patient(grammar, &self.rope),
+            false => Syntax::new(grammar, &self.rope),
+        });
         self.colours_off = match (language.has_grammar(), self.syntax.is_some()) {
-            (true, false) => Some("this file parses too slowly"),
+            // Not "too slowly" yet: this is the first attempt, and saying so
+            // is the difference between a file being coloured in a moment and
+            // a file textfold has written off.
+            (true, false) => Some(match patient {
+                true => "this file parses too slowly",
+                false => "colouring this file again",
+            }),
             _ => None,
         };
+        if self.syntax.is_none() && language.has_grammar() && !patient {
+            self.recolour = Some(Instant::now() + RECOLOUR_AFTER);
+        }
     }
 
     /// Say what language this file is, and colour it accordingly.
@@ -930,6 +1003,64 @@ mod tests {
 
     fn sel(at: usize) -> Selections {
         Selections::single(Range::point(at))
+    }
+
+    /// A rust file, coloured.
+    fn rust(text: &str) -> Document {
+        lang::init();
+        let mut d = doc(text);
+        d.set_language(lang::by_name("rust").expect("shipped"));
+        d
+    }
+
+    #[test]
+    fn colours_a_busy_moment_knocked_out_come_back() {
+        let mut d = rust("fn main() {\n    let x = 1;\n}\n");
+        assert!(d.syntax.is_some(), "it never had colours to lose");
+
+        // What a parse that ran out of its budget leaves behind. The budget is
+        // wall-clock, so this is what a language server taking every core for
+        // a moment does to a file that is perfectly easy to parse.
+        d.syntax = None;
+        d.colours_off = Some("colouring this file again");
+        d.recolour = Some(Instant::now());
+
+        assert!(d.wants_recolour(), "nothing was going to try again");
+        d.recolour();
+        assert!(d.syntax.is_some(), "the file never got its colours back");
+        assert_eq!(d.colours_off, None);
+        assert!(!d.wants_recolour(), "it is still trying after it worked");
+        assert_eq!(d.recolour_tries, 0);
+    }
+
+    #[test]
+    fn a_file_too_large_to_colour_is_not_tried_again_for_ever() {
+        let mut d = rust("fn main() {}\n");
+        d.rope = Rope::from_str(&"// padding\n".repeat(COLOUR_LIMIT / 8));
+        d.reparse();
+        assert!(d.syntax.is_none());
+        assert_eq!(d.colours_off, Some("this file is very large"));
+        assert!(
+            !d.wants_recolour(),
+            "a file that will never be small enough is being retried"
+        );
+    }
+
+    #[test]
+    fn giving_up_takes_several_goes_and_then_says_so() {
+        let mut d = rust("fn main() {}\n");
+        // A language with a grammar, and a rope the parser will not be given.
+        // Standing in for a parse that keeps running out of time.
+        d.syntax = None;
+        d.recolour_tries = RECOLOUR_TRIES - 1;
+        d.recolour = Some(Instant::now());
+        d.rope = Rope::from_str(&"x".repeat(COLOUR_LIMIT + 1));
+
+        d.recolour();
+        // Past the size limit it is not a matter of trying again, and the
+        // reason given is the true one rather than "too slowly".
+        assert_eq!(d.colours_off, Some("this file is very large"));
+        assert!(!d.wants_recolour());
     }
 
     #[test]

@@ -735,6 +735,8 @@ pub struct App {
 
     pub panes: Vec<View>,
     pub focus: usize,
+    /// Two panes being compared, if you have asked for that. See [`crate::diff`].
+    pub diff: Option<crate::diff::Diff>,
     /// Whether panes sit side by side. The other way is one above the other.
     pub side_by_side: bool,
 
@@ -849,6 +851,7 @@ impl App {
             clock: 0,
             panes: Vec::new(),
             focus: 0,
+            diff: None,
             side_by_side: true,
             overlay: Overlay::None,
             completion: None,
@@ -885,6 +888,13 @@ impl App {
             save_after_format: None,
             config,
         };
+        // Any Python environment chosen before, so a project opens pointing at
+        // the same interpreter it was left pointing at.
+        for (project, env) in &app.config.python_environments {
+            app.lsp
+                .environments
+                .insert(PathBuf::from(project), PathBuf::from(env));
+        }
         app.git.open(&app.project.clone());
         let scratch = app.new_scratch();
         app.panes.push(View::new(scratch, app.config.wrap()));
@@ -1141,6 +1151,7 @@ impl App {
             || self.fixes_due.is_some()
             || self.resting.is_some()
             || self.status.showing()
+            || self.docs.iter().any(|d| d.wants_recolour())
         {
             Duration::from_millis(60)
         } else {
@@ -1164,12 +1175,35 @@ impl App {
             self.hover_at_screen(column, row);
         }
         self.check_fixes();
+        self.check_colours();
+        self.check_diff();
         if self.disk_checked.elapsed() >= DISK_CHECK_EVERY {
             self.disk_checked = Instant::now();
             self.check_disk();
             self.git.poll_head();
         }
         self.check_git();
+    }
+
+    /// Colour again anything a parse gave up on.
+    ///
+    /// A parse that runs out of time usually says the machine was busy, not
+    /// that the file is unparseable — a language server waking up and taking
+    /// every core for a second is enough to do it. Left alone that turns a
+    /// busy moment into a file that stays grey until you close and reopen it,
+    /// which is exactly what it looks like when a language server has just
+    /// started and filled the screen with underlines. So the attempt is made
+    /// again once things are quiet, with a budget suited to not being in a
+    /// hurry, and only a file that fails that several times over is written
+    /// off.
+    ///
+    /// One per pass. Two large files that both want it can wait a turn each
+    /// rather than making one turn of the loop take twice as long.
+    fn check_colours(&mut self) {
+        let Some(doc) = self.docs.iter_mut().find(|d| d.wants_recolour()) else {
+            return;
+        };
+        doc.recolour();
     }
 
     /// Ask what could be done about the problem under the cursor, once per
@@ -1473,10 +1507,10 @@ impl App {
         // where the server had more to say; anything else closes it.
         self.refresh_completion();
 
-        if self.config.auto_completion() && self.lsp.primary_for(self.here()).is_some() {
+        if self.config.auto_completion() && self.lsp.can(self.here(), "completionProvider") {
             let triggers = self
                 .lsp
-                .primary_for(self.here())
+                .who_can(self.here(), "completionProvider")
                 .and_then(|id| self.lsp.get(id))
                 .map(|s| s.completion_triggers())
                 .unwrap_or_default();
@@ -1491,7 +1525,7 @@ impl App {
 
         let signature_triggers = self
             .lsp
-            .primary_for(self.here())
+            .who_can(self.here(), "signatureHelpProvider")
             .and_then(|id| self.lsp.get(id))
             .map(|s| s.signature_triggers())
             .unwrap_or_default();
@@ -1871,6 +1905,8 @@ impl App {
                     self.say("no language server here");
                 }
             }
+            Cmd::DiffPanes => self.toggle_diff(),
+            Cmd::PythonEnvironment => self.open_environment_picker(),
             Cmd::RestartServers => {
                 self.lsp.restart();
                 let docs: Vec<DocId> = self.docs.iter().map(|d| d.id).collect();
@@ -3017,7 +3053,11 @@ impl App {
     /// them: what to do with the selection, then what the language server
     /// knows, then the rest.
     fn text_menu(&self, anchor: (u16, u16)) -> Menu {
-        let has_server = self.lsp.primary_for(self.here()).is_some();
+        // Each row asks about the thing it offers rather than about servers in
+        // general. A file can have two servers attached where only one of them
+        // knows what a definition is, and a row lit because *something* is
+        // running is a row that does nothing when you click it.
+        let can = |capability: &str| self.lsp.can(self.here(), capability);
         let writable = !self.here().read_only;
         let selected = !self.view().sel.primary().is_empty();
         let word = text::word_text_at(&self.here().rope, self.view().cursor()).is_some();
@@ -3034,17 +3074,18 @@ impl App {
                 row("Undo", Cmd::Undo).enabled(writable && can_undo),
                 row("Redo", Cmd::Redo).enabled(writable && can_redo),
                 menu::Item::divider(),
-                row("Go to definition", Cmd::GotoDefinition).enabled(has_server),
-                row("Find references", Cmd::References).enabled(has_server),
-                row("Rename…", Cmd::Rename).enabled(has_server && writable),
+                row("Go to definition", Cmd::GotoDefinition).enabled(can("definitionProvider")),
+                row("Find references", Cmd::References).enabled(can("referencesProvider")),
+                row("Rename…", Cmd::Rename).enabled(can("renameProvider") && writable),
                 row("Fix it", Cmd::FixIt).enabled(self.fixes.is_some()),
-                row("What can be done here…", Cmd::CodeAction).enabled(has_server && writable),
-                row("What is this?", Cmd::Hover).enabled(has_server),
+                row("What can be done here…", Cmd::CodeAction).enabled(can("codeActionProvider") && writable),
+                row("What is this?", Cmd::Hover).enabled(can("hoverProvider")),
                 menu::Item::divider(),
                 row("Select line", Cmd::SelectLine),
                 row("Select all", Cmd::SelectAll),
                 row("Comment out", Cmd::ToggleComment).enabled(writable),
-                row("Reformat the file", Cmd::Format).enabled(has_server && writable),
+                row("Reformat the file", Cmd::Format)
+                    .enabled(can("documentFormattingProvider") && writable),
                 menu::Item::divider(),
                 row("Find this word", Cmd::FindWordUnderCursor).enabled(word || selected),
                 row("Find it in every file", Cmd::Grep),
@@ -3080,11 +3121,122 @@ impl App {
         )
     }
 
+    // ---- Comparing two panes ----
+
+    /// Turn a comparison of two panes on, or off again.
+    ///
+    /// The pane with the keyboard against the one beside it. Which is which on
+    /// the screen decides which is "left": a comparison whose sides were the
+    /// order you happened to click in would read backwards half the time.
+    fn toggle_diff(&mut self) {
+        if self.diff.is_some() {
+            self.diff = None;
+            return self.say("comparing: off");
+        }
+        if self.panes.len() < 2 {
+            return self.say("two panes to compare — Alt-V opens another");
+        }
+        let here = self.focus.min(self.panes.len() - 1);
+        let there = (here + 1) % self.panes.len();
+        let (left, right) = (here.min(there), here.max(there));
+        let Some(diff) = self.compare(left, right) else {
+            return self.say("nothing to compare");
+        };
+        let said = match (diff.same(), diff.differing()) {
+            (true, _) => "comparing: the two are the same".to_string(),
+            (_, 1) => "comparing: one line differs".to_string(),
+            (_, n) => format!("comparing: {n} lines differ"),
+        };
+        self.diff = Some(diff);
+        self.say_good(said);
+    }
+
+    fn compare(&self, left: usize, right: usize) -> Option<crate::diff::Diff> {
+        let a = self.doc(self.panes.get(left)?.doc)?;
+        let b = self.doc(self.panes.get(right)?.doc)?;
+        Some(crate::diff::Diff::new((left, a), (right, b)))
+    }
+
+    /// Keep a comparison in step with the panes and the text.
+    ///
+    /// A pane closed or pointed at another file ends it — the thing being
+    /// compared is gone. An edit to either side only makes it out of date, and
+    /// out of date is worked out again: a diff that stopped answering the
+    /// moment you fixed one of the differences would be a diff you had to keep
+    /// switching back on.
+    fn check_diff(&mut self) {
+        let Some(diff) = &self.diff else { return };
+        let showing: Vec<(usize, DocId)> = self
+            .panes
+            .iter()
+            .enumerate()
+            .map(|(at, pane)| (at, pane.doc))
+            .collect();
+        if !diff.describes(&showing) {
+            self.diff = None;
+            return;
+        }
+        let (left, right) = diff.panes();
+        let current = match (
+            self.doc(self.panes[left].doc),
+            self.doc(self.panes[right].doc),
+        ) {
+            (Some(a), Some(b)) => diff.current_for(a, b),
+            _ => false,
+        };
+        if !current {
+            self.diff = self.compare(left, right);
+        }
+        self.follow_diff();
+    }
+
+    /// Scroll the pane you are not in to sit beside the one you are.
+    ///
+    /// This is the whole difference between two files open at once and a diff.
+    /// Only the pane without the keyboard is moved, so the one you are reading
+    /// never jumps under you.
+    fn follow_diff(&mut self) {
+        let Some(diff) = &self.diff else { return };
+        let here = self.focus.min(self.panes.len() - 1);
+        let Some(there) = diff.other_pane(here) else {
+            return;
+        };
+        let Some(top) = diff.beside(here, self.panes[here].top) else {
+            return;
+        };
+        let Some(other) = self.panes.get(there) else {
+            return;
+        };
+        let lines = self
+            .doc(other.doc)
+            .map(|d| d.len_lines())
+            .unwrap_or(1)
+            .saturating_sub(1);
+        let top = top.min(lines);
+        if self.panes[there].top != top {
+            self.panes[there].top = top;
+            self.panes[there].top_row = 0;
+        }
+    }
+
     /// To the next or previous line that differs from the last commit.
     ///
     /// A run of changed lines is one change, so this walks the edits you have
     /// made rather than the lines they touched.
     fn change_step(&mut self, forwards: bool) {
+        // While two panes are being compared, "the next change" means the next
+        // difference between them. It is the same question about a different
+        // pair of texts, so it is the same key.
+        if let Some(diff) = &self.diff {
+            let here = self.focus.min(self.panes.len() - 1);
+            let at = text::line_of(&self.here().rope, self.view().cursor());
+            let Some(line) = diff.next_change(here, at, forwards) else {
+                return self.say("the two panes are the same");
+            };
+            self.view_mut().mark_jump();
+            self.go_to_line(line);
+            return;
+        }
         if !self.git.watching() {
             return self.say("this file is not in a git repository");
         }
@@ -3410,6 +3562,84 @@ impl App {
         self.overlay = Overlay::Picker(Picker::new(Kind::Settings, rows));
     }
 
+    /// The Python environments this project could be using.
+    ///
+    /// The list is offered rather than a choice being made silently, because a
+    /// project with two of them is a project where only the person sitting
+    /// there knows which one they meant — and because being pointed at the
+    /// wrong one is not a small loss of polish. A type checker that cannot see
+    /// the libraries a file imports does not go quiet; it reports at length on
+    /// code that is correct.
+    fn open_environment_picker(&mut self) {
+        let Some(root) = self.python_root() else {
+            return self.say("this file is not part of a Python project");
+        };
+        let found = crate::venv::found(&root);
+        if found.is_empty() {
+            return self.say(format!(
+                "no Python environment found in {} — a .venv beside the project is what is looked for",
+                root.display()
+            ));
+        }
+        let using = self.lsp.environment_for(&root).map(|e| e.root);
+        let rows: Vec<Row> = found
+            .into_iter()
+            .map(|env| {
+                let here = Some(&env.root) == using.as_ref();
+                let row = Row::new(env.name.clone(), Choice::Environment(env.root.clone()))
+                    .detail(format!("{} — {}", env.about, env.root.display()));
+                match here {
+                    true => row.tag("using"),
+                    false => row,
+                }
+            })
+            .collect();
+        self.overlay = Overlay::Picker(Picker::new(Kind::Environments, rows));
+    }
+
+    /// The root of the Python project the current file is in, by the same
+    /// markers the language server is given.
+    fn python_root(&self) -> Option<PathBuf> {
+        let path = self.here().path.clone()?;
+        let language = lang::by_name("python")?;
+        if self.here().language != language {
+            return None;
+        }
+        let config = lang::get(language).servers.first()?;
+        Some(lang::project_root(&path, &config.roots))
+    }
+
+    /// Point this project's language servers at an environment, and remember
+    /// it. Remembered because a choice you have to make again every morning is
+    /// not a choice, it is a chore.
+    fn use_environment(&mut self, root: &Path) {
+        let Some(project) = self.python_root() else {
+            return;
+        };
+        self.lsp
+            .environments
+            .insert(project.clone(), root.to_path_buf());
+        self.config.python_environments.insert(
+            project.display().to_string(),
+            root.display().to_string(),
+        );
+        self.remember_settings();
+
+        // The servers were started pointing somewhere else, and there is no
+        // way to tell one it was wrong about which Python a project uses. They
+        // go and come back.
+        self.lsp.restart();
+        let docs: Vec<DocId> = self.docs.iter().map(|d| d.id).collect();
+        for id in docs {
+            self.lsp_open(id);
+        }
+        let name = root
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| root.display().to_string());
+        self.say_good(format!("Python: {name} — the language servers are starting again"));
+    }
+
     fn open_diagnostics_picker(&mut self) {
         let here = self.view().doc;
         let mut rows: Vec<Row> = Vec::new();
@@ -3601,6 +3831,7 @@ impl App {
                 self.say(format!("this file is {name}"));
             }
             Choice::Action(server, action) => self.do_code_action(server, *action),
+            Choice::Environment(root) => self.use_environment(&root),
             Choice::Setting(which) => {
                 self.toggle_setting(which);
                 // Redraw the list so the ticks are right.
@@ -4191,8 +4422,15 @@ impl App {
             }
             return self.hover_to_buffer();
         }
+        // What is wrong here, if anything is, goes up now: it is already known
+        // and the box should not wait on a server to say what textfold could
+        // have said immediately.
+        let problems = self.problem_lines(at);
+        if !problems.is_empty() {
+            self.hover = Some(Popup::new(problems, at));
+        }
         let (doc, lsp) = self.doc_and_lsp();
-        if lsp.hover(doc, at).is_none() {
+        if lsp.hover(doc, at).is_none() && self.hover.is_none() {
             // Without a server, say what the parser knows. It is not much, but
             // it is true, and it is better than a box saying nothing.
             let doc = self.here();
@@ -4237,7 +4475,7 @@ impl App {
     }
 
     fn start_rename(&mut self) {
-        if self.lsp.primary_for(self.here()).is_none() {
+        if !self.lsp.can(self.here(), "renameProvider") {
             return self.say("no language server that can rename this");
         }
         self.open_prompt(PromptKind::Rename);
@@ -4376,6 +4614,49 @@ impl App {
         true
     }
 
+    /// What is wrong at a spot, written for a hover.
+    ///
+    /// A language server says what it thinks of a piece of code twice over: as
+    /// a squiggle under it, and as a sentence you have to go somewhere else to
+    /// read. Everywhere outside a terminal the sentence is simply *there* when
+    /// you point at the squiggle, and that is where a person is already
+    /// looking, so it goes in the box with everything else.
+    ///
+    /// Worst first, so an error is not below a hint about the same word, and
+    /// each one says who said it: two servers on one file disagree constantly
+    /// and "which of you thinks this" is the first question anybody asks.
+    fn problem_lines(&self, at: usize) -> Vec<DocLine> {
+        let doc = self.here();
+        let mut here: Vec<&Diagnostic> = doc
+            .diagnostics
+            .iter()
+            .filter(|d| d.range.contains(at) || (d.range.is_empty() && d.range.start() == at))
+            .collect();
+        here.sort_by_key(|d| d.severity);
+        let mut lines = Vec::new();
+        for problem in here {
+            if !lines.is_empty() {
+                lines.push(DocLine::prose(String::new()));
+            }
+            let who = match (&problem.source, &problem.code) {
+                (Some(source), Some(code)) => Some(format!("{source} {code}")),
+                (Some(source), None) => Some(source.clone()),
+                (None, Some(code)) => Some(code.clone()),
+                (None, None) => None,
+            };
+            lines.push(DocLine::prose(match who {
+                Some(who) => format!("{} ({who})", problem.severity.label()),
+                None => problem.severity.label().to_string(),
+            }));
+            // A message is often several lines, and a server that wrote them
+            // separately meant them separately.
+            for line in problem.message.lines() {
+                lines.push(DocLine::prose(line.to_string()));
+            }
+        }
+        lines
+    }
+
     fn hover_at_screen(&mut self, column: u16, row: u16) {
         if self.hover.as_ref().is_some_and(|h| h.focused) {
             return;
@@ -4383,9 +4664,19 @@ impl App {
         let Some(at) = self.position_at(column, row) else {
             return;
         };
-        // Only over something worth asking about.
-        if text::word_text_at(&self.here().rope, at).is_none() {
+        // Over a name, or over something a server has complained about. The
+        // second is not always the first: a warning can sit on a bracket, on
+        // an operator, or on a stretch of whitespace, and pointing at it is
+        // still the way you ask what is wrong there.
+        let problems = self.problem_lines(at);
+        if problems.is_empty() && text::word_text_at(&self.here().rope, at).is_none() {
             return;
+        }
+        // What is already known goes up straight away rather than after a
+        // round trip to a server that may have nothing to add, or may be busy,
+        // or may not be there at all.
+        if !problems.is_empty() {
+            self.hover = Some(Popup::new(problems, at));
         }
         let (doc, lsp) = self.doc_and_lsp();
         lsp.hover(doc, at);
@@ -4746,7 +5037,19 @@ impl App {
             return;
         }
         let here = self.doc(doc).map(|d| d.language).unwrap_or(LangId::PLAIN);
-        let lines = markup_lines(value.get("contents"), here);
+        let said = markup_lines(value.get("contents"), here);
+        // What is wrong here goes above what this is, because a person who
+        // pointed at a squiggle asked about the squiggle. The box that is
+        // already up says it too — this is the same box being replaced now
+        // that the server has answered — so it must not be dropped.
+        let problems = self.problem_lines(at);
+        let mut lines = problems;
+        if !said.is_empty() {
+            if !lines.is_empty() {
+                lines.push(DocLine::prose(RULE.to_string()));
+            }
+            lines.extend(said);
+        }
         if lines.is_empty() {
             return;
         }
@@ -5825,10 +6128,11 @@ impl App {
         // The context menu is on top of everything, including the list.
         if let Overlay::Menu(m) = &mut self.overlay {
             let area = m.area;
-            let chosen = hits(area, column, row).then(|| {
-                m.point_at((row - area.y) as usize);
-                m.chosen()
-            });
+            // What was clicked, rather than what was highlighted. They are
+            // usually the same row, and assuming so meant a click on a divider
+            // ran the highlight instead — which, in a menu that opens with
+            // "Cut" lit, cut your selection.
+            let chosen = hits(area, column, row).then(|| m.at((row - area.y) as usize + m.scroll));
             self.overlay = Overlay::None;
             if let Some(Some(action)) = chosen {
                 self.do_menu(action);
@@ -6033,7 +6337,7 @@ impl App {
         if let Overlay::Menu(menu) = &mut self.overlay {
             let area = menu.area;
             if hits(area, column, row) {
-                menu.point_at((row - area.y) as usize);
+                menu.point_at((row - area.y) as usize + menu.scroll);
             }
             return;
         }
@@ -6976,6 +7280,194 @@ mod tests {
         assert_eq!(left.len(), 1, "{left:?}");
         assert!(app.here().is_modified());
         std::fs::remove_dir_all(saved.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn pointing_at_a_problem_says_what_is_wrong_with_it() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "let x = 1");
+        app.here_mut().diagnostics = vec![crate::doc::Diagnostic {
+            range: Range::new(4, 5),
+            severity: crate::doc::Severity::Error,
+            message: "cannot find value `x` in this scope".into(),
+            source: Some("rustc".into()),
+            code: Some("E0425".into()),
+            server: 0,
+        }];
+        let said: Vec<String> = app
+            .problem_lines(4)
+            .into_iter()
+            .map(|l| l.text)
+            .collect();
+        assert_eq!(
+            said,
+            vec![
+                "error (rustc E0425)".to_string(),
+                "cannot find value `x` in this scope".to_string(),
+            ]
+        );
+        assert!(
+            app.problem_lines(8).is_empty(),
+            "somewhere with nothing wrong with it should say nothing"
+        );
+    }
+
+    #[test]
+    fn the_worst_problem_at_a_spot_is_read_first() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "let x = 1");
+        let at = |severity, message: &str| crate::doc::Diagnostic {
+            range: Range::new(4, 5),
+            severity,
+            message: message.into(),
+            source: None,
+            code: None,
+            server: 0,
+        };
+        app.here_mut().diagnostics = vec![
+            at(crate::doc::Severity::Hint, "unused"),
+            at(crate::doc::Severity::Error, "undefined"),
+        ];
+        let said: Vec<String> = app.problem_lines(4).into_iter().map(|l| l.text).collect();
+        assert_eq!(said.first().map(String::as_str), Some("error"));
+        assert!(said.contains(&"undefined".to_string()));
+        assert!(said.contains(&"unused".to_string()));
+        assert!(
+            said.iter().position(|l| l == "undefined")
+                < said.iter().position(|l| l == "unused"),
+            "the hint came before the error: {said:?}"
+        );
+    }
+
+    #[test]
+    fn asking_about_a_problem_with_no_server_still_shows_it() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "let x = 1");
+        app.here_mut().diagnostics = vec![crate::doc::Diagnostic {
+            range: Range::new(4, 5),
+            severity: crate::doc::Severity::Warning,
+            message: "x is never read".into(),
+            source: Some("clippy".into()),
+            code: None,
+            server: 0,
+        }];
+        app.ask_hover(4);
+        let hover = app.hover.as_ref().expect("no box appeared");
+        assert!(
+            hover.lines.iter().any(|l| l.text == "x is never read"),
+            "{:?}",
+            hover.lines.iter().map(|l| &l.text).collect::<Vec<_>>()
+        );
+    }
+
+    /// Two panes, each showing a file of its own, ready to be compared.
+    ///
+    /// `tag` names the pair, because these run beside each other and two tests
+    /// writing to one path is two tests failing at random.
+    fn two_panes(tag: &str, left: &str, right: &str) -> (App, mpsc::Receiver<Event>, PathBuf) {
+        let (mut app, rx) = editor();
+        let a = scratch(&format!("{tag}-a.txt"));
+        let b = scratch(&format!("{tag}-b.txt"));
+        std::fs::write(&a, left).expect("written");
+        std::fs::write(&b, right).expect("written");
+        app.open_path(&a);
+        app.run(Cmd::Split);
+        app.open_path(&b);
+        assert_eq!(app.panes.len(), 2, "the split did not happen");
+        (app, rx, a.parent().expect("a directory").to_path_buf())
+    }
+
+    #[test]
+    fn comparing_two_panes_marks_what_differs_on_both_sides() {
+        let (mut app, _rx, dir) = two_panes("dcmp", "one\ntwo\nthree\n", "one\nextra\ntwo\nthree\n");
+        app.run(Cmd::DiffPanes);
+        let diff = app.diff.as_ref().expect("nothing was compared");
+        assert!(!diff.same());
+        let (left, right) = diff.panes();
+        assert_eq!(
+            diff.mark(right, 1),
+            Some(crate::git::Mark::Added),
+            "the line only the right has was not marked"
+        );
+        assert!(
+            (0..3).any(|line| diff.mark(left, line).is_some()),
+            "the left said nothing about a line it is missing"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn comparing_scrolls_the_other_pane_to_line_up() {
+        let mut left = String::from("head\n");
+        let mut right = String::from("head\n");
+        // Ten lines only the right has, then a hundred the two share.
+        for n in 0..10 {
+            right.push_str(&format!("only-right-{n}\n"));
+        }
+        for n in 0..100 {
+            left.push_str(&format!("shared-{n}\n"));
+            right.push_str(&format!("shared-{n}\n"));
+        }
+        let (mut app, _rx, dir) = two_panes("dscroll", &left, &right);
+        // The focus is the pane opened second, which is the right-hand file.
+        app.run(Cmd::DiffPanes);
+        let (left_pane, right_pane) = app.diff.as_ref().expect("compared").panes();
+        let here = app.focus.min(app.panes.len() - 1);
+        let there = if here == left_pane { right_pane } else { left_pane };
+
+        app.panes[here].top = 40;
+        app.tick();
+        let want = app
+            .diff
+            .as_ref()
+            .expect("compared")
+            .beside(here, 40)
+            .expect("a line beside it");
+        assert_eq!(
+            app.panes[there].top, want,
+            "the other pane did not follow: {} vs {want}",
+            app.panes[there].top
+        );
+        assert_ne!(
+            app.panes[there].top, 40,
+            "it followed by copying the number rather than by lining up"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_edit_is_taken_into_account_without_asking_again() {
+        let (mut app, _rx, dir) = two_panes("dedit", "one\ntwo\n", "one\nTWO\n");
+        app.run(Cmd::DiffPanes);
+        assert!(!app.diff.as_ref().expect("compared").same());
+
+        // Make the two agree. The comparison should notice on its own.
+        app.run(Cmd::SelectAll);
+        typed(&mut app, "one\ntwo\n");
+        app.tick();
+        assert!(
+            app.diff.as_ref().expect("compared").same(),
+            "the comparison did not keep up with the text"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn closing_a_pane_ends_the_comparison() {
+        let (mut app, _rx, dir) = two_panes("dclose", "one\n", "two\n");
+        app.run(Cmd::DiffPanes);
+        assert!(app.diff.is_some());
+        app.run(Cmd::ClosePane);
+        app.tick();
+        assert!(app.diff.is_none(), "a comparison of one pane");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn comparing_needs_two_panes() {
+        let (mut app, _rx) = editor();
+        app.run(Cmd::DiffPanes);
+        assert!(app.diff.is_none());
     }
 
     #[test]

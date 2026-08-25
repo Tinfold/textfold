@@ -29,7 +29,8 @@ use tree_sitter::{
 use crate::doc::AppliedEdit;
 use crate::theme::{CAPTURES, Role};
 
-/// How long a parse may take before textfold gives up on colouring the file.
+/// How long a parse may take, while you are typing, before textfold gives up
+/// on this pass.
 ///
 /// A parse of ordinary source is measured in milliseconds. Something that
 /// takes longer than this is not ordinary source — a minified bundle, a data
@@ -38,6 +39,18 @@ use crate::theme::{CAPTURES, Role};
 /// is, it is being looked at rather than written, and looking at it in one
 /// colour beats waiting for it in several.
 const BUDGET: Duration = Duration::from_millis(150);
+
+/// How long a parse started because nothing else was happening may take.
+///
+/// The budget above is wall-clock, and wall-clock is not a measure of work. A
+/// language server indexing a project takes every core on the machine for
+/// seconds at a stretch, and a parse that wanted a millisecond of processor
+/// can sit through a hundred and fifty of them without being given any. That
+/// is not a file textfold cannot colour; it is a file textfold was too busy to
+/// colour, and the two must not have the same answer. So the retry runs when
+/// the rush is over and gets long enough that only a genuinely pathological
+/// file fails it.
+const PATIENT: Duration = Duration::from_secs(2);
 
 /// A language's parser and its highlight query, compiled. One per language for
 /// the life of the process — compiling a query costs milliseconds, which is
@@ -120,9 +133,20 @@ impl Syntax {
     /// or when the file takes longer than [`BUDGET`] to parse. Neither is
     /// something to stop for: the file opens either way, without colours.
     pub fn new(grammar: &'static Grammar, rope: &Rope) -> Option<Self> {
+        Self::within(grammar, rope, BUDGET)
+    }
+
+    /// The same, given as long as it takes short of absurdity.
+    ///
+    /// For a second attempt, made once the machine is quiet. See [`PATIENT`].
+    pub fn patient(grammar: &'static Grammar, rope: &Rope) -> Option<Self> {
+        Self::within(grammar, rope, PATIENT)
+    }
+
+    fn within(grammar: &'static Grammar, rope: &Rope, budget: Duration) -> Option<Self> {
         let mut parser = Parser::new();
         parser.set_language(&grammar.language).ok()?;
-        let tree = parse(&mut parser, rope, None)?;
+        let tree = parse(&mut parser, rope, None, budget)?;
         Some(Self {
             grammar,
             parser,
@@ -152,7 +176,7 @@ impl Syntax {
                 new_end_position: point(edit.new_end_point),
             });
         }
-        let Some(tree) = parse(&mut self.parser, rope, Some(&self.tree)) else {
+        let Some(tree) = parse(&mut self.parser, rope, Some(&self.tree), BUDGET) else {
             return false;
         };
         self.tree = tree;
@@ -334,11 +358,11 @@ fn point((row, column): (usize, usize)) -> Point {
 /// Parse straight out of the rope, without flattening it into a string first.
 /// A ten-megabyte file would otherwise be copied on every keystroke.
 ///
-/// Gives up after [`BUDGET`]. Tree-sitter asks the callback whether to carry
+/// Gives up after `budget`. Tree-sitter asks the callback whether to carry
 /// on every so often, which is the only way to bound this: some inputs take
 /// the parser a very long time, and none of them are worth an editor that has
 /// stopped answering.
-fn parse(parser: &mut Parser, rope: &Rope, old: Option<&Tree>) -> Option<Tree> {
+fn parse(parser: &mut Parser, rope: &Rope, old: Option<&Tree>, budget: Duration) -> Option<Tree> {
     let mut read = |byte: usize, _: Point| -> &[u8] {
         if byte >= rope.len_bytes() {
             return &[];
@@ -346,7 +370,7 @@ fn parse(parser: &mut Parser, rope: &Rope, old: Option<&Tree>) -> Option<Tree> {
         let (chunk, chunk_start, _, _) = rope.chunk_at_byte(byte);
         &chunk.as_bytes()[byte - chunk_start..]
     };
-    let deadline = Instant::now() + BUDGET;
+    let deadline = Instant::now() + budget;
     let mut give_up = |_: &tree_sitter::ParseState| {
         if Instant::now() > deadline {
             ControlFlow::Break(())
@@ -658,3 +682,4 @@ public class Widget extends Base {
         );
     }
 }
+

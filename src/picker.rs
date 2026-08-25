@@ -52,6 +52,8 @@ pub enum Choice {
     Action(ServerId, Box<Value>),
     /// A setting, toggled or cycled in place rather than chosen and closed.
     Setting(&'static str),
+    /// A Python environment to point this project's language servers at.
+    Environment(PathBuf),
 }
 
 /// One row.
@@ -123,6 +125,8 @@ pub enum Kind {
     /// Lines matching a search across the project, also worked out afresh.
     Grep,
     Settings,
+    /// The Python environments a project could be using.
+    Environments,
 }
 
 impl Kind {
@@ -141,6 +145,7 @@ impl Kind {
             Kind::References => "Used here",
             Kind::Grep => "Search the project",
             Kind::Settings => "Settings",
+            Kind::Environments => "Python environment",
         }
     }
 
@@ -151,6 +156,7 @@ impl Kind {
             Kind::Files => "> commands   @ symbols   # project symbols   : line",
             Kind::Themes => "Moving through the list tries each one on",
             Kind::Settings => "Enter changes the setting and keeps it",
+            Kind::Environments => "Enter points the language servers at it and keeps it",
             _ => "",
         }
     }

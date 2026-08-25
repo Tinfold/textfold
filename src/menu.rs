@@ -91,6 +91,12 @@ pub struct Menu {
     pub cursor: usize,
     /// The screen cell it grew from, which is where the pointer was.
     pub anchor: (u16, u16),
+    /// The first row drawn, for a menu with more rows than the terminal has
+    /// room for. A menu that simply stopped at the bottom of the screen would
+    /// have rows nothing could reach — not the pointer, because they are not
+    /// drawn, and not the arrows either, because the highlight would walk off
+    /// into rows nobody can see. Filled in by the drawing, like `area`.
+    pub scroll: usize,
     /// Where it was last drawn, for answering clicks. Filled in by the
     /// drawing every frame, like the tabs, so that a click is answered by what
     /// is on the screen rather than by working out where it ought to be.
@@ -103,6 +109,7 @@ impl Menu {
             items,
             cursor: 0,
             anchor,
+            scroll: 0,
             area: Rect::default(),
         };
         // Open on something that can be chosen, so that the first Enter does
@@ -168,7 +175,19 @@ impl Menu {
 
     /// What choosing the highlighted row means.
     pub fn chosen(&self) -> Option<Action> {
-        let item = self.items.get(self.cursor)?;
+        self.at(self.cursor)
+    }
+
+    /// What choosing row `at` means — nothing, for a divider or for a row that
+    /// cannot be chosen.
+    ///
+    /// A click asks about the row it landed on rather than about the
+    /// highlight. Those are usually the same row and once were assumed to be,
+    /// which meant that clicking a divider ran whatever happened to be
+    /// highlighted: with the highlight where a menu opens it, clicking the
+    /// line under "Paste" cut your selection.
+    pub fn at(&self, at: usize) -> Option<Action> {
+        let item = self.items.get(at)?;
         item.choosable().then_some(item.action)
     }
 }
@@ -214,6 +233,27 @@ mod tests {
         let mut m = menu(vec![Item::divider(), Item::new("cut", Cmd::Cut).enabled(false)]);
         m.step(1);
         assert_eq!(m.chosen(), None);
+    }
+
+    #[test]
+    fn clicking_a_divider_does_nothing_rather_than_what_was_highlighted() {
+        let m = menu(vec![
+            Item::new("cut", Cmd::Cut),
+            Item::divider(),
+            Item::new("copy", Cmd::Copy),
+        ]);
+        assert_eq!(m.cursor, 0, "the highlight is on cut");
+        assert_eq!(m.at(1), None, "the divider is not a row");
+        assert_eq!(m.at(2), Some(Action::Run(Cmd::Copy)));
+    }
+
+    #[test]
+    fn clicking_a_row_asks_about_that_row_not_the_highlight() {
+        let m = menu(vec![
+            Item::new("cut", Cmd::Cut),
+            Item::new("paste", Cmd::Paste).enabled(false),
+        ]);
+        assert_eq!(m.at(1), None, "an unavailable row does nothing");
     }
 
     #[test]

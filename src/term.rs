@@ -61,9 +61,64 @@ fn osc52(text: &str) {
         return;
     }
     let encoded = base64::engine::general_purpose::STANDARD.encode(text);
+    let sequence = format!("\x1b]52;c;{encoded}\x07");
     let mut out = std::io::stdout();
-    write!(out, "\x1b]52;c;{encoded}\x07").ok();
+    out.write_all(wrapped(&sequence).as_bytes()).ok();
     out.flush().ok();
+}
+
+/// What is between textfold and the terminal that owns the clipboard.
+///
+/// A terminal multiplexer reads the escape sequences going past and acts on
+/// the ones it understands, which for OSC 52 means eating it: the copy reaches
+/// tmux and stops there. Both of them have a way of saying "this one is not
+/// for you", and it is the only way a copy made inside `ssh` inside `tmux`
+/// reaches the machine in front of you.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Through {
+    Tmux,
+    Screen,
+}
+
+fn through() -> Option<Through> {
+    // `TMUX` first: inside tmux `TERM` is usually `screen` or `tmux`, and the
+    // wrapping the two want is not the same.
+    if set("TMUX") {
+        return Some(Through::Tmux);
+    }
+    let term = std::env::var("TERM").unwrap_or_default();
+    (term.starts_with("screen") && !term.starts_with("screen.")).then_some(Through::Screen)
+}
+
+/// One escape sequence, wrapped so that whatever is in the way passes it on.
+fn wrapped(sequence: &str) -> String {
+    wrap_as(through(), sequence)
+}
+
+fn wrap_as(through: Option<Through>, sequence: &str) -> String {
+    match through {
+        None => sequence.to_string(),
+        // tmux takes the whole thing in one of its own, with every escape in
+        // the payload doubled so that the inner sequence's terminator is not
+        // read as the outer one's.
+        Some(Through::Tmux) => {
+            format!("\x1bPtmux;{}\x1b\\", sequence.replace('\x1b', "\x1b\x1b"))
+        }
+        // screen passes a device-control string through untouched, but will
+        // not carry one longer than its own string buffer — so it goes in
+        // pieces, each one a device-control string of its own. Nothing between
+        // them is written, so the terminal sees one unbroken sequence.
+        Some(Through::Screen) => {
+            let mut out = String::new();
+            let bytes = sequence.as_bytes();
+            for chunk in bytes.chunks(400) {
+                out.push_str("\x1bP");
+                out.push_str(&String::from_utf8_lossy(chunk));
+                out.push_str("\x1b\\");
+            }
+            out
+        }
+    }
 }
 
 /// One of the small programs a desktop ships for this, and how to run it.
@@ -194,14 +249,49 @@ fn reader() -> Option<Helper> {
 
 /// What to tell somebody whose copy did not reach the rest of their desktop.
 pub fn clipboard_story() -> String {
-    match (writer().map(|h| h.command), set("TMUX")) {
+    match (writer().map(|h| h.command), through()) {
         (Some(tool), _) => format!("copying through {tool} and OSC 52"),
-        (None, true) => {
-            "copying through OSC 52 only — tmux needs `set -g set-clipboard on`".into()
+        (None, Some(Through::Tmux)) => {
+            "copying through OSC 52, wrapped for tmux — tmux also needs \
+             `set -g set-clipboard on`"
+                .into()
         }
-        (None, false) => {
+        (None, Some(Through::Screen)) => "copying through OSC 52, wrapped for screen".into(),
+        (None, None) => {
             "copying through OSC 52 only — install wl-clipboard or xclip for a local clipboard"
                 .into()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The wrapping is worked out from the environment, which a test cannot
+    /// change for one call without changing it for every thread at once. So
+    /// the shapes are checked directly.
+    #[test]
+    fn tmux_gets_the_sequence_inside_one_of_its_own() {
+        let out = wrap_as(Some(Through::Tmux), "\x1b]52;c;aGk=\x07");
+        assert_eq!(out, "\x1bPtmux;\x1b\x1b]52;c;aGk=\x07\x1b\\");
+    }
+
+    #[test]
+    fn screen_gets_it_in_pieces_that_join_back_up() {
+        let sequence = format!("\x1b]52;c;{}\x07", "a".repeat(1000));
+        let out = wrap_as(Some(Through::Screen), &sequence);
+        let rebuilt: String = out
+            .split("\x1b\\")
+            .map(|piece| piece.strip_prefix("\x1bP").unwrap_or(piece))
+            .collect();
+        assert_eq!(rebuilt, sequence, "the pieces do not add back up");
+        assert!(out.matches("\x1bP").count() > 1, "it was not split at all");
+    }
+
+    #[test]
+    fn a_bare_terminal_gets_the_sequence_untouched() {
+        let sequence = "\x1b]52;c;aGk=\x07";
+        assert_eq!(wrap_as(None, sequence), sequence);
     }
 }

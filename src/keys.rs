@@ -333,6 +333,7 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::ClosePane, &["alt-q"]),
     (Cmd::FocusNextPane, &["alt-w"]),
     (Cmd::SwapSplitDirection, &["alt-\\"]),
+    (Cmd::DiffPanes, &["alt-c"]),
     (Cmd::ThemePicker, &["alt-t"]),
     (Cmd::ToggleLineNumbers, &["alt-n"]),
     (Cmd::ToggleWrap, &["alt-z"]),

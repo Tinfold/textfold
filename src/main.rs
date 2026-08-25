@@ -8,6 +8,7 @@
 mod app;
 mod cmd;
 mod config;
+mod diff;
 mod doc;
 mod edit;
 mod git;
@@ -21,6 +22,7 @@ mod term;
 mod text;
 mod theme;
 mod ui;
+mod venv;
 mod view;
 
 use std::io::{self, Stdout, Write};

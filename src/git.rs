@@ -185,6 +185,78 @@ pub fn marks(old: &str, new: &str) -> Vec<(usize, Mark)> {
     out
 }
 
+/// The lines that are the same in both, as pairs of line numbers.
+///
+/// The other half of what [`marks`] says. `marks` reports what changed;
+/// this reports what did not, which is what two files have to be lined up on
+/// to be read side by side. Same diff, read the other way round.
+pub fn aligned(old: &str, new: &str) -> Vec<(usize, usize)> {
+    let old: Vec<&str> = old.lines().collect();
+    let new: Vec<&str> = new.lines().collect();
+    let mut out = Vec::new();
+    align(&old, &new, 0, 0, &mut out);
+    out.sort_unstable();
+    out
+}
+
+fn align(
+    old: &[&str],
+    new: &[&str],
+    old_at: usize,
+    new_at: usize,
+    out: &mut Vec<(usize, usize)>,
+) {
+    // The same shape as `walk`: take the matching ends off, then line up the
+    // middle on the lines that are unique to each side.
+    let head = old
+        .iter()
+        .zip(new.iter())
+        .take_while(|(a, b)| a == b)
+        .count();
+    if head > 0 {
+        out.extend((0..head).map(|n| (old_at + n, new_at + n)));
+        return align(&old[head..], &new[head..], old_at + head, new_at + head, out);
+    }
+    let tail = old
+        .iter()
+        .rev()
+        .zip(new.iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    if tail > 0 {
+        let (old_end, new_end) = (old.len() - tail, new.len() - tail);
+        out.extend((0..tail).map(|n| (old_at + old_end + n, new_at + new_end + n)));
+        return align(&old[..old_end], &new[..new_end], old_at, new_at, out);
+    }
+    if old.is_empty() || new.is_empty() {
+        return;
+    }
+    let run = anchors(old, new);
+    if run.is_empty() {
+        return;
+    }
+    let (mut old_seen, mut new_seen) = (0, 0);
+    for (old_to, new_to) in &run {
+        align(
+            &old[old_seen..*old_to],
+            &new[new_seen..*new_to],
+            old_at + old_seen,
+            new_at + new_seen,
+            out,
+        );
+        out.push((old_at + old_to, new_at + new_to));
+        old_seen = old_to + 1;
+        new_seen = new_to + 1;
+    }
+    align(
+        &old[old_seen..],
+        &new[new_seen..],
+        old_at + old_seen,
+        new_at + new_seen,
+        out,
+    );
+}
+
 /// The lines that are the same in both, as pairs of positions, longest first.
 ///
 /// This is patience diff: rather than the longest common subsequence of every
@@ -402,6 +474,41 @@ mod tests {
         assert!(!marks.is_empty(), "a move is a change somewhere");
         // Whatever it decides moved, it cannot decide everything moved.
         assert!(marks.len() < 6, "{marks:?}");
+    }
+
+    #[test]
+    fn what_is_the_same_in_two_files_lines_up() {
+        let old = "one\ntwo\nthree\nfour\n";
+        let new = "one\ninserted\ntwo\nthree\nfour\n";
+        assert_eq!(
+            aligned(old, new),
+            vec![(0, 0), (1, 2), (2, 3), (3, 4)],
+            "an inserted line should push the rest down by one"
+        );
+    }
+
+    #[test]
+    fn two_files_with_nothing_in_common_line_up_nowhere() {
+        assert_eq!(aligned("a\nb\n", "x\ny\n"), Vec::new());
+    }
+
+    #[test]
+    fn every_line_of_two_identical_files_lines_up_with_itself() {
+        let text = "one\ntwo\nthree\n";
+        assert_eq!(aligned(text, text), vec![(0, 0), (1, 1), (2, 2)]);
+    }
+
+    #[test]
+    fn lining_up_never_goes_backwards() {
+        let old = "a\nb\nc\nd\ne\nf\ng\n";
+        let new = "g\nf\ne\nd\nc\nb\na\n";
+        let pairs = aligned(old, new);
+        for window in pairs.windows(2) {
+            assert!(
+                window[0].0 < window[1].0 && window[0].1 < window[1].1,
+                "{pairs:?}"
+            );
+        }
     }
 
     #[test]

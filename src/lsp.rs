@@ -24,6 +24,7 @@ use std::sync::mpsc::Sender;
 use serde_json::{Value, json};
 
 use crate::doc::{AppliedEdit, Diagnostic, DocId, Document, Severity};
+use crate::venv;
 use crate::lang;
 use crate::text::Range;
 
@@ -312,6 +313,10 @@ pub struct Servers {
     /// Things worth telling somebody: a server that is not installed, or one
     /// that died. Drained by the editor, which has the status line.
     pub problems: Vec<String>,
+    /// Which Python environment to use for a project, where somebody has said
+    /// so, by project root. Empty means "whichever one is found", which is
+    /// right nearly always and wrong exactly when a project has two.
+    pub environments: BTreeMap<PathBuf, PathBuf>,
 }
 
 impl Servers {
@@ -321,6 +326,7 @@ impl Servers {
             tx,
             failed: HashSet::new(),
             problems: Vec::new(),
+            environments: BTreeMap::new(),
         }
     }
 
@@ -348,11 +354,37 @@ impl Servers {
             .collect()
     }
 
-    /// The one server to ask a question of. Where a language has several — a
-    /// type checker and a linter — the first is the one that answers
-    /// questions; the others are there for their diagnostics.
+    /// The one server to ask a question of, where the question does not name a
+    /// capability. Where a language has several — a type checker and a linter
+    /// — the first is the one that answers questions; the others are there for
+    /// their diagnostics.
     pub fn primary_for(&self, doc: &Document) -> Option<ServerId> {
         self.for_doc(doc).first().copied()
+    }
+
+    /// The server to ask a *particular* question of: the first one attached to
+    /// this file that says it can answer that one.
+    ///
+    /// Not simply the first server. A language with two of them has two for a
+    /// reason, and the reason is that they do different things: Python gets a
+    /// type checker and a linter, and only the type checker knows where a name
+    /// is defined. Worse, they do not arrive together — `ruff` is answering
+    /// inside a few milliseconds and `pyright-langserver` takes seconds to read
+    /// a project — so "the first one that is ready" is, for the whole of that
+    /// time, the one that cannot answer anything. Asking it and stopping there
+    /// is how "find references" comes to quietly do nothing while the menu row
+    /// offering it stays lit.
+    pub fn who_can(&self, doc: &Document, capability: &str) -> Option<ServerId> {
+        self.for_doc(doc)
+            .into_iter()
+            .find(|id| self.get(*id).is_some_and(|s| s.can(capability)))
+    }
+
+    /// Whether anything attached to this file can do this at all. What a menu
+    /// row asks before offering itself, so that what is lit and what works are
+    /// the same set of things.
+    pub fn can(&self, doc: &Document, capability: &str) -> bool {
+        self.who_can(doc, capability).is_some()
     }
 
     /// Start whatever this document needs, and tell them about it.
@@ -412,11 +444,12 @@ impl Servers {
     /// server joined it next.
     fn start(&mut self, config: &lang::Server, root: &Path) -> Result<Server, String> {
         let id = ServerId(self.servers.len());
+        let filled = self.fill(config, root);
         let mut command = Command::new(&config.command);
         command
-            .args(&config.args)
+            .args(&filled.args)
             .current_dir(root)
-            .envs(&config.env)
+            .envs(&filled.env)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -469,7 +502,7 @@ impl Servers {
             root: root.to_path_buf(),
             state: State::Starting,
             capabilities: Value::Null,
-            settings: config.settings.clone(),
+            settings: filled.settings.clone(),
             child: Some(child),
             stdin: Some(stdin),
             open: HashSet::new(),
@@ -490,12 +523,51 @@ impl Servers {
                 "workspaceFolders": [{ "uri": uri, "name": root.file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "workspace".into()) }],
-                "initializationOptions": config.init_options.clone().unwrap_or(Value::Null),
+                "initializationOptions": filled.init_options.clone().unwrap_or(Value::Null),
                 "capabilities": capabilities(),
             }),
             Ask::Initialize,
         );
         Ok(server)
+    }
+
+    /// A server's configuration with its `${…}` placeholders filled in.
+    ///
+    /// This is what points a Python type checker at the project's virtual
+    /// environment. It is not written into the code as a Python special case:
+    /// `languages.json` says `"pythonPath": "${python}"`, and a server that
+    /// never mentions a placeholder is handed back untouched — including
+    /// without so much as a look at the disk, since working out which
+    /// environment a project means costs a directory read and most languages
+    /// have no such question.
+    fn fill(&self, config: &lang::Server, root: &Path) -> lang::Server {
+        if !wants_filling(config) {
+            return config.clone();
+        }
+        let picked = self.environments.get(root).map(PathBuf::as_path);
+        let env = venv::chosen(root, picked);
+        let vars = venv::Vars::new(root, env.as_ref());
+        lang::Server {
+            command: config.command.clone(),
+            args: config.args.iter().filter_map(|a| vars.fill(a)).collect(),
+            roots: config.roots.clone(),
+            init_options: config
+                .init_options
+                .as_ref()
+                .and_then(|v| vars.fill_value(v)),
+            settings: config.settings.as_ref().and_then(|v| vars.fill_value(v)),
+            env: config
+                .env
+                .iter()
+                .filter_map(|(k, v)| Some((k.clone(), vars.fill(v)?)))
+                .collect(),
+        }
+    }
+
+    /// Which environment a project is using, for the status line and for the
+    /// list you pick from.
+    pub fn environment_for(&self, root: &Path) -> Option<venv::Env> {
+        venv::chosen(root, self.environments.get(root).map(PathBuf::as_path))
     }
 
     /// The server answered `initialize`. Everything that was waiting on it
@@ -604,11 +676,8 @@ impl Servers {
         extra: Value,
     ) -> Option<ServerId> {
         let path = doc.path.clone()?;
-        let id = self.primary_for(doc)?;
+        let id = self.who_can(doc, capability)?;
         let server = self.get_mut(id)?;
-        if !server.can(capability) {
-            return None;
-        }
         let (line, character) = doc.lsp_point_at(at);
         let mut params = json!({
             "textDocument": { "uri": uri_of(&path) },
@@ -754,7 +823,7 @@ impl Servers {
         ask: Ask,
     ) -> Option<ServerId> {
         let path = doc.path.clone()?;
-        let id = self.primary_for(doc)?;
+        let id = self.who_can(doc, "codeActionProvider")?;
         let here: Vec<Value> = doc
             .diagnostics
             .iter()
@@ -764,9 +833,6 @@ impl Servers {
         let (from_line, from_char) = doc.lsp_point_at(range.start());
         let (to_line, to_char) = doc.lsp_point_at(range.end());
         let server = self.get_mut(id)?;
-        if !server.can("codeActionProvider") {
-            return None;
-        }
         let mut context = json!({ "diagnostics": here });
         if let Some(only) = only {
             context["only"] = only;
@@ -823,11 +889,8 @@ impl Servers {
 
     pub fn format(&mut self, doc: &Document, tab_width: usize, spaces: bool) -> Option<ServerId> {
         let path = doc.path.clone()?;
-        let id = self.primary_for(doc)?;
+        let id = self.who_can(doc, "documentFormattingProvider")?;
         let server = self.get_mut(id)?;
-        if !server.can("documentFormattingProvider") {
-            return None;
-        }
         server.request(
             "textDocument/formatting",
             json!({
@@ -849,11 +912,8 @@ impl Servers {
 
     pub fn symbols(&mut self, doc: &Document) -> Option<ServerId> {
         let path = doc.path.clone()?;
-        let id = self.primary_for(doc)?;
+        let id = self.who_can(doc, "documentSymbolProvider")?;
         let server = self.get_mut(id)?;
-        if !server.can("documentSymbolProvider") {
-            return None;
-        }
         server.request(
             "textDocument/documentSymbol",
             json!({ "textDocument": { "uri": uri_of(&path) } }),
@@ -873,11 +933,8 @@ impl Servers {
         query: &str,
         going: Option<String>,
     ) -> Option<ServerId> {
-        let id = self.primary_for(doc)?;
+        let id = self.who_can(doc, "workspaceSymbolProvider")?;
         let server = self.get_mut(id)?;
-        if !server.can("workspaceSymbolProvider") {
-            return None;
-        }
         server.request(
             "workspace/symbol",
             json!({ "query": query }),
@@ -1269,6 +1326,22 @@ fn capabilities() -> Value {
     })
 }
 
+/// Whether a server's configuration mentions a placeholder at all.
+///
+/// Asked before anything is looked up, because the looking up is a directory
+/// read and the answer is no for every language but one.
+fn wants_filling(config: &lang::Server) -> bool {
+    fn mentions(text: &str) -> bool {
+        text.contains("${")
+    }
+    config.args.iter().any(|a| mentions(a))
+        || config.env.values().any(|v| mentions(v))
+        || [&config.settings, &config.init_options]
+            .into_iter()
+            .flatten()
+            .any(|v| mentions(&v.to_string()))
+}
+
 /// A path as a `file://` URI, which is the only way LSP names a file.
 pub fn uri_of(path: &Path) -> String {
     let mut out = String::from("file://");
@@ -1406,6 +1479,104 @@ pub fn log_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Python textfold ships with reaches the server as a real path.
+    ///
+    /// End to end from `languages.json`, because the value of this is entirely
+    /// in the two halves agreeing: a placeholder nobody fills in and a filler
+    /// nobody wrote a placeholder for both look fine on their own.
+    #[test]
+    fn a_python_server_is_pointed_at_the_environment_beside_the_project() {
+        let dir = std::env::temp_dir().join(format!("textfold-lsp-venv-{}", std::process::id()));
+        let project = dir.join("project");
+        let bin = project.join(".venv").join("bin");
+        std::fs::create_dir_all(&bin).expect("made");
+        std::fs::write(bin.join("python3"), "").expect("written");
+        std::fs::write(project.join("pyproject.toml"), "").expect("written");
+
+        lang::init();
+        let python = lang::by_name("python").expect("shipped");
+        let config = lang::get(python).servers[0].clone();
+        assert_eq!(config.command, "pyright-langserver");
+
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let servers = Servers::new(tx);
+        let filled = servers.fill(&config, &project);
+
+        let said = filled
+            .settings
+            .as_ref()
+            .and_then(|s| s.pointer("/python/pythonPath"))
+            .and_then(Value::as_str)
+            .map(PathBuf::from);
+        let want = bin.join("python3").canonicalize().ok();
+        assert_eq!(
+            said.and_then(|p| p.canonicalize().ok()),
+            want,
+            "pyright was not told where Python is: {:?}",
+            filled.settings
+        );
+        assert!(
+            filled.env.get("PATH").is_some_and(|p| p.contains(".venv")),
+            "the environment's bin was not put on PATH: {:?}",
+            filled.env
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// And a project with no environment is not told a lie about one.
+    #[test]
+    fn a_python_project_with_no_environment_is_told_nothing_about_one() {
+        let dir = std::env::temp_dir().join(format!("textfold-lsp-bare-{}", std::process::id()));
+        let project = dir.join("project");
+        std::fs::create_dir_all(&project).expect("made");
+        std::fs::write(project.join("pyproject.toml"), "").expect("written");
+
+        lang::init();
+        let python = lang::by_name("python").expect("shipped");
+        let config = lang::get(python).servers[0].clone();
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let servers = Servers::new(tx);
+        // `VIRTUAL_ENV` from whatever ran the tests would be a real answer, and
+        // this is about there being none.
+        if std::env::var_os("VIRTUAL_ENV").is_some() || std::env::var_os("CONDA_PREFIX").is_some() {
+            return;
+        }
+        let filled = servers.fill(&config, &project);
+        assert_eq!(
+            filled
+                .settings
+                .as_ref()
+                .and_then(|s| s.pointer("/python/pythonPath")),
+            None,
+            "a pythonPath was invented: {:?}",
+            filled.settings
+        );
+        assert!(
+            !filled.env.contains_key("PATH"),
+            "PATH was rewritten around an environment that is not there: {:?}",
+            filled.env
+        );
+        // What did not depend on an environment is still there.
+        assert!(
+            filled
+                .settings
+                .as_ref()
+                .and_then(|s| s.pointer("/python/analysis/autoSearchPaths"))
+                .is_some(),
+            "the rest of the settings went with it: {:?}",
+            filled.settings
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_server_with_no_placeholders_is_left_exactly_as_it_was() {
+        lang::init();
+        let rust = lang::by_name("rust").expect("shipped");
+        let config = lang::get(rust).servers[0].clone();
+        assert!(!wants_filling(&config));
+    }
 
     #[test]
     fn a_path_survives_the_round_trip_through_a_uri() {

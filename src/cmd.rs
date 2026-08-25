@@ -196,6 +196,7 @@ commands! {
     NextDiagnostic => "next-diagnostic", Code, "To the next problem";
     PrevDiagnostic => "prev-diagnostic", Code, "To the problem before";
     SignatureHelp => "signature-help", Code, "What arguments this call takes";
+    PythonEnvironment => "python-environment", Code, "Choose which Python this project uses";
     RestartServers => "restart-servers", Code, "Start the language servers again";
     ServerStatus => "server-status", Code, "What the language servers are doing";
 
@@ -206,6 +207,7 @@ commands! {
     FocusNextPane => "focus-next-pane", View, "Into the next pane";
     FocusPrevPane => "focus-prev-pane", View, "Into the pane before";
     SwapSplitDirection => "swap-split-direction", View, "Side by side, or one above the other";
+    DiffPanes => "diff-panes", View, "Compare the two panes, and scroll them together";
     ThemePicker => "theme", View, "Pick a set of colours";
     NextTheme => "next-theme", View, "The next set of colours along";
     PrevTheme => "prev-theme", View, "The set before";

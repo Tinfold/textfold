@@ -102,6 +102,14 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enhanced_keys: Option<bool>,
 
+    /// Which Python environment a project uses, by project root.
+    ///
+    /// Only written where you have chosen one by hand. A project with a single
+    /// `.venv` beside it needs nothing here — that one is found — and this is
+    /// for the project that has three, where only you know which.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub python_environments: BTreeMap<String, String>,
+
     /// Keys of your own, by what they do: `"save": ["ctrl-s", "f2"]`.
     ///
     /// Only what you have changed is written here; everything else keeps the

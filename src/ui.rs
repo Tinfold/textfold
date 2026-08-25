@@ -105,10 +105,15 @@ fn place_panes(app: &mut App, body: Rect) {
             // there is something wrong on this line.
             _ => (digits(lines) + 3) as u16,
         };
-        // And one more for the bar that says this line is not what git has,
-        // but only for a file git has something to say about — a column of
-        // nothing down every buffer would be a column wasted.
-        let numbers = numbers + u16::from(app.git.tracking(id));
+        // And one more for the bar that says this line is not what git has —
+        // or, while two panes are being compared, not what the other pane has.
+        // Only where there is something to say: a column of nothing down every
+        // buffer would be a column wasted.
+        let comparing = app
+            .diff
+            .as_ref()
+            .is_some_and(|d| d.side_of(index).is_some());
+        let numbers = numbers + u16::from(comparing || app.git.tracking(id));
         // A column of its own for the rule that says which pane has the
         // focus, rather than borrowing one from the line numbers — which for
         // a file long enough would have taken a digit with it.
@@ -220,6 +225,7 @@ fn draw_pane(frame: &mut Frame, app: &App, index: usize, ground: Color) -> Optio
                     numbered: row == 0,
                     screen,
                     cursor_lines: &cursor_lines,
+                    pane: index,
                 },
             );
             let placed = draw_row(
@@ -480,6 +486,9 @@ struct Gutter<'a> {
     numbered: bool,
     screen: u16,
     cursor_lines: &'a [usize],
+    /// Which pane this is, so a comparison of two panes knows which side of it
+    /// this gutter is drawing.
+    pane: usize,
 }
 
 fn draw_gutter(buf: &mut Buffer, app: &App, view: &View, doc: &Document, it: Gutter) {
@@ -488,6 +497,7 @@ fn draw_gutter(buf: &mut Buffer, app: &App, view: &View, doc: &Document, it: Gut
         numbered,
         screen,
         cursor_lines,
+        pane,
     } = it;
     let theme = &app.theme;
     let frame = view.frame;
@@ -529,9 +539,17 @@ fn draw_gutter(buf: &mut Buffer, app: &App, view: &View, doc: &Document, it: Gut
             theme.gutter
         });
 
-    // ` 42 ` and then the marks, hard against the text: git's bar, and then
-    // whatever is wrong on this line.
-    let tracked = app.git.tracking(doc.id);
+    // ` 42 ` and then the marks, hard against the text: the bar, and then
+    // whatever is wrong on this line. The bar says one of two things — how
+    // this line differs from the last commit, or how it differs from the pane
+    // beside it — and while two panes are being compared it is the second,
+    // because that is what you asked to be shown.
+    let comparing = app
+        .diff
+        .as_ref()
+        .filter(|d| d.side_of(pane).is_some())
+        .map(|d| d.mark(pane, line));
+    let tracked = comparing.is_some() || app.git.tracking(doc.id);
     let reserved = 1 + usize::from(tracked);
     let text = if width > reserved {
         format!("{label:>room$} ", room = width - reserved - 1)
@@ -539,8 +557,12 @@ fn draw_gutter(buf: &mut Buffer, app: &App, view: &View, doc: &Document, it: Gut
         String::new()
     };
     buf.set_stringn(x, screen, &text, width, style);
+    let bar = match comparing {
+        Some(mark) => mark,
+        None => app.git.mark(doc.id, line),
+    };
     if tracked
-        && let Some(mark) = app.git.mark(doc.id, line)
+        && let Some(mark) = bar
         && let Some(cell) = buf.cell_mut(Position::new(frame.x + view.gutter - 2, screen))
     {
         cell.set_style(style.fg(git_colour(mark, theme)));
@@ -928,6 +950,26 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
             n => format!("{key}: {title} (+{})", n - 1),
         };
         chips.push((said, theme.success, Cmd::FixIt));
+    }
+
+    // That two panes are being compared, and how far apart they are. Clicking
+    // it steps to the next difference, which while a comparison is on is what
+    // the next-change key does too.
+    if let Some(diff) = &app.diff {
+        let said = match diff.differing() {
+            0 => "same".to_string(),
+            1 => "1 line differs".to_string(),
+            n => format!("{n} lines differ"),
+        };
+        chips.push((
+            said,
+            if diff.same() {
+                theme.muted
+            } else {
+                theme.changed
+            },
+            Cmd::NextChange,
+        ));
     }
 
     // Which branch, and how much of this file is not in it. Clicking it steps
@@ -1525,9 +1567,20 @@ fn draw_menu(frame: &mut Frame, app: &mut App, ground: Color) {
     let inside = block.inner(area);
     frame.render_widget(block, area);
 
+    // More rows than there is room for is rare, and silently dropping the ones
+    // past the bottom edge is worse than rare: those rows cannot be pointed
+    // at, so a command simply is not there on a short terminal. Scroll instead,
+    // keeping the highlight in view, the way the fuzzy list already does.
+    let shown = (inside.height as usize).max(1);
+    let scroll = menu
+        .scroll
+        .min(menu.len().saturating_sub(shown))
+        .min(menu.cursor)
+        .max((menu.cursor + 1).saturating_sub(shown));
+
     let buf = frame.buffer_mut();
     let room = inside.width as usize;
-    for (row, item) in menu.items.iter().take(inside.height as usize).enumerate() {
+    for (row, item) in menu.items.iter().enumerate().skip(scroll).take(shown).map(|(n, item)| (n - scroll, item)) {
         let y = inside.y + row as u16;
         if matches!(item.action, crate::menu::Action::Divide) {
             buf.set_stringn(
@@ -1539,7 +1592,7 @@ fn draw_menu(frame: &mut Frame, app: &mut App, ground: Color) {
             );
             continue;
         }
-        let here = row == menu.cursor;
+        let here = row + scroll == menu.cursor;
         let chosen = here && item.enabled;
         // The highlighted row is the accent colour behind it rather than a
         // marker beside it, which is what a menu looks like everywhere and
@@ -1589,6 +1642,7 @@ fn draw_menu(frame: &mut Frame, app: &mut App, ground: Color) {
 
     if let Overlay::Menu(menu) = &mut app.overlay {
         menu.area = inside;
+        menu.scroll = scroll;
     }
 }
 
@@ -2848,4 +2902,101 @@ mod tests {
         let blocks = cells_on(&buffer, app.theme.cursor);
         assert_eq!(blocks.len(), app.view().sel.len() - 1, "{blocks:?}");
     }
+    /// Click the left button somewhere, the way the terminal reports it.
+    fn click_at(app: &mut App, column: u16, row: u16) {
+        app.handle(crate::app::Event::Term(TermEvent::Mouse(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })));
+    }
+
+    #[test]
+    fn clicking_a_divider_does_nothing_rather_than_cutting_your_text() {
+        let (mut app, _t) = menu_on_screen();
+        let (area, divider) = {
+            let Overlay::Menu(menu) = &app.overlay else { panic!("no menu") };
+            let divider = menu
+                .items
+                .iter()
+                .position(|i| matches!(i.action, crate::menu::Action::Divide))
+                .expect("the text menu has dividers");
+            (menu.area, divider)
+        };
+        // The menu opens with "Cut" highlighted, and the first divider is three
+        // rows below it. Clicking the line used to run the highlight.
+        click_at(&mut app, area.x + 2, area.y + divider as u16);
+        assert!(matches!(app.overlay, Overlay::None), "the menu stayed open");
+        assert!(
+            !app.here().is_modified(),
+            "clicking a divider changed the text"
+        );
+    }
+
+    #[test]
+    fn clicking_a_row_runs_that_row() {
+        let (mut app, _t) = menu_on_screen();
+        let (area, select_all) = {
+            let Overlay::Menu(menu) = &app.overlay else { panic!("no menu") };
+            let at = menu
+                .items
+                .iter()
+                .position(|i| i.action == crate::menu::Action::Run(Cmd::SelectAll))
+                .expect("select all is on the menu");
+            (menu.area, at)
+        };
+        click_at(&mut app, area.x + 2, area.y + select_all as u16);
+        assert_eq!(
+            app.view().sel.primary().len(),
+            app.here().len_chars(),
+            "clicking \"Select all\" did not select all"
+        );
+    }
+
+    #[test]
+    fn a_menu_taller_than_the_screen_can_still_reach_its_last_row() {
+        let (mut app, mut terminal) = menu_on_screen();
+        let last = {
+            let Overlay::Menu(menu) = &app.overlay else { panic!("no menu") };
+            assert!(
+                menu.len() > menu.area.height as usize,
+                "this test needs a menu that does not fit; it does"
+            );
+            menu.len() - 1
+        };
+        // Walk the highlight to the end, which is what the arrows and the
+        // wheel both do.
+        for _ in 0..menu_rows(&app) {
+            let Overlay::Menu(menu) = &mut app.overlay else { panic!() };
+            menu.step(1);
+        }
+        {
+            let Overlay::Menu(menu) = &mut app.overlay else { panic!() };
+            menu.cursor = last;
+        }
+        terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
+
+        let (area, scroll) = {
+            let Overlay::Menu(menu) = &app.overlay else { panic!() };
+            (menu.area, menu.scroll)
+        };
+        assert!(scroll > 0, "the menu did not scroll to show its last row");
+        let row = area.y + (last - scroll) as u16;
+        assert!(
+            row < area.y + area.height,
+            "the last row is still off the bottom"
+        );
+        click_at(&mut app, area.x + 2, row);
+        assert!(
+            matches!(app.overlay, Overlay::Picker(_)),
+            "clicking the last row (\"Find it in every file\") did nothing"
+        );
+    }
+
+    fn menu_rows(app: &App) -> usize {
+        let Overlay::Menu(menu) = &app.overlay else { panic!() };
+        menu.len()
+    }
+
 }
