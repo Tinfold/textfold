@@ -7036,6 +7036,7 @@ impl App {
             _ => 1,
         };
         self.last_click = Some((now, column, row, count));
+        self.click_away_from_suggestions(column, row);
 
         // The context menu is on top of everything, including the list.
         if let Overlay::Menu(m) = &mut self.overlay {
@@ -7294,7 +7295,33 @@ impl App {
     /// code under the pointer. Clicking inside a selection keeps it, because
     /// "select this, then right-click, then copy" is the whole reason the menu
     /// is there and moving the cursor first would throw the selection away.
+    /// Close the list of suggestions, unless the click landed on it.
+    ///
+    /// Clicking somewhere else is going somewhere else, and a list of
+    /// completions for a word you have left is worse than no list at all: it
+    /// still owns Tab and Enter, so the next thing you press finishes a word
+    /// that is no longer under the cursor. Every editor closes it on a click
+    /// away, which is why nobody ever thinks about this until one does not.
+    ///
+    /// An empty list counts as not clicked on. It is not drawn, so its last
+    /// known place on the screen is not a place, and a click there is a click
+    /// on the text underneath.
+    fn click_away_from_suggestions(&mut self, column: u16, row: u16) {
+        let on_the_list = self
+            .completion
+            .as_ref()
+            .is_some_and(|list| !list.is_empty() && hits(list.area, column, row));
+        if !on_the_list {
+            self.completion = None;
+        }
+    }
+
     fn right_click(&mut self, column: u16, row: u16) {
+        // Asking what can be done here is leaving whatever word you were
+        // part-way through, so the suggestions go — including where the menu
+        // is about to be drawn over the top of them.
+        self.completion = None;
+
         // A menu already open is closed by a second right click, the way a
         // second press of any key that opens something closes it.
         if matches!(self.overlay, Overlay::Menu(_)) {
@@ -7867,6 +7894,57 @@ mod tests {
             app.completion_due.is_some(),
             "the server has more to say and has not been asked"
         );
+    }
+
+    #[test]
+    fn clicking_away_closes_the_list_of_suggestions() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "Ha");
+        suggested(
+            &mut app,
+            2,
+            false,
+            json!([{ "label": "Handle" }, { "label": "Hasty" }]),
+        );
+        assert!(app.completion.is_some(), "nothing was suggested to close");
+
+        // Somewhere in the text, well away from where the list was drawn.
+        app.click(20, 12, KeyModifiers::NONE);
+        assert!(
+            app.completion.is_none(),
+            "the list is still there over a word nobody is typing any more"
+        );
+    }
+
+    #[test]
+    fn clicking_a_suggestion_still_takes_it() {
+        // The other half: closing on a click away must not close it on the
+        // click that was choosing something from it.
+        let (mut app, _rx) = editor();
+        typed(&mut app, "Ha");
+        suggested(
+            &mut app,
+            2,
+            false,
+            json!([{ "label": "Handle" }, { "label": "Hasty" }]),
+        );
+        // Where the drawing would have put it.
+        let list = app.completion.as_mut().expect("a list");
+        list.area = Rect::new(4, 2, 24, 2);
+
+        app.click(6, 3, KeyModifiers::NONE);
+        assert!(app.completion.is_none(), "the list stayed open");
+        assert_eq!(app.here().rope.to_string().trim_end(), "Hasty");
+    }
+
+    #[test]
+    fn right_clicking_closes_the_list_of_suggestions() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "Ha");
+        suggested(&mut app, 2, false, json!([{ "label": "Handle" }]));
+        app.right_click(1, 1);
+        assert!(app.completion.is_none());
+        assert!(matches!(app.overlay, Overlay::Menu(_)), "no menu opened");
     }
 
     #[test]
