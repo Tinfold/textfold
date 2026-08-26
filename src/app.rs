@@ -11,7 +11,7 @@
 //! if it would type a character — the text. That order is what makes Escape
 //! reliable and typing never surprising.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
@@ -69,6 +69,22 @@ const FIX_DELAY: Duration = Duration::from_millis(250);
 /// How many times a language server may say "not now" about the fixes for one
 /// spot before the editor takes it for an answer.
 const FIX_TRIES: u8 = 4;
+
+/// The two kinds of "fix the whole file" every language server agrees on the
+/// names of. Written down once rather than spelled out at each of the four
+/// places that ask for them.
+const SOURCE_FIX_ALL: &str = "source.fixAll";
+const SOURCE_ORGANIZE_IMPORTS: &str = "source.organizeImports";
+
+/// How long a save waits for the servers to say what they would fix before
+/// going ahead without them. Long enough for a linter, short enough that a
+/// wedged server costs you a pause rather than your file.
+const BEFORE_SAVE_WAIT: Duration = Duration::from_millis(1500);
+
+/// How often what is open is written down. Often enough that a crash costs a
+/// few tabs, rarely enough that opening a directory's worth of files is not a
+/// write per file.
+const SESSION_WRITE_EVERY: Duration = Duration::from_secs(3);
 
 /// How often the diff against the last commit is worked out again.
 const GIT_CHECK_EVERY: Duration = Duration::from_millis(150);
@@ -658,24 +674,120 @@ impl Popup {
 
 /// Fixes the language server is holding ready for the problem under the
 /// cursor.
-pub struct Fixes {
-    /// Which buffer they are about. Where in it is [`App::fixes_at`], which is
-    /// the same fact the request was keyed on and so the one that decides
-    /// whether an answer is still about anywhere.
+pub struct Gathered {
+    /// Which buffer they are about.
     pub doc: DocId,
-    pub server: ServerId,
-    pub actions: Vec<Value>,
+    /// Where in it the question was about. An answer that comes back after the
+    /// cursor has left is an answer to a question nobody is asking any more.
+    pub at: usize,
+    /// Servers still to answer.
+    waiting: Vec<ServerId>,
+    /// What each one offered, kept apart by who said it, so that a server
+    /// answering twice replaces its own findings and nobody else's — and so
+    /// that choosing a row knows which server to send it back to.
+    from: Vec<(ServerId, Vec<Value>)>,
+    /// Whether these have already been put on the screen as a list. Once they
+    /// have, a slow server's answer fills the list in where it stands and
+    /// never opens it again: a menu that reappears a second after you closed
+    /// it is a menu fighting you.
+    shown: bool,
 }
 
-impl Fixes {
+impl Gathered {
+    fn new(doc: DocId, at: usize, asked: Vec<ServerId>) -> Self {
+        Self {
+            doc,
+            at,
+            waiting: asked,
+            from: Vec::new(),
+            shown: false,
+        }
+    }
+
+    /// Take one server's answer.
+    fn take(&mut self, server: ServerId, value: Value) {
+        self.waiting.retain(|id| *id != server);
+        let actions: Vec<Value> = match value {
+            Value::Array(items) => items
+                .into_iter()
+                .filter(|a| a.get("title").and_then(Value::as_str).is_some())
+                .collect(),
+            _ => Vec::new(),
+        };
+        match self.from.iter_mut().find(|(id, _)| *id == server) {
+            Some((_, held)) => *held = actions,
+            None => self.from.push((server, actions)),
+        }
+    }
+
+    /// Whether everybody has answered.
+    pub fn settled(&self) -> bool {
+        self.waiting.is_empty()
+    }
+
+    /// Everything offered, in the order the servers are attached to the file,
+    /// each still knowing which server it came from.
+    pub fn actions(&self) -> Vec<(ServerId, &Value)> {
+        self.from
+            .iter()
+            .flat_map(|(id, actions)| actions.iter().map(move |a| (*id, a)))
+            .collect()
+    }
+
+    pub fn len(&self) -> usize {
+        self.from.iter().map(|(_, a)| a.len()).sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// The shortest useful thing to call the first one, for a status bar with
     /// a line to spare and not a line to waste.
     pub fn headline(&self) -> Option<&str> {
-        self.actions
-            .first()
-            .and_then(|a| a.get("title"))
-            .and_then(Value::as_str)
+        self.from
+            .iter()
+            .flat_map(|(_, actions)| actions.iter())
+            .find_map(|a| a.get("title").and_then(Value::as_str))
     }
+}
+
+/// A file being got ready to be written.
+///
+/// Saving a Python file can mean four round trips before a byte is written:
+/// ask ruff what it would fix, apply that, ask it to sort the imports, apply
+/// that, ask the formatter to lay the result out, apply that, and only then
+/// write. Each of those answers comes back on the event loop like everything
+/// else, so what is left to do has to be written down rather than held on a
+/// stack.
+struct BeforeSave {
+    doc: DocId,
+    /// What is left to ask, in order: one kind of fix put to one server.
+    ///
+    /// One at a time, and this is the whole reason there is a queue rather
+    /// than a set. Each answer is a list of edits at positions in the file *as
+    /// it was when the question was asked*, so the first one applied moves
+    /// everything a second one was pointing at. Asking them one after another
+    /// means every answer is about the file as it actually is; asking them all
+    /// at once and applying what comes back is how "save" quietly deletes a
+    /// line.
+    left: Vec<(String, ServerId)>,
+    /// The one outstanding, so that a late answer to a question we have given
+    /// up on is not applied to a file it is no longer about.
+    asking: Option<(String, ServerId)>,
+    /// Whether to run the formatter once the fixes are in.
+    format: bool,
+    /// Whether to write the file afterwards. `false` is somebody having asked
+    /// for the fixes on their own, without a save behind them.
+    write: bool,
+    /// Where to write it, for a "save as". Carried the whole way rather than
+    /// looked up at the end: by the time the formatter has answered, the
+    /// buffer still has its old path, and writing to that would put the
+    /// reformatted text back in the file you were saving *away* from.
+    to: Option<PathBuf>,
+    /// When to stop waiting on the outstanding one. A server that never
+    /// answers must not mean a file that is never saved.
+    due: Instant,
 }
 
 /// Something to tell the person using the editor.
@@ -813,7 +925,12 @@ pub struct App {
     /// fetched before anybody asks so that it can be offered rather than
     /// waited for. This is the whole of "you have not imported that" being
     /// something you can see instead of something you have to go looking for.
-    pub fixes: Option<Fixes>,
+    pub fixes: Option<Gathered>,
+    /// What every server offered to do about the selection, gathering as they
+    /// answer, for the list somebody asked for by hand.
+    offer: Option<Gathered>,
+    /// A save waiting on the servers' own fixes and on the formatter.
+    before_save: Option<BeforeSave>,
     /// Where the fixes were last asked about, so the same question is not
     /// asked twice for a cursor that has not moved.
     fixes_at: Option<(DocId, usize)>,
@@ -839,15 +956,24 @@ pub struct App {
     /// Pressing Tab a fraction before the import has been worked out should
     /// mean waiting a fraction, not going without the import.
     accept_when_resolved: Option<usize>,
+    /// Whether what is open has changed since the session was last written
+    /// down, and when it last was. Written on a timer rather than on every
+    /// change so that opening forty files is not forty writes.
+    session_dirty: bool,
+    session_written: Instant,
+
     /// A document waiting to be written once the formatter answers. Formatting
     /// on save is a round trip to a language server, so the save cannot happen
     /// until the edits are in — saving first would write the old text and
     /// leave the reformatted text unsaved.
-    save_after_format: Option<DocId>,
+    save_after_format: Option<(DocId, Option<PathBuf>)>,
 }
 
 impl App {
     pub fn new(config: Config, tx: Sender<Event>) -> Self {
+        // The plugins decide what the languages are, so what is switched off
+        // has to be known before the language table is built.
+        crate::plugin::init(&config.plugins);
         lang::init();
         let themes = Themes::load();
         let theme = themes
@@ -894,6 +1020,8 @@ impl App {
             resting: None,
             completion_due: None,
             fixes: None,
+            offer: None,
+            before_save: None,
             fixes_at: None,
             fixes_due: None,
             fixes_tries: 0,
@@ -901,6 +1029,8 @@ impl App {
             git_checked: Instant::now() - GIT_CHECK_EVERY,
             disk_checked: Instant::now(),
             accept_when_resolved: None,
+            session_dirty: false,
+            session_written: Instant::now(),
             save_after_format: None,
             config,
         };
@@ -1043,6 +1173,7 @@ impl App {
                 // The empty buffer nobody typed in is not worth keeping once
                 // there is a real file to look at.
                 self.drop_untouched_scratch(id);
+                self.session_changed();
                 if missing {
                     self.say(format!("{} is new", short(&path, &self.project)));
                 }
@@ -1056,6 +1187,7 @@ impl App {
     /// it.
     fn show(&mut self, id: DocId) {
         self.touch(id);
+        self.session_changed();
         let at = self.focus.min(self.panes.len() - 1);
         // Somewhere sensible to be if this pane has never shown this file:
         // wherever another pane has it open, and otherwise the top.
@@ -1072,6 +1204,155 @@ impl App {
         self.dismiss_popups();
         self.scroll_into_view();
         self.lsp_open(id);
+    }
+
+    // ---- What was open last time ----
+
+    /// Note that the tabs have moved on, so the session gets written soon.
+    fn session_changed(&mut self) {
+        self.session_dirty = true;
+    }
+
+    /// What is open now, as something that can be written down.
+    ///
+    /// A buffer with no file behind it is left out: there is nothing to open
+    /// again, and remembering the *name* of an empty untitled buffer would
+    /// bring back a tab with nothing in it.
+    fn session(&self) -> crate::session::Session {
+        let mut tabs = Vec::new();
+        let mut of_doc: HashMap<DocId, usize> = HashMap::new();
+        // The focused pane knows where every file it has shown was; a file it
+        // has never shown falls back to wherever another pane had it.
+        let here = self.focus.min(self.panes.len().saturating_sub(1));
+        for doc in &self.docs {
+            let Some(path) = &doc.path else { continue };
+            let at = self
+                .panes
+                .get(here)
+                .and_then(|pane| pane.place_in(doc.id))
+                .or_else(|| self.panes.iter().find_map(|pane| pane.place_in(doc.id)))
+                .unwrap_or(0);
+            let (line, column) = doc.point_at_char(at);
+            of_doc.insert(doc.id, tabs.len());
+            tabs.push(crate::session::Tab {
+                path: path.clone(),
+                line,
+                column,
+            });
+        }
+        let panes: Vec<crate::session::Pane> = self
+            .panes
+            .iter()
+            .filter_map(|pane| {
+                Some(crate::session::Pane {
+                    tab: *of_doc.get(&pane.doc)?,
+                    wrap: pane.wrap,
+                })
+            })
+            .collect();
+        crate::session::Session {
+            focus: here.min(panes.len().saturating_sub(1)),
+            side_by_side: self.side_by_side,
+            at: crate::session::now(),
+            tabs,
+            panes,
+        }
+    }
+
+    /// Write down what is open, if it has changed and it has been a moment.
+    pub fn remember_session(&mut self, now: bool) {
+        // A textfold with nowhere to keep its settings has nowhere to keep a
+        // session either — which is also what stops a test run from writing
+        // over the tabs of whoever is running it.
+        if !self.config.is_stored() || !self.config.restore_session() {
+            return;
+        }
+        if !self.session_dirty && !now {
+            return;
+        }
+        if !now && self.session_written.elapsed() < SESSION_WRITE_EVERY {
+            return;
+        }
+        self.session_dirty = false;
+        self.session_written = Instant::now();
+        crate::session::save(&self.project.clone(), self.session());
+    }
+
+    /// Open again what was open here last time.
+    ///
+    /// The files go in in the order the row of tabs was in, each landing where
+    /// its cursor was, and then the panes are put back. A file that has since
+    /// been deleted is skipped rather than opened empty — coming back to a
+    /// project should not invent files in it.
+    /// `asked` separates somebody pressing the key from textfold trying it on
+    /// its own at startup: only the first is worth being told "there was
+    /// nothing here", and the second would say it every time you opened the
+    /// editor somewhere new.
+    pub fn restore_session(&mut self, asked: bool) -> usize {
+        let Some(session) = crate::session::load(&self.project.clone()) else {
+            if asked {
+                self.say("nothing was open here last time");
+            }
+            return 0;
+        };
+        self.apply_session(&session, asked)
+    }
+
+    /// Open what a session describes. Split from the reading so that a test
+    /// can hand one over rather than going through the file every textfold on
+    /// this machine shares.
+    fn apply_session(&mut self, session: &crate::session::Session, asked: bool) -> usize {
+        let already: Vec<PathBuf> = self.docs.iter().filter_map(|d| d.path.clone()).collect();
+        let mut opened: Vec<Option<DocId>> = Vec::new();
+        for tab in &session.tabs {
+            if !tab.path.exists() || already.contains(&tab.path) {
+                opened.push(None);
+                continue;
+            }
+            self.open_path(&tab.path);
+            let landed = self.view().doc;
+            self.go_to(tab.line, tab.column);
+            opened.push(Some(landed));
+        }
+        let count = opened.iter().flatten().count();
+        if count == 0 {
+            if asked {
+                self.say("the files that were open here have gone");
+            }
+            return 0;
+        }
+
+        // The panes, once there is something to put in them. A layout that
+        // cannot be rebuilt — because the file one pane had is gone — is not
+        // worth half-rebuilding, so it is only restored where every pane has
+        // somewhere to point.
+        let wanted: Option<Vec<(DocId, bool)>> = session
+            .panes
+            .iter()
+            .map(|pane| {
+                let doc = *opened.get(pane.tab)?.as_ref()?;
+                Some((doc, pane.wrap))
+            })
+            .collect();
+        if let Some(wanted) = wanted.filter(|w| w.len() > 1 && w.len() <= 4) {
+            self.side_by_side = session.side_by_side;
+            while self.panes.len() > 1 {
+                self.panes.pop();
+            }
+            self.focus = 0;
+            for (at, (doc, wrap)) in wanted.iter().enumerate() {
+                if at > 0 {
+                    self.split();
+                }
+                self.focus = at;
+                self.show(*doc);
+                self.panes[at].wrap = *wrap;
+            }
+            self.focus = session.focus.min(self.panes.len() - 1);
+        }
+        self.scroll_into_view();
+        self.session_dirty = true;
+        count
     }
 
     /// Close the empty untouched buffer textfold starts with, once there is
@@ -1103,6 +1384,7 @@ impl App {
         self.docs.retain(|d| d.id != id);
         self.seen.remove(&id);
         self.git.forget(id);
+        self.session_changed();
         if self.docs.is_empty() {
             let fresh = self.new_scratch();
             for pane in &mut self.panes {
@@ -1192,6 +1474,8 @@ impl App {
             self.hover_at_screen(column, row);
         }
         self.check_fixes();
+        self.check_before_save();
+        self.remember_session(false);
         self.check_colours();
         self.check_diff();
         self.check_dragged_tab();
@@ -1291,8 +1575,15 @@ impl App {
         self.fixes_due = None;
         let range = Range::point(at);
         let App { docs, lsp, .. } = self;
-        if let Some(doc) = docs.iter().find(|d| d.id == id) {
-            lsp.quick_fixes(doc, range);
+        let Some(doc) = docs.iter().find(|d| d.id == id) else {
+            return;
+        };
+        // Every server that does code actions, not the first one: `ruff` knows
+        // how to take an unused import out and `pyright` does not, and which
+        // of the two answers first is a race nobody should be running.
+        let asked = lsp.quick_fixes(doc, range);
+        if !asked.is_empty() {
+            self.fixes = Some(Gathered::new(id, at, asked));
         }
     }
 
@@ -1315,19 +1606,15 @@ impl App {
         if self.fixes_at != Some((doc, at)) {
             return;
         }
-        let Value::Array(actions) = value else { return };
-        let actions: Vec<Value> = actions
-            .into_iter()
-            .filter(|a| a.get("title").and_then(Value::as_str).is_some())
-            .collect();
-        if actions.is_empty() {
+        let Some(gathered) = self.fixes.as_mut().filter(|g| g.doc == doc && g.at == at) else {
             return;
+        };
+        gathered.take(server, value);
+        if gathered.is_empty() && gathered.settled() {
+            // Nobody had anything. Better to have nothing waiting than an
+            // empty list the status bar has to describe.
+            self.fixes = None;
         }
-        self.fixes = Some(Fixes {
-            doc,
-            server,
-            actions,
-        });
     }
 
     /// Do the obvious thing about the problem under the cursor.
@@ -1337,7 +1624,7 @@ impl App {
     /// scroll to the top of a file to add a line they already know the text
     /// of. Several means a list, because there is a choice to make.
     fn fix_it(&mut self) {
-        let Some(fixes) = &self.fixes else {
+        let Some(fixes) = self.fixes.as_ref().filter(|g| !g.is_empty()) else {
             // Nothing waiting: it may simply not have come back yet, or there
             // may be nothing wrong here at all.
             let on_a_problem = {
@@ -1350,8 +1637,13 @@ impl App {
                 "nothing wrong here to fix"
             });
         };
-        if fixes.actions.len() == 1 {
-            let (server, action) = (fixes.server, fixes.actions[0].clone());
+        let offered: Vec<(ServerId, Value)> = fixes
+            .actions()
+            .into_iter()
+            .map(|(id, action)| (id, action.clone()))
+            .collect();
+        if let [(server, action)] = offered.as_slice() {
+            let (server, action) = (*server, action.clone());
             let title = action
                 .get("title")
                 .and_then(Value::as_str)
@@ -1361,8 +1653,9 @@ impl App {
             self.do_code_action(server, action);
             return self.say_good(title);
         }
-        let (server, actions) = (fixes.server, fixes.actions.clone());
-        self.take_code_actions(server, Value::Array(actions));
+        // Several, from one server or from two. There is a choice to make, so
+        // it is made in a list rather than guessed at.
+        self.show_actions(offered);
     }
 
     /// Work out which lines differ from the last commit, for whatever is on
@@ -1951,7 +2244,10 @@ impl App {
             Cmd::Rename => self.start_rename(),
             Cmd::CodeAction => self.ask_code_actions(),
             Cmd::FixIt => self.fix_it(),
+            Cmd::FixAll => self.fix_all(&[SOURCE_FIX_ALL.into()]),
+            Cmd::OrganizeImports => self.fix_all(&[SOURCE_ORGANIZE_IMPORTS.into()]),
             Cmd::Format => self.format(),
+            Cmd::FormatAndFix => self.format_and_fix(),
             Cmd::Symbols => self.ask_symbols(),
             Cmd::WorkspaceSymbols => self.open_workspace_symbols(),
             Cmd::Diagnostics => self.open_diagnostics_picker(),
@@ -2005,6 +2301,16 @@ impl App {
             Cmd::ToggleMouse => self.toggle_setting("mouse"),
             Cmd::SetLanguage => self.open_language_picker(),
             Cmd::Settings => self.open_settings_picker(),
+            Cmd::RestoreSession => {
+                let count = self.restore_session(true);
+                if count > 0 {
+                    self.say_good(format!(
+                        "brought back {count} {}",
+                        plural("file", count)
+                    ));
+                }
+            }
+            Cmd::Plugins => self.open_plugins_picker(),
 
             // ---- Getting out ----
             Cmd::Escape => self.escape(),
@@ -2239,22 +2545,212 @@ impl App {
     /// Write the file, reformatting it first if that is what you have asked
     /// for.
     ///
-    /// Formatting is a round trip to a language server, so this may not write
-    /// anything itself: it asks, and [`App::take_format`] writes when the
-    /// edits arrive. That is also why [`App::write_now`] is separate — the
-    /// save that follows a format must not ask for another one.
+    /// This may not write anything itself. Every step before the bytes go
+    /// down is a round trip to a language server — the fixes it would make,
+    /// and then the formatter — so a save with either of those turned on is a
+    /// queue of questions that ends in a write. [`App::write_now`] is the end
+    /// of that queue, and is separate so that the save which follows a format
+    /// does not ask for another one.
     fn save(&mut self, to: Option<PathBuf>) {
-        if self.config.format_on_save() && self.save_after_format.is_none() {
-            let id = self.view().doc;
+        if self.before_save.is_some() {
+            // Already on its way. A second Ctrl-S while the servers are
+            // thinking should not start the whole dance again.
+            return;
+        }
+        let id = self.view().doc;
+        if self.here().path.is_none() && to.is_none() {
+            // Nowhere to write it yet, so there is nothing to get ready.
+            return self.write_now(to);
+        }
+        let kinds = self.config.code_actions_on_save().to_vec();
+        let format = self.config.format_on_save();
+        if kinds.is_empty() && !format {
+            return self.write_now(to);
+        }
+        self.start_before_save(id, &kinds, format, true, to);
+    }
+
+    /// Ask every server what it would fix in this file on its own, and do it.
+    ///
+    /// The other half of "reformat": a formatter lays code out and a linter
+    /// takes the unused import away, and they are two different requests to
+    /// two different servers. This is the second one, on its own, for when you
+    /// want the fixes without the reflow — or when the formatter is somebody
+    /// else's job entirely.
+    fn fix_all(&mut self, kinds: &[String]) {
+        if self.before_save.is_some() {
+            return;
+        }
+        let id = self.view().doc;
+        if !self.start_before_save(id, kinds, false, false, None) {
+            self.say("no language server here with fixes of its own");
+        }
+    }
+
+    /// Both halves of tidying a file up: the servers' own fixes, and then the
+    /// formatter.
+    ///
+    /// In that order, and not the other way round. A fix puts text in — an
+    /// import, a rewritten call — and the formatter is what lays the result
+    /// out; formatting first and fixing afterwards leaves the fix sitting
+    /// there unformatted.
+    fn format_and_fix(&mut self) {
+        if self.before_save.is_some() {
+            return;
+        }
+        let id = self.view().doc;
+        let kinds = [
+            SOURCE_FIX_ALL.to_string(),
+            SOURCE_ORGANIZE_IMPORTS.to_string(),
+        ];
+        if !self.start_before_save(id, &kinds, true, false, None) {
+            self.format();
+        }
+    }
+
+    /// Line up one question per kind per server, and ask the first.
+    ///
+    /// Answers whether there was anybody to ask. Where there is not, the
+    /// caller decides what "nothing to do" means — a save still saves, and
+    /// `fix-all` says so.
+    fn start_before_save(
+        &mut self,
+        doc: DocId,
+        kinds: &[String],
+        format: bool,
+        write: bool,
+        to: Option<PathBuf>,
+    ) -> bool {
+        let App { docs, lsp, .. } = self;
+        let Some(open) = docs.iter().find(|d| d.id == doc) else {
+            return false;
+        };
+        let servers = lsp.who_all_can(open, "codeActionProvider");
+        let left: Vec<(String, ServerId)> = kinds
+            .iter()
+            .flat_map(|kind| servers.iter().map(move |id| (kind.clone(), *id)))
+            .collect();
+        if left.is_empty() {
+            // Nobody to ask. A save still saves; anything else is the
+            // caller's to explain, since only it knows what was wanted.
+            if write {
+                self.format_or_write(doc, format, write, to);
+            }
+            return false;
+        }
+        self.before_save = Some(BeforeSave {
+            doc,
+            left,
+            asking: None,
+            format,
+            write,
+            to,
+            due: Instant::now(),
+        });
+        self.ask_next_fix();
+        true
+    }
+
+    /// Put the next question, or finish up when there are none left.
+    fn ask_next_fix(&mut self) {
+        loop {
+            let Some(before) = &mut self.before_save else {
+                return;
+            };
+            let Some((kind, server)) = before.left.first().cloned() else {
+                let (doc, format, write) = (before.doc, before.format, before.write);
+                let to = before.to.take();
+                self.before_save = None;
+                return self.format_or_write(doc, format, write, to);
+            };
+            before.left.remove(0);
+            before.asking = Some((kind.clone(), server));
+            before.due = Instant::now() + BEFORE_SAVE_WAIT;
+
+            let doc = before.doc;
+            let App { docs, lsp, .. } = self;
+            let asked = docs
+                .iter()
+                .find(|d| d.id == doc)
+                .is_some_and(|open| lsp.source_action(open, &kind, server));
+            if asked {
+                return;
+            }
+            // That server has gone, or cannot do code actions after all. Try
+            // the next question rather than waiting for an answer that is not
+            // coming.
+        }
+    }
+
+    /// One server's answer about what it would fix in the whole file.
+    ///
+    /// At most one action is taken from each answer, and then the next
+    /// question is asked afresh. Nobody is choosing between these — they are
+    /// the fixes a server is certain enough about to have called
+    /// `source.fixAll` — but they still cannot be stacked up and applied
+    /// together, because each was worked out against the file as it was.
+    fn take_source_actions(&mut self, server: ServerId, doc: DocId, version: i32, value: Value) {
+        let waiting = self
+            .before_save
+            .as_ref()
+            .is_some_and(|b| b.doc == doc && b.asking.as_ref().is_some_and(|(_, id)| *id == server));
+        if !waiting {
+            return;
+        }
+        if let Some(before) = &mut self.before_save {
+            before.asking = None;
+        }
+        // A file that moved on while the server was thinking. The edits are
+        // about text that is no longer there, so they are dropped — but the
+        // save that was waiting on them should still happen.
+        if self.doc(doc).map(|d| d.version) == Some(version)
+            && let Value::Array(actions) = value
+            && let Some(action) = actions
+                .into_iter()
+                .find(|a| a.get("title").and_then(Value::as_str).is_some())
+        {
+            self.do_code_action(server, action);
+        }
+        self.ask_next_fix();
+    }
+
+    /// What happens once the servers' own fixes are in: the formatter, and
+    /// then the file.
+    fn format_or_write(&mut self, id: DocId, format: bool, write: bool, to: Option<PathBuf>) {
+        if format && self.save_after_format.is_none() {
             let tab_width = self.config.tab_width();
-            let spaces = matches!(self.here().indent, Indent::Spaces(_));
-            let (doc, lsp) = self.doc_and_lsp();
-            if doc.path.is_some() && lsp.format(doc, tab_width, spaces).is_some() {
-                self.save_after_format = Some(id);
+            let spaces = self
+                .doc(id)
+                .is_some_and(|d| matches!(d.indent, Indent::Spaces(_)));
+            let App { docs, lsp, .. } = self;
+            if let Some(doc) = docs.iter().find(|d| d.id == id)
+                && doc.path.is_some()
+                && lsp.format(doc, tab_width, spaces).is_some()
+            {
+                if write {
+                    self.save_after_format = Some((id, to));
+                }
                 return;
             }
         }
-        self.write_now(to);
+        if write {
+            self.write_now(to);
+        }
+    }
+
+    /// A save that has been waiting too long on a server goes ahead without
+    /// it. A file you pressed Ctrl-S on is a file that gets written.
+    fn check_before_save(&mut self) {
+        let waited = self
+            .before_save
+            .as_ref()
+            .is_some_and(|b| b.asking.is_some() && b.due <= Instant::now());
+        if waited {
+            if let Some(before) = &mut self.before_save {
+                before.asking = None;
+            }
+            self.ask_next_fix();
+        }
     }
 
     fn write_now(&mut self, to: Option<PathBuf>) {
@@ -2536,6 +3032,7 @@ impl App {
         }
         let doc = self.docs.remove(from);
         self.docs.insert(to, doc);
+        self.session_changed();
         true
     }
 
@@ -2651,6 +3148,7 @@ impl App {
         let at = self.focus.min(self.panes.len() - 1);
         self.panes.insert(at + 1, copy);
         self.focus = at + 1;
+        self.session_changed();
     }
 
     fn close_pane(&mut self) {
@@ -2660,6 +3158,7 @@ impl App {
         let at = self.focus.min(self.panes.len() - 1);
         self.panes.remove(at);
         self.focus = at.min(self.panes.len() - 1);
+        self.session_changed();
     }
 
     fn focus_pane(&mut self, by: isize) {
@@ -2787,6 +3286,41 @@ impl App {
                     "trailing spaces go on save"
                 } else {
                     "trailing spaces stay"
+                }
+            }
+            "code_actions_on_save" => {
+                let on = self.config.code_actions_on_save().is_empty();
+                self.config.code_actions_on_save = Some(match on {
+                    true => vec![
+                        SOURCE_FIX_ALL.to_string(),
+                        SOURCE_ORGANIZE_IMPORTS.to_string(),
+                    ],
+                    false => Vec::new(),
+                });
+                if on {
+                    "the servers fix what they can on save"
+                } else {
+                    "the servers leave the file alone on save"
+                }
+            }
+            "restore_session" => {
+                let on = !self.config.restore_session();
+                self.config.restore_session = Some(on);
+                if on {
+                    "the tabs come back next time"
+                } else {
+                    "textfold starts empty"
+                }
+            }
+            "underline_colour" => {
+                let on = !self.config.underline_colour();
+                self.config.underline_colour = Some(if on { "on" } else { "off" }.into());
+                crate::term::set_underline_colour(on);
+                if on {
+                    "problems are underlined in colour — if the file has gone \
+                     strange, this terminal does not have it"
+                } else {
+                    "problems are underlined plainly"
                 }
             }
             _ => return,
@@ -3240,6 +3774,10 @@ impl App {
         // general. A file can have two servers attached where only one of them
         // knows what a definition is, and a row lit because *something* is
         // running is a row that does nothing when you click it.
+        //
+        // "Can anything here do this", not "can the first one" — and what is
+        // behind the row asks all of them too, so a row that is lit because
+        // the linter can do it is a row the linter answers.
         let can = |capability: &str| self.lsp.can(self.here(), capability);
         let writable = !self.here().read_only;
         let selected = !self.view().sel.primary().is_empty();
@@ -3261,7 +3799,8 @@ impl App {
                 row("Find references", Cmd::References).enabled(can("referencesProvider")),
                 row("Rename…", Cmd::Rename).enabled(can("renameProvider") && writable),
                 row("Fix it", Cmd::FixIt).enabled(self.fixes.is_some()),
-                row("What can be done here…", Cmd::CodeAction).enabled(can("codeActionProvider") && writable),
+                row("What can be done here…", Cmd::CodeAction)
+                    .enabled(can("codeActionProvider") && writable),
                 row("What is this?", Cmd::Hover).enabled(can("hoverProvider")),
                 menu::Item::divider(),
                 row("Select line", Cmd::SelectLine),
@@ -3269,6 +3808,16 @@ impl App {
                 row("Comment out", Cmd::ToggleComment).enabled(writable),
                 row("Reformat the file", Cmd::Format)
                     .enabled(can("documentFormattingProvider") && writable),
+                // Two rows rather than one, because they are two different
+                // things and a file usually wants both: the formatter lays
+                // the code out, and this is what takes the unused import
+                // away. Lit whenever anything attached to the file does code
+                // actions at all — which server has the fixes is not
+                // something a person should have to know.
+                row("Fix what can be fixed", Cmd::FixAll)
+                    .enabled(can("codeActionProvider") && writable),
+                row("Tidy the imports", Cmd::OrganizeImports)
+                    .enabled(can("codeActionProvider") && writable),
                 menu::Item::divider(),
                 row("Find this word", Cmd::FindWordUnderCursor).enabled(word || selected),
                 row("Find it in every file", Cmd::Grep),
@@ -3739,6 +4288,11 @@ impl App {
                 self.config.format_on_save(),
             ),
             setting_row(
+                "code_actions_on_save",
+                "Apply the servers' own fixes when saving",
+                !self.config.code_actions_on_save().is_empty(),
+            ),
+            setting_row(
                 "trim_trailing_whitespace",
                 "Drop trailing spaces when saving",
                 self.config.trim_trailing_whitespace(),
@@ -3748,8 +4302,90 @@ impl App {
                 "Indent new files with spaces",
                 self.config.spaces(),
             ),
+            setting_row(
+                "restore_session",
+                "Open the same files again next time",
+                self.config.restore_session(),
+            ),
+            setting_row(
+                "underline_colour",
+                "Colour the underline under a problem",
+                self.config.underline_colour(),
+            ),
         ];
         self.overlay = Overlay::Picker(Picker::new(Kind::Settings, rows));
+    }
+
+    /// Every language and language server there is, and which are on.
+    ///
+    /// One list rather than two, with the servers under the plugin that brings
+    /// them: what you want to switch off is nearly always one server, and
+    /// finding it means finding its language first.
+    fn open_plugins_picker(&mut self) {
+        let mut rows = Vec::new();
+        for plugin in crate::plugin::all() {
+            let on = crate::plugin::is_on(&plugin.id);
+            rows.push(
+                Row::new(plugin.name.clone(), Choice::Plugin(plugin.id.clone()))
+                    .detail(format!("{} — {}", plugin.id, plugin.detail()))
+                    .tag(if on { "on" } else { "off" }),
+            );
+            for server in &plugin.servers {
+                // Off with its plugin, and said so, rather than shown as on
+                // and quietly doing nothing.
+                let running = on && crate::plugin::is_on(&server.id);
+                rows.push(
+                    Row::new(
+                        format!("  {}", server.name),
+                        Choice::Plugin(server.id.clone()),
+                    )
+                    .detail(match plugin.languages.len() > 1 {
+                        // Which of the plugin's languages it is for, where
+                        // that is a question at all.
+                        true => format!(
+                            "{} — runs {} for {}",
+                            server.id, server.command, server.language
+                        ),
+                        false => format!("{} — runs {}", server.id, server.command),
+                    })
+                    .tag(if running { "on" } else { "off" }),
+                );
+            }
+        }
+        self.overlay = Overlay::Picker(Picker::new(Kind::Plugins, rows));
+    }
+
+    /// Turn a plugin or one of its servers on or off, and mean it now.
+    ///
+    /// Everything downstream is built from the plugins rather than checking
+    /// them as it goes, so the way to change one's mind is to build it all
+    /// again: the language table, and then the servers, which are stopped and
+    /// started so that a linter you have just switched off stops sending
+    /// diagnostics rather than leaving its last ones on the screen.
+    fn toggle_plugin(&mut self, id: &str) {
+        let on = !crate::plugin::is_on(id);
+        if on && let Some((plugin, _)) = id.split_once('/') && !crate::plugin::is_on(plugin) {
+            // Switching on a server whose plugin is off would look like
+            // nothing happening, so switch the plugin on with it.
+            crate::plugin::set(plugin, true, &mut self.config.plugins);
+        }
+        crate::plugin::set(id, on, &mut self.config.plugins);
+        self.remember_settings();
+
+        crate::lang::rebuild();
+        for doc in &mut self.docs {
+            doc.redetect_language();
+        }
+        self.lsp.restart();
+        let docs: Vec<DocId> = self.docs.iter().map(|d| d.id).collect();
+        for doc in docs {
+            self.lsp_open(doc);
+        }
+
+        let name = crate::plugin::find(id)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| id.to_string());
+        self.say(format!("{name}: {}", if on { "on" } else { "off" }));
     }
 
     /// The Python environments this project could be using.
@@ -3980,7 +4616,7 @@ impl App {
         let kind = picker.kind;
         // A settings list stays open, because changing one setting usually
         // means changing another.
-        if !matches!(kind, Kind::Settings) {
+        if !matches!(kind, Kind::Settings | Kind::Plugins) {
             self.overlay = Overlay::None;
         }
 
@@ -4024,23 +4660,55 @@ impl App {
             Choice::Environment(root) => self.use_environment(&root),
             Choice::Setting(which) => {
                 self.toggle_setting(which);
-                // Redraw the list so the ticks are right.
-                let scroll = match &self.overlay {
-                    Overlay::Picker(p) => Some((p.cursor, p.query.clone())),
-                    _ => None,
-                };
-                self.open_settings_picker();
-                if let (Overlay::Picker(picker), Some((cursor, query))) =
-                    (&mut self.overlay, scroll)
-                {
-                    for c in query.chars() {
-                        picker.type_char(c);
-                    }
-                    picker.select(cursor);
-                }
+                self.redraw_list(Self::open_settings_picker);
+            }
+            Choice::Plugin(id) => {
+                self.toggle_plugin(&id);
+                self.redraw_list(Self::open_plugins_picker);
             }
         }
     }
+
+    /// Build a list again, keeping what was typed into it and where you were.
+    ///
+    /// For the two lists you change things from rather than choose out of:
+    /// the ticks have to be right afterwards, and closing the list to say so
+    /// would mean opening it again for every switch you threw.
+    fn redraw_list(&mut self, again: fn(&mut Self)) {
+        let held = match &self.overlay {
+            Overlay::Picker(p) => Some((p.cursor, p.query.clone())),
+            _ => None,
+        };
+        again(self);
+        if let (Overlay::Picker(picker), Some((cursor, query))) = (&mut self.overlay, held) {
+            for c in query.chars() {
+                picker.type_char(c);
+            }
+            picker.select(cursor);
+        }
+    }
+}
+
+/// Code actions as rows, tagged with what kind of thing each is and, where
+/// more than one server is offering, which one said so. Two servers with a
+/// fix each for the same line is the ordinary case for Python, and "which of
+/// these came from the linter" is the question you are actually asking.
+fn action_rows(offered: &[(ServerId, Value)]) -> Vec<Row> {
+    let several = offered.iter().map(|(id, _)| *id).collect::<HashSet<_>>().len() > 1;
+    offered
+        .iter()
+        .filter_map(|(id, item)| {
+            let title = item.get("title").and_then(Value::as_str)?;
+            let mut row = Row::new(title.to_string(), Choice::Action(*id, Box::new(item.clone())));
+            if let Some(kind) = item.get("kind").and_then(Value::as_str) {
+                row = row.tag(kind.split('.').next_back().unwrap_or(kind).to_string());
+            }
+            if several {
+                row = row.detail(format!("server {}", id.0 + 1));
+            }
+            Some(row)
+        })
+        .collect()
 }
 
 fn setting_row(key: &'static str, about: &str, on: bool) -> Row {
@@ -4649,10 +5317,13 @@ impl App {
 
     fn ask_code_actions(&mut self) {
         let range = self.view().sel.primary();
+        let id = self.view().doc;
         let (doc, lsp) = self.doc_and_lsp();
-        if lsp.code_actions(doc, range).is_none() {
-            self.say("no language server with anything to offer");
+        let asked = lsp.code_actions(doc, range);
+        if asked.is_empty() {
+            return self.say("no language server with anything to offer");
         }
+        self.offer = Some(Gathered::new(id, range.start(), asked));
     }
 
     fn format(&mut self) {
@@ -5048,7 +5719,10 @@ impl App {
                 }
             }
             Ask::Format { doc, version } => self.take_format(doc, version, value),
-            Ask::CodeActions => self.take_code_actions(id, value),
+            Ask::CodeActions { doc, at } => self.take_code_actions(id, doc, at, value),
+            Ask::SourceActions { doc, version } => {
+                self.take_source_actions(id, doc, version, value)
+            }
             Ask::QuickFixes { doc, at } => self.take_quick_fixes(id, doc, at, value),
             Ask::ClassFile { uri, line, column } => self.take_class_file(uri, line, column, value),
             Ask::Signature { doc, at } => self.take_signature(doc, at, value),
@@ -5487,13 +6161,21 @@ impl App {
     }
 
     fn take_format(&mut self, doc: DocId, version: i32, value: Value) {
-        let waiting = self.save_after_format.take() == Some(doc);
+        let waiting = match self.save_after_format.take() {
+            Some((id, to)) if id == doc => Some(to),
+            // Somebody else's, or nobody's: put it back rather than losing a
+            // save that was waiting on a different buffer.
+            other => {
+                self.save_after_format = other;
+                None
+            }
+        };
         if self.doc(doc).map(|d| d.version) != Some(version) {
             // The file moved on while the formatter was thinking. Applying
             // these edits now would scramble it — but a save that was waiting
             // on them should still happen, or Ctrl-S would have done nothing.
-            if waiting {
-                self.write_now(None);
+            if let Some(to) = waiting {
+                self.write_now(to);
             }
             return;
         }
@@ -5501,34 +6183,74 @@ impl App {
             Value::Array(edits) => self.apply_edits_to(doc, edits),
             _ => 0,
         };
-        if waiting {
-            self.write_now(None);
-        } else if count > 0 {
-            self.say_good("formatted");
+        match waiting {
+            Some(to) => self.write_now(to),
+            None if count > 0 => self.say_good("formatted"),
+            None => {}
         }
     }
 
-    fn take_code_actions(&mut self, id: ServerId, value: Value) {
-        let Value::Array(items) = &value else {
-            return self.say("nothing to offer here");
+    /// One server's answer to "what can be done here", added to whatever the
+    /// others have said.
+    ///
+    /// The list opens on the first answer and grows as the rest arrive, rather
+    /// than waiting for the slowest server. Waiting would be the tidier
+    /// listing and the worse editor: `ruff` answers in a few milliseconds and
+    /// `pyright` can take a second, and a menu that appears a second after you
+    /// asked for it is a menu you have already given up on.
+    fn take_code_actions(&mut self, id: ServerId, doc: DocId, at: usize, value: Value) {
+        let Some(offer) = self.offer.as_mut().filter(|g| g.doc == doc && g.at == at) else {
+            return;
         };
-        if items.is_empty() {
-            return self.say("nothing to offer here");
+        offer.take(id, value);
+        let (settled, empty) = (offer.settled(), offer.is_empty());
+        if empty {
+            if settled {
+                self.offer = None;
+                // Only once everybody has been heard from. Saying it on the
+                // first empty answer would put "nothing to offer here" on the
+                // screen a moment before the list arrived.
+                self.say("nothing to offer here");
+            }
+            return;
         }
-        let rows: Vec<Row> = items
-            .iter()
-            .filter_map(|item| {
-                let title = item.get("title").and_then(Value::as_str)?;
-                let mut row = Row::new(
-                    title.to_string(),
-                    Choice::Action(id, Box::new(item.clone())),
-                );
-                if let Some(kind) = item.get("kind").and_then(Value::as_str) {
-                    row = row.tag(kind.split('.').next_back().unwrap_or(kind).to_string());
-                }
-                Some(row)
+        let offered: Vec<(ServerId, Value)> = self
+            .offer
+            .as_ref()
+            .map(|g| {
+                g.actions()
+                    .into_iter()
+                    .map(|(id, a)| (id, a.clone()))
+                    .collect()
             })
-            .collect();
+            .unwrap_or_default();
+        let first_time = self.offer.as_ref().is_some_and(|g| !g.shown);
+        match &mut self.overlay {
+            // Already open and still the same list: fill it in where it
+            // stands, keeping whatever has been typed into it.
+            Overlay::Picker(picker) if picker.kind == Kind::Actions => {
+                picker.set_rows(action_rows(&offered));
+            }
+            // Nothing in the way, and this is the first thing to arrive.
+            Overlay::None if first_time => {
+                self.show_actions(offered);
+                if let Some(offer) = &mut self.offer {
+                    offer.shown = true;
+                }
+            }
+            // Something else is on the screen, or the list has been closed
+            // again. Whoever asked has moved on, and a late answer is not
+            // worth taking the screen away from what they are doing now.
+            _ => {}
+        }
+        if settled {
+            self.offer = None;
+        }
+    }
+
+    /// Put a set of code actions up as a list to choose from.
+    fn show_actions(&mut self, offered: Vec<(ServerId, Value)>) {
+        let rows = action_rows(&offered);
         if rows.is_empty() {
             return self.say("nothing to offer here");
         }
@@ -6887,6 +7609,222 @@ mod tests {
         app.suggest_for_test(at, incomplete, items);
     }
 
+    fn offered(title: &str, kind: &str) -> Value {
+        serde_json::json!({ "title": title, "kind": kind })
+    }
+
+    #[test]
+    fn what_two_servers_offer_ends_up_in_one_list() {
+        // Which is the whole of the Python case: `ruff` knows how to take the
+        // unused import out, `pyright` knows where the missing one lives, and
+        // asking only whichever answers first gets you one of those.
+        let (linter, checker) = (ServerId(0), ServerId(1));
+        let mut gathered = Gathered::new(DocId(1), 12, vec![linter, checker]);
+        assert!(!gathered.settled(), "nobody has answered yet");
+
+        gathered.take(linter, serde_json::json!([offered("Remove unused import", "quickfix")]));
+        assert!(!gathered.settled(), "the other one is still thinking");
+        assert_eq!(gathered.len(), 1);
+
+        gathered.take(checker, serde_json::json!([offered("Add import os", "quickfix")]));
+        assert!(gathered.settled());
+        let titles: Vec<&str> = gathered
+            .actions()
+            .iter()
+            .filter_map(|(_, a)| a.get("title").and_then(Value::as_str))
+            .collect();
+        assert_eq!(titles, ["Remove unused import", "Add import os"]);
+        // And each row still knows who to send the choice back to.
+        assert_eq!(gathered.actions()[0].0, linter);
+        assert_eq!(gathered.actions()[1].0, checker);
+    }
+
+    #[test]
+    fn a_server_answering_twice_replaces_its_own_and_leaves_the_rest() {
+        let (linter, checker) = (ServerId(0), ServerId(1));
+        let mut gathered = Gathered::new(DocId(1), 0, vec![linter, checker]);
+        gathered.take(linter, serde_json::json!([offered("First go", "quickfix")]));
+        gathered.take(checker, serde_json::json!([offered("From the checker", "quickfix")]));
+        gathered.take(linter, serde_json::json!([offered("Second go", "quickfix")]));
+        let titles: Vec<&str> = gathered
+            .actions()
+            .iter()
+            .filter_map(|(_, a)| a.get("title").and_then(Value::as_str))
+            .collect();
+        assert_eq!(titles, ["Second go", "From the checker"]);
+    }
+
+    #[test]
+    fn a_server_with_nothing_to_say_does_not_hold_the_list_up() {
+        let (quiet, useful) = (ServerId(0), ServerId(1));
+        let mut gathered = Gathered::new(DocId(1), 0, vec![quiet, useful]);
+        gathered.take(quiet, Value::Null);
+        assert!(gathered.is_empty());
+        assert!(!gathered.settled());
+        gathered.take(useful, serde_json::json!([offered("Fix it", "quickfix")]));
+        assert!(gathered.settled());
+        assert_eq!(gathered.len(), 1);
+        assert_eq!(gathered.headline(), Some("Fix it"));
+    }
+
+    #[test]
+    fn every_row_says_which_server_offered_it_when_two_did() {
+        let both = vec![
+            (ServerId(0), offered("From the linter", "quickfix")),
+            (ServerId(1), offered("From the checker", "quickfix")),
+        ];
+        let rows = action_rows(&both);
+        assert!(rows.iter().all(|r| r.detail.is_some()), "{rows:?}");
+        // One server offering two things needs no such note: there is nothing
+        // to tell apart.
+        let one = vec![
+            (ServerId(0), offered("A", "quickfix")),
+            (ServerId(0), offered("B", "quickfix")),
+        ];
+        let rows = action_rows(&one);
+        assert!(rows.iter().all(|r| r.detail.is_none()));
+        assert_eq!(rows[0].tag.as_deref(), Some("quickfix"));
+    }
+
+    #[test]
+    fn what_is_open_and_where_you_are_in_it_is_what_gets_written_down() {
+        let (mut app, _rx) = editor();
+        let one = scratch("session-one.rs");
+        let two = scratch("session-two.rs");
+        std::fs::write(&one, "fn a() {}\nfn b() {}\n").unwrap();
+        std::fs::write(&two, "// notes\n").unwrap();
+        app.open_path(&one);
+        app.open_path(&two);
+        // Back to the first, and down a line in it.
+        let first = app.docs[0].id;
+        app.show(first);
+        app.go_to(1, 3);
+
+        let session = app.session();
+        let paths: Vec<&std::path::Path> =
+            session.tabs.iter().map(|t| t.path.as_path()).collect();
+        assert_eq!(paths, [one.as_path(), two.as_path()], "tab order");
+        assert_eq!((session.tabs[0].line, session.tabs[0].column), (1, 3));
+        // One pane, showing the file it is showing.
+        assert_eq!(session.panes.len(), 1);
+        assert_eq!(session.panes[0].tab, 0);
+        std::fs::remove_file(&one).ok();
+        std::fs::remove_file(&two).ok();
+    }
+
+    #[test]
+    fn a_session_opens_the_tabs_again_where_they_were() {
+        let one = scratch("restore-one.rs");
+        let two = scratch("restore-two.rs");
+        std::fs::write(&one, "a\nb\nc\nd\n").unwrap();
+        std::fs::write(&two, "x\ny\n").unwrap();
+
+        let (mut app, _rx) = editor();
+        let session = crate::session::Session {
+            tabs: vec![
+                crate::session::Tab {
+                    path: one.clone(),
+                    line: 2,
+                    column: 0,
+                },
+                crate::session::Tab {
+                    path: two.clone(),
+                    line: 1,
+                    column: 1,
+                },
+            ],
+            panes: Vec::new(),
+            focus: 0,
+            side_by_side: true,
+            at: 0,
+        };
+        assert_eq!(app.apply_session(&session, false), 2);
+
+        let names: Vec<&str> = app.docs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["restore-one.rs", "restore-two.rs"]);
+        // The last one opened is the one you are looking at, and it is where
+        // it was left.
+        assert_eq!(app.here().name, "restore-two.rs");
+        assert_eq!(app.here().point_at_char(app.view().cursor()), (1, 1));
+        // And the one behind it kept its own place, which is the whole point
+        // of writing a line down per tab rather than one for the session.
+        let first = app.docs[0].id;
+        app.show(first);
+        assert_eq!(app.here().point_at_char(app.view().cursor()), (2, 0));
+
+        std::fs::remove_file(&one).ok();
+        std::fs::remove_file(&two).ok();
+    }
+
+    #[test]
+    fn a_file_that_has_gone_since_is_skipped_rather_than_made_again() {
+        let here = scratch("restore-here.rs");
+        std::fs::write(&here, "still here\n").unwrap();
+        let gone = scratch("restore-gone.rs");
+        std::fs::remove_file(&gone).ok();
+
+        let (mut app, _rx) = editor();
+        let session = crate::session::Session {
+            tabs: vec![
+                crate::session::Tab {
+                    path: gone.clone(),
+                    line: 0,
+                    column: 0,
+                },
+                crate::session::Tab {
+                    path: here.clone(),
+                    line: 0,
+                    column: 0,
+                },
+            ],
+            ..crate::session::Session::default()
+        };
+        assert_eq!(app.apply_session(&session, false), 1);
+        let names: Vec<&str> = app.docs.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["restore-here.rs"]);
+        std::fs::remove_file(&here).ok();
+    }
+
+    #[test]
+    fn the_panes_come_back_as_they_were() {
+        let one = scratch("panes-one.rs");
+        let two = scratch("panes-two.rs");
+        std::fs::write(&one, "a\n").unwrap();
+        std::fs::write(&two, "b\n").unwrap();
+
+        let (mut app, _rx) = editor();
+        let session = crate::session::Session {
+            tabs: vec![
+                crate::session::Tab {
+                    path: one.clone(),
+                    line: 0,
+                    column: 0,
+                },
+                crate::session::Tab {
+                    path: two.clone(),
+                    line: 0,
+                    column: 0,
+                },
+            ],
+            panes: vec![
+                crate::session::Pane { tab: 1, wrap: false },
+                crate::session::Pane { tab: 0, wrap: true },
+            ],
+            focus: 1,
+            side_by_side: false,
+            at: 0,
+        };
+        app.apply_session(&session, false);
+        assert_eq!(app.panes.len(), 2);
+        assert_eq!(app.doc(app.panes[0].doc).map(|d| d.name.clone()).unwrap(), "panes-two.rs");
+        assert_eq!(app.doc(app.panes[1].doc).map(|d| d.name.clone()).unwrap(), "panes-one.rs");
+        assert!(app.panes[1].wrap, "the pane's own folding came back");
+        assert_eq!(app.focus, 1);
+        assert!(!app.side_by_side);
+        std::fs::remove_file(&one).ok();
+        std::fs::remove_file(&two).ok();
+    }
+
     #[test]
     fn a_name_the_file_has_not_imported_shows_where_it_comes_from() {
         // What rust-analyzer sends for a name you have not imported: the
@@ -7496,6 +8434,7 @@ mod tests {
             message: "cannot find value `x` in this scope".into(),
             source: Some("rustc".into()),
             code: Some("E0425".into()),
+            data: None,
             server: 0,
         }];
         let said: Vec<String> = app
@@ -7526,6 +8465,7 @@ mod tests {
             message: message.into(),
             source: None,
             code: None,
+            data: None,
             server: 0,
         };
         app.here_mut().diagnostics = vec![
@@ -7553,6 +8493,7 @@ mod tests {
             message: "x is never read".into(),
             source: Some("clippy".into()),
             code: None,
+            data: None,
             server: 0,
         }];
         app.ask_hover(4);

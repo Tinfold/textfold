@@ -1,0 +1,44 @@
+{
+  "id": "bash",
+  "name": "Shell",
+  "about": "Colours, and bash-language-server",
+  "languages": {
+    "bash": {
+      "extensions": [
+        "sh",
+        "bash",
+        "zsh",
+        "ksh",
+        "bashrc",
+        "zshrc",
+        "profile"
+      ],
+      "filenames": [
+        ".bashrc",
+        ".bash_profile",
+        ".zshrc",
+        ".profile",
+        ".envrc"
+      ],
+      "shebangs": [
+        "sh",
+        "bash",
+        "zsh",
+        "dash"
+      ],
+      "line_comment": "#",
+      "grammar": {
+        "built_in": "bash"
+      },
+      "servers": [
+        {
+          "name": "bash-language-server",
+          "command": "bash-language-server",
+          "args": [
+            "start"
+          ]
+        }
+      ]
+    }
+  }
+}

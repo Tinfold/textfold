@@ -1,0 +1,36 @@
+{
+  "id": "cpp",
+  "name": "C++",
+  "about": "Colours, and clangd",
+  "languages": {
+    "cpp": {
+      "extensions": [
+        "cc",
+        "cpp",
+        "cxx",
+        "hpp",
+        "hh",
+        "hxx"
+      ],
+      "line_comment": "//",
+      "block_comment": [
+        "/*",
+        "*/"
+      ],
+      "grammar": {
+        "built_in": "c"
+      },
+      "servers": [
+        {
+          "name": "clangd",
+          "command": "clangd",
+          "roots": [
+            "compile_commands.json",
+            "compile_flags.txt",
+            ".git"
+          ]
+        }
+      ]
+    }
+  }
+}

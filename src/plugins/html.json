@@ -1,0 +1,30 @@
+{
+  "id": "html",
+  "name": "HTML",
+  "about": "Colours, and the server VS Code ships",
+  "languages": {
+    "html": {
+      "extensions": [
+        "html",
+        "htm",
+        "xhtml"
+      ],
+      "block_comment": [
+        "<!--",
+        "-->"
+      ],
+      "grammar": {
+        "built_in": "html"
+      },
+      "servers": [
+        {
+          "name": "html-language-server",
+          "command": "vscode-html-language-server",
+          "args": [
+            "--stdio"
+          ]
+        }
+      ]
+    }
+  }
+}

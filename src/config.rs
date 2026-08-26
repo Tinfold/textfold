@@ -59,6 +59,18 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format_on_save: Option<bool>,
 
+    /// Which of a language server's own fixes to apply when you save:
+    /// `["source.fixAll", "source.organizeImports"]`.
+    ///
+    /// Absent means none, which is the safe default for a setting that lets
+    /// something else rewrite your file. This is the half of "tidy this up"
+    /// that formatting is not — a formatter lays code out, and it is
+    /// `source.fixAll` that takes the unused import away. Every server
+    /// attached to the file is asked, so on a Python file this is what gets
+    /// ruff's fixes in as well as pyright's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_actions_on_save: Option<Vec<String>>,
+
     /// Whether to drop trailing spaces from lines when you save.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trim_trailing_whitespace: Option<bool>,
@@ -82,6 +94,13 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reload_on_change: Option<bool>,
 
+    /// Whether the files open when you leave are opened again when you come
+    /// back to the same directory. Absent means they are — but only where
+    /// textfold was started with nothing named on the command line, since
+    /// naming a file is saying what you want open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restore_session: Option<bool>,
+
     /// Whether the mouse is captured at all. Off hands clicks and drags back
     /// to the terminal, which is what you want if you select text with it to
     /// copy into something else.
@@ -96,6 +115,18 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub show_whitespace: Option<bool>,
 
+    /// Whether to paint the underline under a problem in the colour of how
+    /// bad it is: `"auto"`, `"on"`, or `"off"`.
+    ///
+    /// Absent means auto, which asks it only of the terminals known to
+    /// understand the sequence. This is not fussiness about a colour. A
+    /// terminal that has never heard of it reads the colour as four more
+    /// instructions and turns your file dim, italic, and in places invisible
+    /// — see [`crate::term::understands_underline_colour`]. Say `"on"` if
+    /// your terminal does have it and textfold has not worked that out.
+    #[serde(default, alias = "underline_color", skip_serializing_if = "Option::is_none")]
+    pub underline_colour: Option<String>,
+
     /// Whether to try the terminal's extended keyboard protocol, which is
     /// what makes Ctrl-Shift-something and a released key distinguishable.
     /// Absent means try it; terminals that do not have it are unaffected.
@@ -109,6 +140,15 @@ pub struct Config {
     /// for the project that has three, where only you know which.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub python_environments: BTreeMap<String, String>,
+
+    /// Which plugins and language servers are off, by id: `"python/ruff":
+    /// false`. Anything not named here is on.
+    ///
+    /// Written from the `plugins` list rather than by hand, usually. Turning
+    /// off a plugin turns off the servers inside it, so `"python": false` is
+    /// enough to say "leave Python alone entirely".
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub plugins: BTreeMap<String, bool>,
 
     /// Keys of your own, by what they do: `"save": ["ctrl-s", "f2"]`.
     ///
@@ -163,6 +203,14 @@ impl Config {
         Ok(())
     }
 
+    /// Whether there is a real place on disk behind these settings.
+    ///
+    /// False in the tests, which is what keeps a test run from writing over
+    /// the sessions and settings of whoever is running it.
+    pub fn is_stored(&self) -> bool {
+        self.path.is_some()
+    }
+
     /// The theme asked for, as written. Whether there is a file of that name
     /// is [`Themes`](crate::theme::Themes)' business: a theme you have set is
     /// a theme you have set, even on a machine where its file is not copied.
@@ -213,6 +261,11 @@ impl Config {
         self.format_on_save.unwrap_or(false)
     }
 
+    /// The server-side fixes to apply on save. Empty means none.
+    pub fn code_actions_on_save(&self) -> &[String] {
+        self.code_actions_on_save.as_deref().unwrap_or(&[])
+    }
+
     pub fn trim_trailing_whitespace(&self) -> bool {
         self.trim_trailing_whitespace.unwrap_or(false)
     }
@@ -233,6 +286,10 @@ impl Config {
         self.mouse.unwrap_or(true)
     }
 
+    pub fn restore_session(&self) -> bool {
+        self.restore_session.unwrap_or(true)
+    }
+
     pub fn reload_on_change(&self) -> bool {
         self.reload_on_change.unwrap_or(true)
     }
@@ -243,6 +300,20 @@ impl Config {
 
     pub fn enhanced_keys(&self) -> bool {
         self.enhanced_keys.unwrap_or(true)
+    }
+
+    /// Whether a problem's underline is drawn in the colour of how bad it is.
+    pub fn underline_colour(&self) -> bool {
+        match self
+            .underline_colour
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("auto")
+        {
+            "on" | "yes" | "true" | "always" => true,
+            "off" | "no" | "false" | "never" => false,
+            _ => crate::term::understands_underline_colour(),
+        }
     }
 
     pub fn rulers(&self) -> &[usize] {

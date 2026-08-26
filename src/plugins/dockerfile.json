@@ -1,0 +1,26 @@
+{
+  "id": "dockerfile",
+  "name": "Dockerfile",
+  "about": "docker-langserver",
+  "languages": {
+    "dockerfile": {
+      "filenames": [
+        "Dockerfile",
+        "Containerfile"
+      ],
+      "extensions": [
+        "dockerfile"
+      ],
+      "line_comment": "#",
+      "servers": [
+        {
+          "name": "docker-langserver",
+          "command": "docker-langserver",
+          "args": [
+            "--stdio"
+          ]
+        }
+      ]
+    }
+  }
+}

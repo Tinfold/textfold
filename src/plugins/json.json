@@ -1,0 +1,27 @@
+{
+  "id": "json",
+  "name": "JSON",
+  "about": "Colours, and the schema-aware server VS Code ships",
+  "languages": {
+    "json": {
+      "extensions": [
+        "json",
+        "jsonc",
+        "json5"
+      ],
+      "line_comment": "//",
+      "grammar": {
+        "built_in": "json"
+      },
+      "servers": [
+        {
+          "name": "json-language-server",
+          "command": "vscode-json-language-server",
+          "args": [
+            "--stdio"
+          ]
+        }
+      ]
+    }
+  }
+}

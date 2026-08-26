@@ -1,0 +1,32 @@
+{
+  "id": "c",
+  "name": "C",
+  "about": "Colours, and clangd",
+  "languages": {
+    "c": {
+      "extensions": [
+        "c",
+        "h"
+      ],
+      "line_comment": "//",
+      "block_comment": [
+        "/*",
+        "*/"
+      ],
+      "grammar": {
+        "built_in": "c"
+      },
+      "servers": [
+        {
+          "name": "clangd",
+          "command": "clangd",
+          "roots": [
+            "compile_commands.json",
+            "compile_flags.txt",
+            ".git"
+          ]
+        }
+      ]
+    }
+  }
+}

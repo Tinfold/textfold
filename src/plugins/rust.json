@@ -1,0 +1,68 @@
+{
+  "id": "rust",
+  "name": "Rust",
+  "about": "Colours, and rust-analyzer for everything else",
+  "languages": {
+    "rust": {
+      "extensions": [
+        "rs"
+      ],
+      "line_comment": "//",
+      "block_comment": [
+        "/*",
+        "*/"
+      ],
+      "grammar": {
+        "built_in": "rust"
+      },
+      "servers": [
+        {
+          "name": "rust-analyzer",
+          "command": "rust-analyzer",
+          "roots": [
+            "Cargo.toml",
+            "rust-project.json",
+            ".git"
+          ],
+          "settings": {
+            "rust-analyzer": {
+              "check": {
+                "command": "clippy"
+              },
+              "cargo": {
+                "features": "all"
+              },
+              "completion": {
+                "callable": {
+                  "snippets": "fill_arguments"
+                },
+                "postfix": {
+                  "enable": true
+                }
+              },
+              "inlayHints": {
+                "typeHints": {
+                  "enable": true
+                },
+                "parameterHints": {
+                  "enable": true
+                }
+              },
+              "procMacro": {
+                "enable": true
+              },
+              "workspace": {
+                "symbol": {
+                  "search": {
+                    "scope": "workspace_and_dependencies",
+                    "kind": "all_symbols"
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

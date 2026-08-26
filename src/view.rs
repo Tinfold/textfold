@@ -115,6 +115,16 @@ impl View {
         self.spots.insert(self.doc, spot);
     }
 
+    /// Where this pane was in a file, as a character index — now, if it is the
+    /// one showing, and otherwise wherever it last was. `None` for a file this
+    /// pane has never shown.
+    pub fn place_in(&self, doc: DocId) -> Option<usize> {
+        if self.doc == doc {
+            return Some(self.cursor());
+        }
+        self.spots.get(&doc).map(|spot| spot.sel.primary().head)
+    }
+
     /// Forget a file, because it has been closed. Otherwise a document id that
     /// came round again would be met with somebody else's scroll position.
     pub fn forget(&mut self, doc: DocId) {

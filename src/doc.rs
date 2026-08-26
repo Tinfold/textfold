@@ -168,6 +168,10 @@ pub struct Document {
     /// What to call it in a tab: the file name, or `untitled 2`.
     pub name: String,
     pub language: LangId,
+    /// Whether somebody said what language this is, rather than it being
+    /// worked out from the name. A choice made by hand outlives a plugin
+    /// being switched on or off; a guess is made again.
+    pub language_chosen: bool,
     /// Whether the file on disk uses `\r\n`. The rope never does; this is
     /// remembered only so that saving does not quietly rewrite every line of
     /// somebody's file.
@@ -240,6 +244,16 @@ pub struct Diagnostic {
     /// servers are running and only one of them is complaining.
     pub source: Option<String>,
     pub code: Option<String>,
+    /// Whatever the server hung off it, kept exactly as it arrived and handed
+    /// straight back when we ask what can be done about this problem.
+    ///
+    /// It is opaque to us and it is not optional. `ruff` puts the fix itself
+    /// in here — the edit that removes the unused import — and matches a code
+    /// action request to a problem by what comes back in this field. Dropping
+    /// it does not lose a detail: it loses every quick fix that server has,
+    /// which looks from the outside like a linter that complains and offers
+    /// nothing.
+    pub data: Option<serde_json::Value>,
     /// Which server it came from, so a fresh set from one replaces only its
     /// own findings.
     pub server: usize,
@@ -360,6 +374,7 @@ impl Document {
             path: None,
             name,
             language: LangId::PLAIN,
+            language_chosen: false,
             crlf: false,
             had_final_newline: true,
             indent,
@@ -417,6 +432,7 @@ impl Document {
 
         let mut doc = Self {
             id,
+            language_chosen: false,
             rope,
             path: Some(path),
             name,
@@ -772,7 +788,33 @@ impl Document {
     /// Say what language this file is, and colour it accordingly.
     pub fn set_language(&mut self, language: LangId) {
         self.language = language;
+        self.language_chosen = true;
         self.reparse();
+    }
+
+    /// Work out the language again, for after the plugins have changed under
+    /// us. A language somebody chose by hand is left alone.
+    pub fn redetect_language(&mut self) {
+        let (Some(path), false) = (self.path.clone(), self.language_chosen) else {
+            return;
+        };
+        let found = crate::lang::detect(&path, &self.rope);
+        if found != self.language {
+            self.language = found;
+        }
+        // Even where it did not change, the grammar behind it may have: a
+        // plugin switched off takes the colours with it.
+        self.reparse();
+    }
+
+    /// Which line and column a character index is on, counted the way a person
+    /// counts from zero. What a session writes down, because a line number
+    /// still means something after the file has been edited by something else
+    /// and a character offset does not.
+    pub fn point_at_char(&self, at: usize) -> (usize, usize) {
+        let at = at.min(self.rope.len_chars());
+        let line = self.rope.char_to_line(at);
+        (line, at - self.rope.line_to_char(line))
     }
 
     /// Row and byte column, which is what tree-sitter counts in.

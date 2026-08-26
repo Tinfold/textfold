@@ -1,0 +1,29 @@
+{
+  "id": "toml",
+  "name": "TOML",
+  "about": "Colours, and taplo",
+  "languages": {
+    "toml": {
+      "extensions": [
+        "toml"
+      ],
+      "filenames": [
+        "Cargo.lock"
+      ],
+      "line_comment": "#",
+      "grammar": {
+        "built_in": "toml"
+      },
+      "servers": [
+        {
+          "name": "taplo",
+          "command": "taplo",
+          "args": [
+            "lsp",
+            "stdio"
+          ]
+        }
+      ]
+    }
+  }
+}

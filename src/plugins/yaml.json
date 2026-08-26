@@ -1,0 +1,26 @@
+{
+  "id": "yaml",
+  "name": "YAML",
+  "about": "Colours, and yaml-language-server",
+  "languages": {
+    "yaml": {
+      "extensions": [
+        "yaml",
+        "yml"
+      ],
+      "line_comment": "#",
+      "grammar": {
+        "built_in": "yaml"
+      },
+      "servers": [
+        {
+          "name": "yaml-language-server",
+          "command": "yaml-language-server",
+          "args": [
+            "--stdio"
+          ]
+        }
+      ]
+    }
+  }
+}

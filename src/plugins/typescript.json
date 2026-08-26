@@ -1,0 +1,36 @@
+{
+  "id": "typescript",
+  "name": "TypeScript",
+  "about": "Colours, and the TypeScript server",
+  "languages": {
+    "typescript": {
+      "extensions": [
+        "ts",
+        "mts",
+        "cts"
+      ],
+      "line_comment": "//",
+      "block_comment": [
+        "/*",
+        "*/"
+      ],
+      "grammar": {
+        "built_in": "typescript"
+      },
+      "servers": [
+        {
+          "name": "tsserver",
+          "command": "typescript-language-server",
+          "args": [
+            "--stdio"
+          ],
+          "roots": [
+            "package.json",
+            "tsconfig.json",
+            ".git"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "id": "go",
+  "name": "Go",
+  "about": "Colours, and gopls",
+  "languages": {
+    "go": {
+      "extensions": [
+        "go"
+      ],
+      "line_comment": "//",
+      "block_comment": [
+        "/*",
+        "*/"
+      ],
+      "grammar": {
+        "built_in": "go"
+      },
+      "servers": [
+        {
+          "name": "gopls",
+          "command": "gopls",
+          "roots": [
+            "go.mod",
+            "go.work",
+            ".git"
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -191,7 +191,10 @@ commands! {
     Rename => "rename", Code, "Rename this everywhere it appears";
     CodeAction => "code-action", Code, "What the language server offers to do about this";
     FixIt => "fix-it", Code, "Do the obvious thing about the problem here: add the import, fix the typo";
+    FixAll => "fix-all", Code, "Apply every fix the servers would make to this file on their own";
+    OrganizeImports => "organize-imports", Code, "Put this file's imports in order and drop the unused ones";
     Format => "format", Code, "Reformat the file";
+    FormatAndFix => "format-and-fix", Code, "Reformat the file and apply the servers' own fixes";
     Symbols => "symbols", Code, "Pick from what this file defines";
     WorkspaceSymbols => "workspace-symbols", Code, "Pick from what the project defines";
     Diagnostics => "diagnostics", Code, "Pick from the problems found";
@@ -220,6 +223,8 @@ commands! {
     ToggleMouse => "toggle-mouse", View, "Let the terminal have the mouse back";
     SetLanguage => "set-language", View, "Say what language this file is";
     Settings => "settings", View, "Change a setting, and keep it";
+    RestoreSession => "restore-session", View, "Open again the files that were open here last time";
+    Plugins => "plugins", View, "Turn languages and language servers on or off";
 
     // ---- Getting out of things ----
     ContextMenu => "context-menu", Edit, "What can be done where the cursor is";
@@ -262,6 +267,9 @@ impl Cmd {
                 | Cmd::Format
                 | Cmd::CodeAction
                 | Cmd::FixIt
+                | Cmd::FixAll
+                | Cmd::OrganizeImports
+                | Cmd::FormatAndFix
         )
     }
 

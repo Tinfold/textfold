@@ -1,0 +1,45 @@
+{
+  "id": "csharp",
+  "name": "C#",
+  "about": "Colours, and OmniSharp",
+  "languages": {
+    "csharp": {
+      "extensions": [
+        "cs",
+        "csx"
+      ],
+      "line_comment": "//",
+      "block_comment": [
+        "/*",
+        "*/"
+      ],
+      "grammar": {
+        "built_in": "c-sharp"
+      },
+      "servers": [
+        {
+          "name": "omnisharp",
+          "command": "OmniSharp",
+          "args": [
+            "-lsp"
+          ],
+          "roots": [
+            "*.sln",
+            "*.slnx",
+            "*.csproj",
+            "global.json",
+            ".git"
+          ],
+          "settings": {
+            "omnisharp": {
+              "enableEditorConfigSupport": true,
+              "enableImportCompletion": true,
+              "organizeImportsOnFormat": true,
+              "enableRoslynAnalyzers": true
+            }
+          }
+        }
+      ]
+    }
+  }
+}

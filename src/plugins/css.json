@@ -1,0 +1,30 @@
+{
+  "id": "css",
+  "name": "CSS",
+  "about": "Colours, and the server VS Code ships",
+  "languages": {
+    "css": {
+      "extensions": [
+        "css",
+        "scss",
+        "less"
+      ],
+      "block_comment": [
+        "/*",
+        "*/"
+      ],
+      "grammar": {
+        "built_in": "css"
+      },
+      "servers": [
+        {
+          "name": "css-language-server",
+          "command": "vscode-css-language-server",
+          "args": [
+            "--stdio"
+          ]
+        }
+      ]
+    }
+  }
+}

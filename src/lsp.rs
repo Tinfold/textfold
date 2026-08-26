@@ -90,7 +90,19 @@ pub enum Ask {
         doc: DocId,
         version: i32,
     },
-    CodeActions,
+    CodeActions {
+        doc: DocId,
+        /// Where the question was about, so an answer that arrives after the
+        /// cursor has moved on can be dropped.
+        at: usize,
+    },
+    /// The fixes a server would make to a whole file on its own — a linter's
+    /// autofixes, an import list put in order. Asked of every server at once
+    /// before a save, and applied without anybody choosing from a list.
+    SourceActions {
+        doc: DocId,
+        version: i32,
+    },
     /// Fixes for whatever is wrong under the cursor, asked for by the editor
     /// rather than by a person, so that they can be offered before anyone
     /// thinks to go looking for them.
@@ -380,6 +392,21 @@ impl Servers {
             .find(|id| self.get(*id).is_some_and(|s| s.can(capability)))
     }
 
+    /// *Every* server attached to this file that can answer that one.
+    ///
+    /// Which is the right question for anything where two answers are better
+    /// than one. The fixes for a Python file come from `ruff` and the imports
+    /// from `pyright`, and asking only the first server that says it does code
+    /// actions gets you one of those two and no way of telling which. Nothing
+    /// is lost by asking both: an answer that is empty costs a round trip a
+    /// language server was going to be idle for anyway.
+    pub fn who_all_can(&self, doc: &Document, capability: &str) -> Vec<ServerId> {
+        self.for_doc(doc)
+            .into_iter()
+            .filter(|id| self.get(*id).is_some_and(|s| s.can(capability)))
+            .collect()
+    }
+
     /// Whether anything attached to this file can do this at all. What a menu
     /// row asks before offering itself, so that what is lit and what works are
     /// the same set of things.
@@ -548,6 +575,8 @@ impl Servers {
         let env = venv::chosen(root, picked);
         let vars = venv::Vars::new(root, env.as_ref());
         lang::Server {
+            id: config.id.clone(),
+            name: config.name.clone(),
             command: config.command.clone(),
             args: config.args.iter().filter_map(|a| vars.fill(a)).collect(),
             roots: config.roots.clone(),
@@ -790,20 +819,33 @@ impl Servers {
         )
     }
 
-    /// What the server offers to do about the selection: fix an error, import
+    /// What the servers offer to do about the selection: fix an error, import
     /// a name, fill in a match.
-    pub fn code_actions(&mut self, doc: &Document, range: Range) -> Option<ServerId> {
-        self.ask_actions(doc, range, None, Ask::CodeActions)
+    ///
+    /// All of them, not the first one that says it does code actions. See
+    /// [`Servers::who_all_can`] — this is the question that gets it wrong most
+    /// visibly, because the menu it fills is called "what can be done here"
+    /// and quietly leaving out half the answer is a menu that lies.
+    pub fn code_actions(&mut self, doc: &Document, range: Range) -> Vec<ServerId> {
+        self.ask_actions(
+            doc,
+            range,
+            None,
+            Ask::CodeActions {
+                doc: doc.id,
+                at: range.start(),
+            },
+        )
     }
 
-    /// Only the fixes: what the server would do about a diagnostic, and
-    /// nothing about the code that is already fine.
+    /// Only the fixes: what a server would do about a diagnostic, and nothing
+    /// about the code that is already fine.
     ///
     /// Asked for on its own because it is asked for constantly — every time
     /// the cursor lands on a red squiggle — and `only` is what keeps that from
     /// meaning "work out every refactoring available at this position", which
     /// for a large project is not a question you want asked on a timer.
-    pub fn quick_fixes(&mut self, doc: &Document, range: Range) -> Option<ServerId> {
+    pub fn quick_fixes(&mut self, doc: &Document, range: Range) -> Vec<ServerId> {
         self.ask_actions(
             doc,
             range,
@@ -815,24 +857,83 @@ impl Servers {
         )
     }
 
+    /// Ask *one* server what it would fix in the whole file under one kind:
+    /// `source.fixAll`, `source.organizeImports`.
+    ///
+    /// This is the half of "format the file" that a formatter is not: `ruff
+    /// format` lays the code out, and `ruff check --fix` is what takes the
+    /// unused import away. They are different requests, and an editor that
+    /// only makes the first one leaves you with a file that is beautifully
+    /// laid out and still has forty warnings in it.
+    ///
+    /// One server and one kind at a time, deliberately. Two of these worked
+    /// out against the same text cannot both be applied to it: each is a set
+    /// of edits at positions in the file as it was, and the first one to go in
+    /// moves everything the second one was pointing at. Asking them one after
+    /// another means every answer is about the file as it actually is.
+    pub fn source_action(&mut self, doc: &Document, kind: &str, id: ServerId) -> bool {
+        let Some(path) = doc.path.clone() else {
+            return false;
+        };
+        if !self.get(id).is_some_and(|s| s.can("codeActionProvider")) {
+            return false;
+        }
+        let whole = Range::new(0, doc.rope.len_chars());
+        let here: Vec<Value> = doc
+            .diagnostics
+            .iter()
+            .map(|d| diagnostic_to_lsp(d, doc))
+            .collect();
+        let (to_line, to_char) = doc.lsp_point_at(whole.end());
+        let ask = Ask::SourceActions {
+            doc: doc.id,
+            version: doc.version,
+        };
+        let Some(server) = self.get_mut(id) else {
+            return false;
+        };
+        server.request(
+            "textDocument/codeAction",
+            json!({
+                "textDocument": { "uri": uri_of(&path) },
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": to_line, "character": to_char },
+                },
+                "context": {
+                    "diagnostics": here,
+                    "only": [kind],
+                    "triggerKind": 2,
+                },
+            }),
+            ask,
+        );
+        true
+    }
+
+    /// Put the same code action question to every server that can answer it.
+    ///
+    /// Each gets its own request and answers in its own time; whoever asked
+    /// gathers the answers up. Nothing here waits.
     fn ask_actions(
         &mut self,
         doc: &Document,
         range: Range,
         only: Option<Value>,
         ask: Ask,
-    ) -> Option<ServerId> {
-        let path = doc.path.clone()?;
-        let id = self.who_can(doc, "codeActionProvider")?;
+    ) -> Vec<ServerId> {
+        let Some(path) = doc.path.clone() else {
+            return Vec::new();
+        };
+        let ids = self.who_all_can(doc, "codeActionProvider");
         let here: Vec<Value> = doc
             .diagnostics
             .iter()
             .filter(|d| d.range.overlaps(&range))
-            .map(diagnostic_to_lsp)
+            .map(|d| diagnostic_to_lsp(d, doc))
             .collect();
         let (from_line, from_char) = doc.lsp_point_at(range.start());
         let (to_line, to_char) = doc.lsp_point_at(range.end());
-        let server = self.get_mut(id)?;
         let mut context = json!({ "diagnostics": here });
         if let Some(only) = only {
             context["only"] = only;
@@ -840,19 +941,24 @@ impl Servers {
             // use it to leave out the expensive answers.
             context["triggerKind"] = json!(2);
         }
-        server.request(
-            "textDocument/codeAction",
-            json!({
-                "textDocument": { "uri": uri_of(&path) },
-                "range": {
-                    "start": { "line": from_line, "character": from_char },
-                    "end": { "line": to_line, "character": to_char },
-                },
-                "context": context,
-            }),
-            ask,
-        );
-        Some(id)
+        let params = json!({
+            "textDocument": { "uri": uri_of(&path) },
+            "range": {
+                "start": { "line": from_line, "character": from_char },
+                "end": { "line": to_line, "character": to_char },
+            },
+            "context": context,
+        });
+
+        let mut asked = Vec::new();
+        for id in ids {
+            let Some(server) = self.get_mut(id) else {
+                continue;
+            };
+            server.request("textDocument/codeAction", params.clone(), ask.clone());
+            asked.push(id);
+        }
+        asked
     }
 
     /// Ask for the text of something that is not a file.
@@ -1416,15 +1522,29 @@ fn diagnostic_from_lsp(value: &Value, doc: &Document, server: ServerId) -> Optio
             Value::String(s) => s.clone(),
             other => other.to_string(),
         }),
+        data: value.get("data").cloned(),
         server: server.0,
     })
 }
 
 /// A diagnostic on its way back out, for a code action request that has to say
 /// which problem it is about.
-fn diagnostic_to_lsp(d: &Diagnostic) -> Value {
-    json!({
-        "range": { "start": {"line": 0, "character": 0}, "end": {"line": 0, "character": 0} },
+///
+/// Faithfully, which matters more than it sounds. A server is not told "there
+/// is a problem near here" — it is handed back the problem it sent, and it
+/// looks it up. `ruff` matches on the range and on `data`, in which it put the
+/// fix; a diagnostic that comes back with neither is one it cannot recognise,
+/// and it answers with the actions it has for the *file* and none of the ones
+/// it has for that line. Which is exactly what "the linter's warnings cannot
+/// be fixed from inside the editor" looks like.
+fn diagnostic_to_lsp(d: &Diagnostic, doc: &Document) -> Value {
+    let (from_line, from_char) = doc.lsp_point_at(d.range.start());
+    let (to_line, to_char) = doc.lsp_point_at(d.range.end());
+    let mut out = json!({
+        "range": {
+            "start": { "line": from_line, "character": from_char },
+            "end": { "line": to_line, "character": to_char },
+        },
         "severity": match d.severity {
             Severity::Error => 1,
             Severity::Warning => 2,
@@ -1434,7 +1554,11 @@ fn diagnostic_to_lsp(d: &Diagnostic) -> Value {
         "message": d.message,
         "source": d.source,
         "code": d.code,
-    })
+    });
+    if let Some(data) = &d.data {
+        out["data"] = data.clone();
+    }
+    out
 }
 
 pub fn point_of(value: &Value) -> Option<(usize, usize)> {

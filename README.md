@@ -35,7 +35,8 @@ textfold                         # an empty buffer
 - [Files that change underneath you](#files-that-change-underneath-you)
 - [Git](#git)
 - [Reading what a language server says](#reading-what-a-language-server-says)
-- [Teaching it a language](#teaching-it-a-language)
+- [Plugins](#plugins)
+- [Where you left off](#where-you-left-off)
 - [When something is wrong](#when-something-is-wrong)
 - [How it is put together](#how-it-is-put-together)
 
@@ -209,6 +210,9 @@ capital. Replacing with something selected replaces only inside the selection.
 | Alt-Enter | what can be done here (quick fixes, imports, refactorings) |
 | Shift-F10 | what can be done here, as a menu |
 | Alt-Shift-F | reformat the file |
+| — | `fix-all` in the palette: every fix the servers would make on their own |
+| — | `organize-imports`: put the imports in order and drop the unused ones |
+| — | `format-and-fix`: both, in the order that works |
 | F8 / Shift-F8 | next / previous problem |
 | Alt-D | all the problems, as a list |
 | Alt-O | what this file defines |
@@ -237,6 +241,8 @@ because the message has already arrived.
 | Alt-T | pick colours |
 | Alt-N | line numbers on and off |
 | Alt-Z | fold long lines, or let them run off the side |
+| — | `plugins` in the palette: what is on, and what to switch off |
+| — | `restore-session`: open again what was open here last time |
 
 Up to four panes. Each pane has its own cursor, its own scroll position and its
 own idea of whether lines fold — the same file open twice is two views of one
@@ -499,8 +505,9 @@ Install the ones you want the way you normally would — for Rust that is
 `rustup component add rust-analyzer`. OmniSharp is the one whose name is worth
 checking: its own releases and most distributions call the binary `OmniSharp`,
 which is what textfold runs, but some package managers install it lowercase.
-`{ "languages": { "csharp": { "servers": [{ "command": "omnisharp", "args":
-["-lsp"] }] } } }` in your own `languages.json` is the whole fix. jdtls wants a
+`{ "id": "my-csharp", "languages": { "csharp": { "servers": [{ "name":
+"omnisharp", "command": "omnisharp", "args": ["-lsp"] }] } } }` as a
+[plugin](#plugins) of your own is the whole fix. jdtls wants a
 JDK 21 or newer on `JAVA_HOME` even to edit an older project, and writes its
 index into a workspace directory it picks itself; the first file you open in a
 large project is slow once and quick afterwards. A server that is not installed is
@@ -510,13 +517,67 @@ it, minus the intelligence.
 Run `server-status` from the palette to see what is running and what it is
 doing, and `restart-servers` after installing one.
 
+### When a language has two of them
+
 A language with two servers has two for a reason, and the reason is that they
 answer different questions: `ruff` finds problems, `pyright-langserver` knows
-where a name is defined. So each question goes to the first server attached to
-the file that says it can answer *that one*, rather than to the first server
-there is. It matters more than it sounds: `ruff` is up and answering in
-milliseconds and pyright takes seconds to read a project, so "the first one"
-is, for the whole of that time, the one that cannot answer anything.
+where a name is defined.
+
+So a question that only one of them can answer goes to the one that can, rather
+than to the first server there is. It matters more than it sounds: `ruff` is up
+and answering in milliseconds and pyright takes seconds to read a project, so
+"the first one" is, for the whole of that time, the one that cannot answer
+anything.
+
+And a question where **two answers are better than one is put to all of them**.
+That is code actions: "what can be done here" asks every server attached to the
+file and shows what came back as one list, filled in as the answers arrive
+rather than held until the slowest has spoken. Where more than one server
+offered something, each row says which. Before this, the fixes for a Python
+file were whichever server's happened to be asked for, and the other's were
+simply not reachable from inside the editor — which is a strange thing for an
+editor to be doing with a linter it is already running.
+
+`fix-it` (Alt-I) is the same question narrowed to the problem under the cursor,
+so the fix it offers is now the best of what all of them said, not the best of
+what one of them said.
+
+### Reformatting, and fixing
+
+These are two different things, and a file usually wants both:
+
+- **`format`** (Alt-Shift-F) asks the formatter to lay the code out. One
+  server does this — two formatters disagreeing about a file is worse than
+  either of them alone — and it is the first one attached that offers it.
+- **`fix-all`** asks *every* server what it would fix in this file without
+  being asked about any one spot: `source.fixAll`. This is ruff's autofixes,
+  and it is the half that formatting is not. A formatter will lay an unused
+  import out beautifully; it will not take it away.
+- **`organize-imports`** is the same for `source.organizeImports`.
+- **`format-and-fix`** does the fixes and then the formatting, in that order —
+  a fix puts text in, and the formatter is what lays the result out.
+
+`code_actions_on_save` in the settings does the fixing half every time you
+save, and pairs with `format_on_save`:
+
+```json
+{
+  "format_on_save": true,
+  "code_actions_on_save": ["source.fixAll", "source.organizeImports"]
+}
+```
+
+Both are off by default, because a setting that lets something else rewrite
+your file is a setting you should have to ask for. With them on, saving is: ask
+each server about each kind of fix, **one question at a time**, apply what
+comes back before asking the next, format the result, and then write.
+
+One at a time is not caution, it is the only order that works. Every answer is
+a set of edits at positions in the file *as it was when the question was
+asked*, so the first one applied moves everything the second one was pointing
+at — apply two of them to the same text and you do not get both fixes, you get
+a deleted line. If a question goes unanswered for a second and a half the save
+moves on without it: a file you pressed Ctrl-S on is a file that gets written.
 
 ### Python, and which Python
 
@@ -545,11 +606,11 @@ package has no way to know that — it falls back to the fields and reports ever
 one of them as missing. Point it at the environment the package is installed in
 and the complaint goes with it. If it survives that, it is a real disagreement
 with the checker rather than a misconfiguration, and it belongs in the
-project's own `pyrightconfig.json` or in `languages.json`:
+project's own `pyrightconfig.json` or in a [plugin](#plugins) of your own:
 
 ```json
-{ "languages": { "python": { "servers": [
-  { "command": "pyright-langserver", "args": ["--stdio"],
+{ "id": "my-python", "languages": { "python": { "servers": [
+  { "name": "pyright", "command": "pyright-langserver", "args": ["--stdio"],
     "settings": { "python": { "analysis": {
       "diagnosticSeverityOverrides": { "reportCallIssue": "none" } } } } }
 ] } } }
@@ -607,12 +668,16 @@ than repeating forty things you did not.
   "auto_completion": true,
   "auto_pairs": true,
   "format_on_save": false,
+  "code_actions_on_save": [],
   "trim_trailing_whitespace": false,
   "final_newline": true,
   "reload_on_change": true,
+  "restore_session": true,
   "mouse": true,
   "background": true,
-  "enhanced_keys": true
+  "enhanced_keys": true,
+  "underline_colour": "auto",
+  "plugins": {}
 }
 ```
 
@@ -629,12 +694,16 @@ than repeating forty things you did not.
 | `auto_completion` | suggest as you type, rather than only when asked |
 | `auto_pairs` | close brackets and quotes |
 | `format_on_save` | run the language server's formatter first |
+| `code_actions_on_save` | the servers' own fixes to apply on save — see [Reformatting, and fixing](#reformatting-and-fixing) |
 | `trim_trailing_whitespace` | drop trailing spaces on save |
 | `final_newline` | give a file one if it has none |
 | `reload_on_change` | read a file again when something else writes it — see [Files that change underneath you](#files-that-change-underneath-you) |
+| `restore_session` | open the same files again next time — see [Where you left off](#where-you-left-off) |
 | `mouse` | whether textfold captures the mouse at all |
 | `background` | paint the theme's background, or leave the terminal's own |
 | `enhanced_keys` | ask for the extended keyboard protocol |
+| `underline_colour` | `auto`, `on`, or `off` — see [When something is wrong](#when-something-is-wrong) |
+| `plugins` | what is switched off — see [Plugins](#plugins) |
 | `keys` | see [Keys](#keys) |
 
 Most of these are also in the palette under `settings`, where changing one
@@ -892,25 +961,76 @@ expensive and are the answer to one you did.
 
 ---
 
-## Teaching it a language
+## Plugins
 
-A language is a table of facts, not code. The ones textfold ships live in
-`src/languages.json`; a file of the same name in `~/.config/textfold/` is read
-**on top of** it, and a language named there merges into the one here field by
-field. So swapping rust-analyzer for something else is three lines and does not
-mean restating the grammar and the comment syntax:
+Everything textfold knows about a language — how to colour it, how to comment
+it out, and what to run to get intelligence about it — arrives as a plugin, and
+every one of them can be switched off.
+
+The ones that ship are the JSON files in `src/plugins/`, built into the binary.
+Yours go in `~/.config/textfold/plugins/`, as `name.json` or as
+`name/plugin.json`, and once loaded there is no difference between the two
+kinds: nothing textfold ships is reachable by a route your own plugin cannot
+take. A plugin of yours taking an id textfold already uses replaces it, which
+is how you say what Rust means here without editing textfold.
+
+A plugin has an id, and so does each server inside it. `python` is the Python
+plugin; `python/pyright` and `python/ruff` are the two servers in it. Either
+can be switched off, and switching off the plugin switches off the servers with
+it. `plugins` in the command palette is the list, with a switch beside each
+row; `textfold --list-plugins` prints the same thing.
 
 ```json
-{ "languages": {
-  "rust": { "servers": [{ "command": "ra-multiplex" }] }
-} }
+{ "plugins": { "python/ruff": false } }
+```
+
+Switching one takes effect where you are standing: the language table is built
+again, the servers are stopped and started, and the buffers you have open work
+out what language they are afresh. A file whose language you set by hand keeps
+what you told it.
+
+### Writing one
+
+```json
+{ "id": "zig", "name": "Zig", "about": "Colours and zls",
+  "languages": {
+    "zig": {
+      "extensions": ["zig", "zon"],
+      "line_comment": "//",
+      "servers": [{ "name": "zls", "command": "zls", "roots": ["build.zig"] }],
+      "grammar": {
+        "library":    "~/.config/textfold/grammars/zig.so",
+        "highlights": "~/.config/textfold/grammars/zig-highlights.scm"
+      }
+    }
+  } }
+```
+
+Colours come from any tree-sitter grammar built as a shared library —
+`tree-sitter build` produces one — opened at the moment a file of that language
+is first shown.
+
+Per plugin: `id`, `name`, `about`, `enabled` (say `false` to ship one switched
+off), `languages`. Per language: `extensions`, `filenames` (for the many files
+with no extension), `shebangs`, `line_comment`, `block_comment`, `brackets`,
+`lsp_id`, `servers`, `grammar`. Per server: `name`, `command`, `args`, `roots`,
+`settings`, `init_options`, `env`.
+
+A language named by more than one plugin **merges** field by field, in the
+order the plugins load, so swapping rust-analyzer for something else is three
+lines and does not mean restating the grammar and the comment syntax:
+
+```json
+{ "id": "my-rust",
+  "languages": { "rust": { "servers": [{ "command": "ra-multiplex" }] } } }
 ```
 
 Turning a server's settings up:
 
 ```json
-{ "languages": {
+{ "id": "my-rust", "languages": {
   "rust": { "servers": [{
+    "name": "rust-analyzer",
     "command": "rust-analyzer",
     "roots": ["Cargo.toml", "rust-project.json", ".git"],
     "settings": { "rust-analyzer": {
@@ -921,29 +1041,12 @@ Turning a server's settings up:
 } }
 ```
 
-A language textfold has never heard of is a language named there that is not
-here. Colours come from any tree-sitter grammar built as a shared library —
-`tree-sitter build` produces one — opened at the moment a file of that language
-is first shown:
+`~/.config/textfold/languages.json` still works and still means what it always
+did — the same `{ "languages": { … } }`, read last so it wins. It shows up in
+the plugin list as `local`, so what it is doing to your languages is something
+you can see and switch off rather than something you have to remember.
 
-```json
-{ "languages": {
-  "zig": {
-    "extensions": ["zig", "zon"],
-    "line_comment": "//",
-    "servers": [{ "command": "zls", "roots": ["build.zig"] }],
-    "grammar": {
-      "library":    "~/.config/textfold/grammars/zig.so",
-      "highlights": "~/.config/textfold/grammars/zig-highlights.scm"
-    }
-  }
-} }
-```
-
-Per language: `extensions`, `filenames` (for the many files with no extension),
-`shebangs`, `line_comment`, `block_comment`, `brackets`, `lsp_id`, `servers`,
-`grammar`. Per server: `command`, `args`, `roots`, `settings`,
-`init_options`, `env`.
+### Placeholders
 
 A server's `args`, `env`, `settings` and `init_options` may use placeholders,
 which is how Python's servers are told where the project's virtual environment
@@ -970,7 +1073,31 @@ nothing at all. A marker is usually a file name, but `"*.sln"` is allowed and
 means any file with that extension — for the projects whose marker file is
 named after the project rather than after the language.
 
-`textfold --list-languages` shows what is in force.
+`textfold --list-languages` shows what is in force, and `--list-plugins` shows
+where it came from.
+
+---
+
+## Where you left off
+
+Close textfold with thirty tabs open and start it again in the same directory,
+and the thirty tabs are there — in the order the row was in, each with the
+cursor where you left it, and the panes arranged the way you had them.
+
+Per directory, not per machine. "Where was I" is a question about a project,
+so opening textfold in one repository does not bring back another one's tabs.
+The last few dozen projects are remembered, in
+`$XDG_STATE_HOME/textfold/sessions.json`.
+
+It only happens when you name nothing on the command line: `textfold notes.md`
+means open that file, not open that file and the eleven you had open on Friday.
+`--no-session` starts empty regardless, `restore-session` in the palette brings
+them back on demand, and `"restore_session": false` in the settings turns the
+whole thing off.
+
+A file that has been deleted since is skipped rather than opened empty, and a
+project you deliberately closed everything in is forgotten rather than
+remembered as empty — coming back to it should not reopen what you shut.
 
 ---
 
@@ -994,7 +1121,25 @@ is coming — usually because something else on the machine was busy — and it
 sorts itself out. `this file parses too slowly` means it tried several times
 and stopped. Otherwise the language shown beside it is probably not what you
 thought — the palette's `set-language` fixes that for the file in front of you,
-and `languages.json` fixes it for good.
+and a [plugin](#plugins) fixes it for good. If a whole language has gone quiet,
+check `plugins`: it may be switched off.
+
+**The text goes dim, italic, or invisible where there are warnings, and the
+underlines come out as blocks.** Your terminal does not understand the sequence
+that says "colour the underline and leave the text alone", and is reading the
+colour as four more instructions instead — `2` is dim, and a colour component
+that happens to be a small number asks for italic, reverse video, or conceal.
+It is a real thing that real terminals do, so textfold asks for that colour only
+where it knows the terminal has it: kitty, ghostty, WezTerm, foot, contour,
+rio, Alacritty, iTerm2, VS Code's terminal, and anything built on VTE 0.52 or
+newer. Everywhere else the underline is drawn plain, which says the same thing
+— the mark in the margin already carries the colour.
+
+The usual way to meet this is over `ssh`, where the only thing the terminal
+tells the far end about itself is `TERM`, and `TERM` usually says
+`xterm-256color` and nothing more. If your terminal does have coloured
+underlines, say so: `"underline_colour": "on"`, or the row in `settings`. If
+something else on this list is mangling the screen, `"off"` is there too.
 
 **I want my terminal's mouse back.** `toggle-mouse`, or `--no-mouse`, or
 `"mouse": false`.
@@ -1079,6 +1224,14 @@ one loop. There are no locks anywhere near the text.
 scrolling to a cursor costs the height of the pane, not the size of the file.
 Ctrl-End on a two-hundred-thousand-line file is the same amount of work as
 pressing Down.
+
+**What textfold knows is data, and the data can be switched off.** Languages,
+grammars and language servers are all plugin manifests read at startup — the
+ones that ship are in the same shape as the ones you write, loaded through the
+same code, and listed in the same place with the same switch beside them.
+Turning one off rebuilds the language table and restarts the servers rather
+than asking you to restart the editor, and a language id survives that, so a
+buffer that was Python is still Python when Python comes back.
 
 **A menu is a second way to reach the keys, not a second implementation.**
 Every row of every context menu is a `Cmd` the editor already has, shown beside

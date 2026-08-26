@@ -4,6 +4,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use base64::Engine;
 
@@ -264,6 +265,77 @@ pub fn clipboard_story() -> String {
     }
 }
 
+// ---- What the terminal on the other end can be relied on to understand ----
+
+/// Whether to paint the underline under a problem in the colour of how bad it
+/// is. Read on every cell drawn, and changed from the settings while the
+/// editor is running, so it is a flag rather than a decision made once.
+static UNDERLINE_COLOUR: AtomicBool = AtomicBool::new(false);
+
+/// Whether a coloured underline is being drawn.
+pub fn underline_colour() -> bool {
+    UNDERLINE_COLOUR.load(Ordering::Relaxed)
+}
+
+pub fn set_underline_colour(on: bool) {
+    UNDERLINE_COLOUR.store(on, Ordering::Relaxed);
+}
+
+/// Whether this terminal understands `CSI 58 … m`, which is what says "the
+/// underline is this colour and the text is still its own".
+///
+/// This matters far more than a missing colour. Crossterm writes the sequence
+/// the old way — `ESC[58;2;247;118;142m`, with semicolons — and a terminal
+/// that has never heard of 58 does not skip the whole thing. It reads the
+/// parameters one at a time and applies the ones it does recognise, so a
+/// colour becomes four more instructions: `2` is dim, and then whichever of
+/// the three components happen to be small numbers. A red of `#ff0708` asks
+/// for dim, then a full reset, then italic, then conceal. That is the file
+/// going faint, italic, and in places invisible, one squiggle at a time, and
+/// blocks where the number landed on 7 and asked for reverse video.
+///
+/// So the question is not "would the colour be nice" but "will asking for it
+/// wreck the screen", and it is answered conservatively: yes only for the
+/// terminals known to implement it. Everywhere else the underline is drawn
+/// plain, which says the same thing — the gutter already carries the colour
+/// and the severity mark.
+///
+/// Asked of the environment rather than of the terminal. A query means writing
+/// a question and reading the answer off the same stream the keyboard arrives
+/// on, and waiting for a reply that a terminal without the feature will never
+/// send. `TERM` is the one variable `ssh` always carries across, which is
+/// exactly the case that needs getting right.
+pub fn understands_underline_colour() -> bool {
+    understood_by(|name| std::env::var(name).ok())
+}
+
+/// The rule itself, with the environment handed in so a test can try one.
+fn understood_by(var: impl Fn(&str) -> Option<String>) -> bool {
+    let term = var("TERM").unwrap_or_default().to_lowercase();
+    // Written as `xterm-kitty`, `xterm-ghostty`, `wezterm`, `foot-extra`.
+    const TERMS: &[&str] = &[
+        "kitty", "ghostty", "wezterm", "foot", "contour", "rio", "alacritty",
+    ];
+    if TERMS.iter().any(|name| term.contains(name)) {
+        return true;
+    }
+    // Terminals that leave `TERM` saying `xterm-256color` and say who they
+    // are somewhere else instead.
+    let program = var("TERM_PROGRAM").unwrap_or_default().to_lowercase();
+    const PROGRAMS: &[&str] = &[
+        "ghostty", "wezterm", "iterm.app", "vscode", "rio", "kitty", "contour",
+    ];
+    if PROGRAMS.contains(&program.as_str()) {
+        return true;
+    }
+    // Everything built on VTE — gnome-terminal, tilix, kgx — since 0.52,
+    // which is where it was added.
+    if let Some(vte) = var("VTE_VERSION").and_then(|v| v.trim().parse::<u32>().ok()) {
+        return vte >= 5202;
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,6 +359,48 @@ mod tests {
             .collect();
         assert_eq!(rebuilt, sequence, "the pieces do not add back up");
         assert!(out.matches("\x1bP").count() > 1, "it was not split at all");
+    }
+
+    #[test]
+    fn a_terminal_that_says_what_it_is_gets_the_coloured_underline() {
+        let ghostty = |name: &str| match name {
+            "TERM" => Some("xterm-ghostty".into()),
+            _ => None,
+        };
+        assert!(understood_by(ghostty));
+        let iterm = |name: &str| match name {
+            "TERM" => Some("xterm-256color".into()),
+            "TERM_PROGRAM" => Some("iTerm.app".into()),
+            _ => None,
+        };
+        assert!(understood_by(iterm));
+        let gnome = |name: &str| match name {
+            "TERM" => Some("xterm-256color".into()),
+            "VTE_VERSION" => Some("7600".into()),
+            _ => None,
+        };
+        assert!(understood_by(gnome));
+    }
+
+    #[test]
+    fn a_terminal_we_cannot_place_does_not_get_it() {
+        // Which is what an ssh session out of a terminal that does not carry
+        // its name across looks like from in here, and is exactly the case
+        // where guessing wrong scribbles over the file.
+        let over_ssh = |name: &str| match name {
+            "TERM" => Some("xterm-256color".into()),
+            "SSH_CONNECTION" => Some("10.0.0.2 51000 10.0.0.9 22".into()),
+            _ => None,
+        };
+        assert!(!understood_by(over_ssh));
+        assert!(!understood_by(|_| None));
+        // An old VTE is a terminal without it, not a terminal we know nothing
+        // about.
+        let old_vte = |name: &str| match name {
+            "VTE_VERSION" => Some("4600".into()),
+            _ => None,
+        };
+        assert!(!understood_by(old_vte));
     }
 
     #[test]

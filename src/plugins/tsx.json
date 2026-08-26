@@ -1,0 +1,35 @@
+{
+  "id": "tsx",
+  "name": "TSX",
+  "about": "TypeScript with JSX in it",
+  "languages": {
+    "tsx": {
+      "lsp_id": "typescriptreact",
+      "extensions": [
+        "tsx"
+      ],
+      "line_comment": "//",
+      "block_comment": [
+        "/*",
+        "*/"
+      ],
+      "grammar": {
+        "built_in": "tsx"
+      },
+      "servers": [
+        {
+          "name": "tsserver",
+          "command": "typescript-language-server",
+          "args": [
+            "--stdio"
+          ],
+          "roots": [
+            "package.json",
+            "tsconfig.json",
+            ".git"
+          ]
+        }
+      ]
+    }
+  }
+}

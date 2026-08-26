@@ -1,0 +1,41 @@
+{
+  "id": "javascript",
+  "name": "JavaScript",
+  "about": "Colours, and the TypeScript server, which also knows JavaScript",
+  "languages": {
+    "javascript": {
+      "extensions": [
+        "js",
+        "mjs",
+        "cjs",
+        "jsx"
+      ],
+      "shebangs": [
+        "node"
+      ],
+      "line_comment": "//",
+      "block_comment": [
+        "/*",
+        "*/"
+      ],
+      "grammar": {
+        "built_in": "javascript"
+      },
+      "servers": [
+        {
+          "name": "tsserver",
+          "command": "typescript-language-server",
+          "args": [
+            "--stdio"
+          ],
+          "roots": [
+            "package.json",
+            "tsconfig.json",
+            "jsconfig.json",
+            ".git"
+          ]
+        }
+      ]
+    }
+  }
+}

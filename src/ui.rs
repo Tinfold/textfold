@@ -382,9 +382,16 @@ fn draw_row(
         {
             // Underlined in the colour of how bad it is, rather than
             // recoloured: the code should still look like code.
-            style = style
-                .add_modifier(Modifier::UNDERLINED)
-                .underline_color(severity_colour(severity, theme));
+            //
+            // The colour only where the terminal has the sequence for it.
+            // Where it has not, asking anyway does not cost a colour, it
+            // costs the screen — see [`crate::term::underline_colour`] — and
+            // a plain underline beside the mark already in the gutter says
+            // the same thing without the wreckage.
+            style = style.add_modifier(Modifier::UNDERLINED);
+            if crate::term::underline_colour() {
+                style = style.underline_color(severity_colour(severity, theme));
+            }
         }
         if Some(at) == it.partner || (it.partner.is_some() && at == view.sel.primary().head) {
             style = style.add_modifier(Modifier::BOLD).fg(theme.bracket_match);
@@ -957,7 +964,7 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
         // Long enough to recognise the fix, short enough to leave the line
         // and column at the end of the bar where they always are.
         let title = text::truncate(title, 42);
-        let said = match fixes.actions.len() {
+        let said = match fixes.len() {
             1 => format!("{key}: {title}"),
             n => format!("{key}: {title} (+{})", n - 1),
         };
@@ -2471,6 +2478,7 @@ mod tests {
                 message: "no".into(),
                 source: None,
                 code: None,
+                data: None,
                 server: 0,
             }];
         });
@@ -2478,6 +2486,58 @@ mod tests {
             .filter(|x| buffer[(*x, 0)].style().fg == Some(app.theme.error))
             .count();
         assert!(coloured > 1, "only the mark was coloured, not the name");
+    }
+
+    #[test]
+    fn the_underline_under_a_problem_is_only_coloured_where_the_terminal_has_it() {
+        // Because asking a terminal that does not for `CSI 58 … m` does not
+        // cost a colour, it costs the screen: the parameters get read one at a
+        // time and the file goes dim, italic, and in places invisible.
+        let with_a_problem = |app: &mut App| {
+            app.here_mut().diagnostics = vec![crate::doc::Diagnostic {
+                range: Range::new(0, 4),
+                severity: crate::doc::Severity::Warning,
+                message: "hm".into(),
+                source: None,
+                code: None,
+                data: None,
+                server: 0,
+            }];
+        };
+        let underlines = |buffer: &Buffer| {
+            (0..buffer.area.width)
+                .filter(|x| {
+                    buffer[(*x, 1)]
+                        .style()
+                        .add_modifier
+                        .contains(Modifier::UNDERLINED)
+                })
+                .count()
+        };
+
+        let coloured = |buffer: &Buffer, want: Color| {
+            (0..buffer.area.width)
+                .filter(|x| buffer[(*x, 1)].style().underline_color == Some(want))
+                .count()
+        };
+
+        crate::term::set_underline_colour(true);
+        let (buffer, app) = screen("text\n", with_a_problem);
+        assert_eq!(underlines(&buffer), 4, "the problem was not underlined");
+        assert_eq!(coloured(&buffer, app.theme.warning), 4);
+
+        crate::term::set_underline_colour(false);
+        let (buffer, app) = screen("text\n", with_a_problem);
+        assert_eq!(
+            underlines(&buffer),
+            4,
+            "the underline itself should still be there"
+        );
+        assert_eq!(
+            coloured(&buffer, app.theme.warning),
+            0,
+            "a colour was asked for that this terminal would have mangled"
+        );
     }
 
     #[test]

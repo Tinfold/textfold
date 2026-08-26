@@ -1,0 +1,16 @@
+{
+  "id": "git",
+  "name": "Git files",
+  "about": "Commit messages, .gitignore, and the rest",
+  "languages": {
+    "git": {
+      "filenames": [
+        "COMMIT_EDITMSG",
+        "MERGE_MSG",
+        ".gitignore",
+        ".gitattributes"
+      ],
+      "line_comment": "#"
+    }
+  }
+}

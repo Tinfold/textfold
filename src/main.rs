@@ -17,6 +17,8 @@ mod lang;
 mod lsp;
 mod menu;
 mod picker;
+mod plugin;
+mod session;
 mod syntax;
 mod term;
 mod text;
@@ -73,6 +75,10 @@ struct Args {
     #[arg(long)]
     no_mouse: bool,
 
+    /// Start empty, rather than opening what was open here last time
+    #[arg(long)]
+    no_session: bool,
+
     /// List the themes there are and stop
     #[arg(long)]
     list_themes: bool,
@@ -81,6 +87,10 @@ struct Args {
     #[arg(long)]
     list_languages: bool,
 
+    /// List the plugins there are, and which are on, and stop
+    #[arg(long)]
+    list_plugins: bool,
+
     /// Say where language servers' complaints are written and stop
     #[arg(long)]
     log_path: bool,
@@ -88,6 +98,11 @@ struct Args {
 
 fn main() -> Result<()> {
     let args = Args::parse();
+    let mut config = Config::load();
+    // What is switched off decides what the languages are, so it is read
+    // before anything asks after one — including the `--list-…` answers,
+    // which should say what this machine would actually do.
+    plugin::init(&config.plugins);
 
     if args.list_themes {
         let themes = theme::Themes::load();
@@ -98,6 +113,20 @@ fn main() -> Result<()> {
             }
         }
         for problem in &themes.problems {
+            eprintln!("{problem}");
+        }
+        return Ok(());
+    }
+    if args.list_plugins {
+        for plugin in plugin::all() {
+            let state = if plugin::is_on(&plugin.id) { "on " } else { "off" };
+            println!("{state}  {:<22} {}", plugin.id, plugin.detail());
+            for server in &plugin.servers {
+                let state = if plugin::is_on(&server.id) { "on " } else { "off" };
+                println!("{state}    {:<20} runs {}", server.id, server.command);
+            }
+        }
+        for problem in plugin::problems() {
             eprintln!("{problem}");
         }
         return Ok(());
@@ -128,7 +157,6 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut config = Config::load();
     if let Some(theme) = args.theme {
         config.theme = Some(theme);
     }
@@ -137,6 +165,10 @@ fn main() -> Result<()> {
     }
     let wants_mouse = config.mouse();
     let wants_keys = config.enhanced_keys();
+    // Worked out before anything is drawn, because the first frame is already
+    // a frame that can be wrecked by asking a terminal for a sequence it does
+    // not have.
+    term::set_underline_colour(config.underline_colour());
 
     let (tx, rx) = mpsc::channel::<Event>();
     let mut app = App::new(config, tx.clone());
@@ -157,6 +189,19 @@ fn main() -> Result<()> {
     // terminal that has not come back.
     terminal.draw(|frame| ui::draw(frame, &mut app))?;
 
+    // What was open here last time, but only where nothing was named on the
+    // command line. `textfold notes.md` means open that file, not open that
+    // file and the eleven you had open on Friday.
+    if args.files.is_empty() && !args.no_session && app.config.restore_session() {
+        let count = app.restore_session(false);
+        if count > 0 {
+            app.say(format!(
+                "{count} {} from last time — --no-session starts empty",
+                if count == 1 { "file" } else { "files" }
+            ));
+        }
+    }
+
     // Files named on the command line, in order, so that the last one named is
     // the one you end up looking at.
     let mut go_to: Option<(usize, usize)> = None;
@@ -175,6 +220,9 @@ fn main() -> Result<()> {
     spawn_input(tx);
     let result = run(&mut terminal, &mut app, &rx, wants_mouse);
 
+    // What is open, written down on the way out — this is the one that
+    // matters, since it is the only one with the cursors where you left them.
+    app.remember_session(true);
     app.lsp.shutdown_all();
     stop(wants_mouse, wants_keys);
     result

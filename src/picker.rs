@@ -54,6 +54,8 @@ pub enum Choice {
     Setting(&'static str),
     /// A Python environment to point this project's language servers at.
     Environment(PathBuf),
+    /// A plugin or one of its language servers, switched on or off in place.
+    Plugin(String),
 }
 
 /// One row.
@@ -127,6 +129,8 @@ pub enum Kind {
     Settings,
     /// The Python environments a project could be using.
     Environments,
+    /// The languages and language servers there are, and which are on.
+    Plugins,
 }
 
 impl Kind {
@@ -146,6 +150,7 @@ impl Kind {
             Kind::Grep => "Search the project",
             Kind::Settings => "Settings",
             Kind::Environments => "Python environment",
+            Kind::Plugins => "Plugins",
         }
     }
 
@@ -157,6 +162,7 @@ impl Kind {
             Kind::Themes => "Moving through the list tries each one on",
             Kind::Settings => "Enter changes the setting and keeps it",
             Kind::Environments => "Enter points the language servers at it and keeps it",
+            Kind::Plugins => "Enter turns it on or off and keeps it",
             _ => "",
         }
     }

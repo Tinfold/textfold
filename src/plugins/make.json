@@ -1,0 +1,19 @@
+{
+  "id": "make",
+  "name": "Makefiles",
+  "about": "What a Makefile is, and how to comment one out",
+  "languages": {
+    "make": {
+      "filenames": [
+        "Makefile",
+        "makefile",
+        "GNUmakefile"
+      ],
+      "extensions": [
+        "mk",
+        "mak"
+      ],
+      "line_comment": "#"
+    }
+  }
+}
