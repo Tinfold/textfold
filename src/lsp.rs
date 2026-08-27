@@ -23,7 +23,7 @@ use std::sync::mpsc::Sender;
 
 use serde_json::{Value, json};
 
-use crate::doc::{AppliedEdit, Diagnostic, DocId, Document, Severity};
+use crate::doc::{AppliedEdit, Diagnostic, DocId, Document, Severity, Told};
 use crate::venv;
 use crate::lang;
 use crate::text::Range;
@@ -1523,7 +1523,7 @@ fn diagnostic_from_lsp(value: &Value, doc: &Document, server: ServerId) -> Optio
             other => other.to_string(),
         }),
         data: value.get("data").cloned(),
-        server: server.0,
+        told: Told::Server(server.0),
     })
 }
 

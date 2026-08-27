@@ -935,20 +935,20 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
             } else {
                 theme.warning
             },
-            Cmd::Diagnostics,
+            Cmd::DIAGNOSTICS,
         ));
     }
     if cursors > 1 {
         chips.push((
             format!("{cursors} cursors"),
             theme.accent,
-            Cmd::CollapseCursors,
+            Cmd::COLLAPSE_CURSORS,
         ));
     } else if selected > 0 {
-        chips.push((format!("{selected} selected"), theme.info, Cmd::SelectLine));
+        chips.push((format!("{selected} selected"), theme.info, Cmd::SELECT_LINE));
     }
     if doc.read_only {
-        chips.push(("read-only".into(), theme.warning, Cmd::About));
+        chips.push(("read-only".into(), theme.warning, Cmd::ABOUT));
     }
     // What can be done about the problem under the cursor, in the words the
     // server used for it: `Import 'List' (java.util)`, and a key to press.
@@ -959,7 +959,7 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
     {
         let key = app
             .keys
-            .shortcut(Cmd::FixIt)
+            .shortcut(Cmd::FIX_IT)
             .unwrap_or_else(|| "Alt-i".into());
         // Long enough to recognise the fix, short enough to leave the line
         // and column at the end of the bar where they always are.
@@ -968,7 +968,7 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
             1 => format!("{key}: {title}"),
             n => format!("{key}: {title} (+{})", n - 1),
         };
-        chips.push((said, theme.success, Cmd::FixIt));
+        chips.push((said, theme.success, Cmd::FIX_IT));
     }
 
     // That two panes are being compared, and how far apart they are. Clicking
@@ -987,7 +987,7 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
             } else {
                 theme.changed
             },
-            Cmd::NextChange,
+            Cmd::NEXT_CHANGE,
         ));
     }
 
@@ -1007,18 +1007,18 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
             } else {
                 theme.muted
             },
-            Cmd::NextChange,
+            Cmd::NEXT_CHANGE,
         ));
     }
     if let Some(why) = doc.colours_off {
-        chips.push((format!("no colours: {why}"), theme.faint, Cmd::About));
+        chips.push((format!("no colours: {why}"), theme.faint, Cmd::ABOUT));
     }
-    chips.push((language, theme.muted, Cmd::SetLanguage));
-    chips.push((format!("{line}:{column}"), theme.muted, Cmd::GotoLine));
+    chips.push((language, theme.muted, Cmd::SET_LANGUAGE));
+    chips.push((format!("{line}:{column}"), theme.muted, Cmd::GOTO_LINE));
     chips.push((
         app.config.theme_name().to_string(),
         theme.muted,
-        Cmd::ThemePicker,
+        Cmd::THEME_PICKER,
     ));
 
     let mut hits = Vec::new();
@@ -2086,7 +2086,7 @@ enum HelpLine {
 /// The help, built from the bindings actually in force — so a rebound key
 /// shows up here rather than a lie about what textfold shipped with.
 fn help_lines(app: &App) -> Vec<HelpLine> {
-    use crate::cmd::{ALL, Group};
+    use crate::cmd::Group;
     let mut lines = Vec::new();
     let groups = [
         (Group::File, "Files"),
@@ -2096,10 +2096,11 @@ fn help_lines(app: &App) -> Vec<HelpLine> {
         (Group::Search, "Finding"),
         (Group::Code, "Code"),
         (Group::View, "The view"),
+        (Group::Tool, "Tools"),
         (Group::Help, "Help"),
     ];
     for (group, title) in groups {
-        let mut items: Vec<HelpLine> = ALL
+        let mut items: Vec<HelpLine> = crate::cmd::all()
             .iter()
             .filter(|cmd| cmd.group() == group)
             .filter_map(|cmd| {
@@ -2200,7 +2201,7 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(Config::default(), tx);
         for _ in 1..count {
-            app.run(Cmd::New);
+            app.run(Cmd::NEW);
         }
         app.screen = Rect::new(0, 0, width, 12);
         app
@@ -2249,7 +2250,7 @@ mod tests {
         let mut app = App::new(Config::default(), tx);
         for (n, name) in names.iter().enumerate() {
             if n > 0 {
-                app.run(Cmd::New);
+                app.run(Cmd::NEW);
             }
             app.here_mut().name = (*name).to_string();
         }
@@ -2357,7 +2358,7 @@ mod tests {
     fn help_rows(width: u16, height: u16) -> Vec<String> {
         let (tx, _rx) = std::sync::mpsc::channel();
         let mut app = App::new(Config::default(), tx);
-        app.run(Cmd::Help);
+        app.run(Cmd::HELP);
         let mut terminal =
             Terminal::new(TestBackend::new(width, height)).expect("a terminal to draw on");
         terminal
@@ -2479,7 +2480,7 @@ mod tests {
                 source: None,
                 code: None,
                 data: None,
-                server: 0,
+                told: crate::doc::Told::Server(0),
             }];
         });
         let coloured = (0..buffer.area.width)
@@ -2501,7 +2502,7 @@ mod tests {
                 source: None,
                 code: None,
                 data: None,
-                server: 0,
+                told: crate::doc::Told::Server(0),
             }];
         };
         let underlines = |buffer: &Buffer| {
@@ -2972,20 +2973,20 @@ mod tests {
         let mut app = tabs_named(&["aaa", "bbb", "ccc"], 80);
         // The current tab is the last one made.
         assert_eq!(app.here().name, "ccc");
-        app.run(Cmd::MoveTabLeft);
+        app.run(Cmd::MOVE_TAB_LEFT);
         assert_eq!(order(&app), vec!["aaa", "ccc", "bbb"]);
-        app.run(Cmd::MoveTabLeft);
+        app.run(Cmd::MOVE_TAB_LEFT);
         assert_eq!(order(&app), vec!["ccc", "aaa", "bbb"]);
         assert_eq!(app.here().name, "ccc", "it stopped being the current tab");
 
         // And no further: moving a tab does not wrap it round to the far end,
         // which is never what nudging one along meant.
-        app.run(Cmd::MoveTabLeft);
+        app.run(Cmd::MOVE_TAB_LEFT);
         assert_eq!(order(&app), vec!["ccc", "aaa", "bbb"]);
-        app.run(Cmd::MoveTabRight);
-        app.run(Cmd::MoveTabRight);
+        app.run(Cmd::MOVE_TAB_RIGHT);
+        app.run(Cmd::MOVE_TAB_RIGHT);
         assert_eq!(order(&app), vec!["aaa", "bbb", "ccc"]);
-        app.run(Cmd::MoveTabRight);
+        app.run(Cmd::MOVE_TAB_RIGHT);
         assert_eq!(order(&app), vec!["aaa", "bbb", "ccc"]);
     }
 
@@ -3002,7 +3003,7 @@ mod tests {
 
         // And walking back to the first one scrolls the other way.
         for _ in 0..11 {
-            app.run(Cmd::PrevBuffer);
+            app.run(Cmd::PREV_BUFFER);
         }
         let here = app.here().name.clone();
         let row = tab_row(&mut app, 40);
@@ -3015,7 +3016,7 @@ mod tests {
         let mut app = many_tabs(12, 40);
         // Somewhere in the middle, so there is more of the row both ways.
         for _ in 0..5 {
-            app.run(Cmd::PrevBuffer);
+            app.run(Cmd::PREV_BUFFER);
         }
         let row = tab_row(&mut app, 40);
         assert!(row.starts_with('\u{2039}'), "{row:?}");
@@ -3074,7 +3075,7 @@ mod tests {
     fn the_wheel_over_the_tabs_walks_along_them() {
         let mut app = many_tabs(12, 40);
         for _ in 0..11 {
-            app.run(Cmd::PrevBuffer);
+            app.run(Cmd::PREV_BUFFER);
         }
         tab_row(&mut app, 40);
         assert_eq!(app.tab_scroll, 0);
@@ -3116,8 +3117,8 @@ mod tests {
         // Alt-Shift-I puts a cursor at the end of every selected line, which
         // is a cursor with no character under it to carry the block.
         let (buffer, app) = screen("aa\nbb\ncc\n", |app| {
-            app.run(Cmd::SelectAll);
-            app.run(Cmd::CursorsToLineEnds);
+            app.run(Cmd::SELECT_ALL);
+            app.run(Cmd::CURSORS_TO_LINE_ENDS);
         });
         assert!(app.view().sel.len() > 1, "several cursors");
         let blocks = cells_on(&buffer, app.theme.cursor);
@@ -3163,7 +3164,7 @@ mod tests {
             let at = menu
                 .items
                 .iter()
-                .position(|i| i.action == crate::menu::Action::Run(Cmd::SelectAll))
+                .position(|i| i.action == crate::menu::Action::Run(Cmd::SELECT_ALL))
                 .expect("select all is on the menu");
             (menu.area, at)
         };

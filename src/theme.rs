@@ -531,10 +531,37 @@ impl Themes {
     /// through them keeps a stable order.
     pub fn load() -> Self {
         let mut themes = Self::built_in();
+        themes.load_from_plugins();
         if let Some(dir) = themes_dir() {
             themes.load_from(&dir);
         }
         themes
+    }
+
+    /// Colours a plugin brought with it.
+    ///
+    /// After the ones textfold ships, so that a plugin can replace one, and
+    /// before your own themes directory, so that you can replace a plugin's.
+    /// That order is the same one everything else here uses: what ships, then
+    /// what you installed, then what you wrote.
+    fn load_from_plugins(&mut self) {
+        for plugin in crate::plugin::active() {
+            for (name, value) in &plugin.themes {
+                let mut value = value.clone();
+                // Filed under its name, so a theme in a manifest does not have
+                // to say what it is called twice.
+                if let Some(object) = value.as_object_mut() {
+                    object
+                        .entry("name")
+                        .or_insert_with(|| serde_json::Value::String(name.clone()));
+                }
+                let from = format!("{} ({})", name, plugin.id);
+                match serde_json::to_string(&value) {
+                    Ok(text) => self.add(&text, &from),
+                    Err(e) => self.problems.push(format!("{from}: {e}")),
+                }
+            }
+        }
     }
 
     fn load_from(&mut self, dir: &std::path::Path) {

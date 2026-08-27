@@ -254,9 +254,18 @@ pub struct Diagnostic {
     /// which looks from the outside like a linter that complains and offers
     /// nothing.
     pub data: Option<serde_json::Value>,
-    /// Which server it came from, so a fresh set from one replaces only its
-    /// own findings.
-    pub server: usize,
+    /// Who said so, so that a fresh set from one replaces only its own
+    /// findings and leaves everybody else's alone.
+    pub told: Told,
+}
+
+/// Where a complaint came from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Told {
+    /// A language server, by its id.
+    Server(usize),
+    /// A tool a plugin runs, by the command name it answers to.
+    Tool(&'static str),
 }
 
 /// How bad it is.

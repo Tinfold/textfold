@@ -69,6 +69,67 @@ pub struct ServerEntry {
     pub language: String,
 }
 
+/// A program a plugin can run for you: a formatter, a linter, a test run.
+///
+/// The half of "an editor with plugins" that needs no plugin runtime at all.
+/// A great deal of what people write plugins for in other editors is running
+/// something on the buffer and doing one of four things with what it printed,
+/// and that is a table, not code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Tool {
+    /// `python/black`, which is also the command name a key binds to.
+    pub id: String,
+    /// `black`.
+    pub name: String,
+    pub about: String,
+    pub command: String,
+    pub args: Vec<String>,
+    /// Which languages it is for. Empty means any file.
+    pub languages: Vec<String>,
+    /// Files that mark the top of the project it should be run in.
+    pub roots: Vec<String>,
+    /// Whether the buffer goes in on standard input. Otherwise the tool is
+    /// expected to read the file itself, and `${file}` in the arguments is
+    /// where its path goes.
+    pub stdin: bool,
+    pub output: Output,
+    /// How to read a line of output as a problem. See [`Output::Problems`].
+    pub pattern: Option<String>,
+    /// Whether to run it every time the file is saved.
+    pub on_save: bool,
+}
+
+/// What to do with what a tool printed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Output {
+    /// It replaces the buffer. Formatters: `black -`, `gofmt`, `prettier`.
+    Replace,
+    /// It opens in a buffer of its own. Test runs, `git log`, anything you
+    /// want to read rather than apply.
+    Show,
+    /// It is a list of problems, read with `pattern` and shown in the margin
+    /// beside the language server's own.
+    Problems,
+    /// Nothing to read. Say that it ran and what it said if it failed.
+    Ignore,
+}
+
+impl Tool {
+    /// What running it does to the text, which is what decides whether it may
+    /// run on a read-only file.
+    pub fn behaviour(&self) -> crate::cmd::Behaviour {
+        match self.output {
+            Output::Replace => crate::cmd::Behaviour::Edits,
+            _ => crate::cmd::Behaviour::Passive,
+        }
+    }
+
+    /// Whether it is for this language.
+    pub fn wants(&self, language: &str) -> bool {
+        self.languages.is_empty() || self.languages.iter().any(|l| l == language)
+    }
+}
+
 /// One plugin.
 pub struct Plugin {
     /// What the settings file and the list call it. Unique: a plugin of yours
@@ -84,6 +145,13 @@ pub struct Plugin {
     /// What it says about languages, in the shape `languages.json` uses.
     pub languages: BTreeMap<String, FileLang>,
     pub servers: Vec<ServerEntry>,
+    /// Programs it can run for you, each a command of its own.
+    pub tools: Vec<Tool>,
+    /// Sets of colours it brings, by name, in the shape a theme file is in.
+    pub themes: BTreeMap<String, serde_json::Value>,
+    /// Keys it would like bound, by command name. What you have set in your
+    /// own settings wins; this is the plugin saying what it would suggest.
+    pub keys: BTreeMap<String, Vec<String>>,
 }
 
 impl Plugin {
@@ -335,6 +403,38 @@ struct FilePlugin {
     _about: Option<serde_json::Value>,
     #[serde(default)]
     languages: BTreeMap<String, FileLang>,
+    #[serde(default)]
+    tools: Vec<FileTool>,
+    #[serde(default)]
+    themes: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    keys: BTreeMap<String, Vec<String>>,
+}
+
+/// A tool, as its file writes it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileTool {
+    name: String,
+    #[serde(default)]
+    about: Option<String>,
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    languages: Vec<String>,
+    #[serde(default)]
+    roots: Vec<String>,
+    #[serde(default)]
+    stdin: Option<bool>,
+    /// `"replace"`, `"show"`, `"problems"`, or `"ignore"`. Absent means
+    /// `"replace"`, since a formatter is what most tools are.
+    #[serde(default)]
+    output: Option<String>,
+    #[serde(default)]
+    pattern: Option<String>,
+    #[serde(default)]
+    on_save: Option<bool>,
 }
 
 impl FilePlugin {
@@ -356,12 +456,50 @@ impl FilePlugin {
                 });
             }
         }
+        let tools = self
+            .tools
+            .into_iter()
+            .filter(|t| !t.command.trim().is_empty() && !t.name.trim().is_empty())
+            .map(|t| {
+                let name = t.name.trim().to_lowercase();
+                let output = match t.output.as_deref().map(str::trim).unwrap_or("replace") {
+                    "show" => Output::Show,
+                    "problems" | "diagnostics" => Output::Problems,
+                    "ignore" | "none" => Output::Ignore,
+                    _ => Output::Replace,
+                };
+                Tool {
+                    id: format!("{id}/{name}"),
+                    about: t
+                        .about
+                        .unwrap_or_else(|| format!("Run {} on this file", t.command)),
+                    command: t.command,
+                    args: t.args,
+                    languages: t.languages.iter().map(|l| l.to_lowercase()).collect(),
+                    roots: if t.roots.is_empty() {
+                        vec![".git".into()]
+                    } else {
+                        t.roots
+                    },
+                    // A formatter reads the buffer; anything else is usually
+                    // about the file as it is on disk.
+                    stdin: t.stdin.unwrap_or(output == Output::Replace),
+                    on_save: t.on_save.unwrap_or(false),
+                    pattern: t.pattern,
+                    output,
+                    name,
+                }
+            })
+            .collect();
         Plugin {
             name: self.name.unwrap_or_else(|| id.clone()),
             about: self.about,
             on_by_default: self.enabled.unwrap_or(true),
             languages: self.languages,
+            themes: self.themes,
+            keys: self.keys,
             servers,
+            tools,
             source,
             id,
         }
@@ -439,6 +577,50 @@ mod tests {
         let mut chosen = BTreeMap::new();
         chosen.insert("sleeping".to_string(), true);
         assert!(decides("sleeping", &chosen, |id| id != "sleeping"));
+    }
+
+    #[test]
+    fn a_tool_is_read_with_the_defaults_that_suit_what_it_is() {
+        let file: FilePlugin = serde_json::from_str(
+            r#"{"id":"pytools","tools":[
+                 {"name":"fmt","command":"ruff","args":["format","-"]},
+                 {"name":"lint","command":"ruff","output":"problems",
+                  "pattern":"%f:%l:%c: %m"},
+                 {"name":"tests","command":"pytest","output":"show"}]}"#,
+        )
+        .unwrap();
+        let plugin = file.into_plugin("pytools", Source::BuiltIn);
+
+        let ids: Vec<&str> = plugin.tools.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, ["pytools/fmt", "pytools/lint", "pytools/tests"]);
+
+        // A tool that says nothing is a formatter, because most of them are —
+        // and a formatter reads the buffer rather than the file on disk, so it
+        // gets standard input without having to ask.
+        assert_eq!(plugin.tools[0].output, Output::Replace);
+        assert!(plugin.tools[0].stdin);
+        assert_eq!(plugin.tools[0].behaviour(), crate::cmd::Behaviour::Edits);
+
+        // Anything else is about the file as it was saved, so it is not.
+        assert_eq!(plugin.tools[1].output, Output::Problems);
+        assert!(!plugin.tools[1].stdin);
+        assert_eq!(plugin.tools[1].behaviour(), crate::cmd::Behaviour::Passive);
+        assert_eq!(plugin.tools[2].output, Output::Show);
+
+        // And with nothing said about languages, it is for any file.
+        assert!(plugin.tools[0].wants("python"));
+        assert!(plugin.tools[0].wants("rust"));
+    }
+
+    #[test]
+    fn a_tool_says_which_languages_it_is_for() {
+        let file: FilePlugin = serde_json::from_str(
+            r#"{"id":"p","tools":[{"name":"t","command":"c","languages":["Python"]}]}"#,
+        )
+        .unwrap();
+        let plugin = file.into_plugin("p", Source::BuiltIn);
+        assert!(plugin.tools[0].wants("python"), "the case should not matter");
+        assert!(!plugin.tools[0].wants("rust"));
     }
 
     #[test]
