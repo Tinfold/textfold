@@ -192,6 +192,13 @@ impl Vars {
         Self { values }
     }
 
+    /// Another name a placeholder can use. What lets a tool ask for
+    /// `${file}`, which is a fact about the buffer rather than about the
+    /// project and so is not known when the table is built.
+    pub fn set(&mut self, name: &'static str, value: String) {
+        self.values.insert(name, value);
+    }
+
     /// One string with its placeholders filled in. `None` where the string
     /// asks for something there is no answer to.
     ///

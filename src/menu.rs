@@ -204,20 +204,20 @@ mod tests {
     fn a_menu_opens_on_something_you_can_choose() {
         let m = menu(vec![
             Item::divider(),
-            Item::new("cut", Cmd::Cut).enabled(false),
-            Item::new("copy", Cmd::Copy),
+            Item::new("cut", Cmd::CUT).enabled(false),
+            Item::new("copy", Cmd::COPY),
         ]);
         assert_eq!(m.cursor, 2);
-        assert_eq!(m.chosen(), Some(Action::Run(Cmd::Copy)));
+        assert_eq!(m.chosen(), Some(Action::Run(Cmd::COPY)));
     }
 
     #[test]
     fn moving_steps_over_dividers_and_what_cannot_be_chosen() {
         let mut m = menu(vec![
-            Item::new("copy", Cmd::Copy),
+            Item::new("copy", Cmd::COPY),
             Item::divider(),
-            Item::new("paste", Cmd::Paste).enabled(false),
-            Item::new("find", Cmd::Find),
+            Item::new("paste", Cmd::PASTE).enabled(false),
+            Item::new("find", Cmd::FIND),
         ]);
         assert_eq!(m.cursor, 0);
         m.step(1);
@@ -230,7 +230,7 @@ mod tests {
 
     #[test]
     fn a_menu_of_nothing_choosable_chooses_nothing() {
-        let mut m = menu(vec![Item::divider(), Item::new("cut", Cmd::Cut).enabled(false)]);
+        let mut m = menu(vec![Item::divider(), Item::new("cut", Cmd::CUT).enabled(false)]);
         m.step(1);
         assert_eq!(m.chosen(), None);
     }
@@ -238,27 +238,27 @@ mod tests {
     #[test]
     fn clicking_a_divider_does_nothing_rather_than_what_was_highlighted() {
         let m = menu(vec![
-            Item::new("cut", Cmd::Cut),
+            Item::new("cut", Cmd::CUT),
             Item::divider(),
-            Item::new("copy", Cmd::Copy),
+            Item::new("copy", Cmd::COPY),
         ]);
         assert_eq!(m.cursor, 0, "the highlight is on cut");
         assert_eq!(m.at(1), None, "the divider is not a row");
-        assert_eq!(m.at(2), Some(Action::Run(Cmd::Copy)));
+        assert_eq!(m.at(2), Some(Action::Run(Cmd::COPY)));
     }
 
     #[test]
     fn clicking_a_row_asks_about_that_row_not_the_highlight() {
         let m = menu(vec![
-            Item::new("cut", Cmd::Cut),
-            Item::new("paste", Cmd::Paste).enabled(false),
+            Item::new("cut", Cmd::CUT),
+            Item::new("paste", Cmd::PASTE).enabled(false),
         ]);
         assert_eq!(m.at(1), None, "an unavailable row does nothing");
     }
 
     #[test]
     fn pointing_at_a_divider_leaves_the_highlight_alone() {
-        let mut m = menu(vec![Item::new("copy", Cmd::Copy), Item::divider()]);
+        let mut m = menu(vec![Item::new("copy", Cmd::COPY), Item::divider()]);
         m.point_at(1);
         assert_eq!(m.cursor, 0);
     }
@@ -266,8 +266,8 @@ mod tests {
     #[test]
     fn pointing_at_something_unavailable_still_moves_the_highlight() {
         let mut m = menu(vec![
-            Item::new("copy", Cmd::Copy),
-            Item::new("paste", Cmd::Paste).enabled(false),
+            Item::new("copy", Cmd::COPY),
+            Item::new("paste", Cmd::PASTE).enabled(false),
         ]);
         m.point_at(1);
         assert_eq!(m.cursor, 1, "the highlight has to be where the pointer is");
@@ -277,9 +277,9 @@ mod tests {
     #[test]
     fn the_arrows_still_skip_what_cannot_be_chosen() {
         let mut m = menu(vec![
-            Item::new("copy", Cmd::Copy),
-            Item::new("paste", Cmd::Paste).enabled(false),
-            Item::new("find", Cmd::Find),
+            Item::new("copy", Cmd::COPY),
+            Item::new("paste", Cmd::PASTE).enabled(false),
+            Item::new("find", Cmd::FIND),
         ]);
         m.step(1);
         assert_eq!(m.cursor, 2);

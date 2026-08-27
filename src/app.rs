@@ -24,7 +24,8 @@ use ratatui::crossterm::event::{
 use ratatui::layout::Rect;
 use serde_json::Value;
 
-use crate::cmd::Cmd;
+use crate::cmd::{self, Behaviour, Cmd, Group, Spec};
+use crate::plugin::{Output, Tool};
 use crate::config::{Config, LineNumbers};
 use crate::doc::{Diagnostic, DocId, Document, Indent, OnDisk, Severity};
 use crate::edit::{self, Motion};
@@ -48,6 +49,10 @@ pub enum Event {
     Files(Vec<PathBuf>),
     /// A thread finished searching the project.
     Found(String, Vec<Row>),
+    /// A tool a plugin runs has finished. Boxed because it carries everything
+    /// the program printed, and an event that is occasionally a megabyte
+    /// should not make every keystroke a megabyte to move about.
+    Tool(Box<crate::tool::Finished>),
 }
 
 /// How long the mouse has to sit still over a word before textfold asks what
@@ -762,23 +767,21 @@ impl Gathered {
 /// stack.
 struct BeforeSave {
     doc: DocId,
-    /// What is left to ask, in order: one kind of fix put to one server.
+    /// What is left to do, in order.
     ///
     /// One at a time, and this is the whole reason there is a queue rather
-    /// than a set. Each answer is a list of edits at positions in the file *as
-    /// it was when the question was asked*, so the first one applied moves
-    /// everything a second one was pointing at. Asking them one after another
-    /// means every answer is about the file as it actually is; asking them all
+    /// than a set. Every one of these answers with a set of edits at positions
+    /// in the file *as it was when it was asked*, so the first one applied
+    /// moves everything a second one was pointing at. Doing them one after
+    /// another means each is about the file as it actually is; doing them all
     /// at once and applying what comes back is how "save" quietly deletes a
     /// line.
-    left: Vec<(String, ServerId)>,
+    left: Vec<Step>,
     /// The one outstanding, so that a late answer to a question we have given
     /// up on is not applied to a file it is no longer about.
-    asking: Option<(String, ServerId)>,
-    /// Whether to run the formatter once the fixes are in.
-    format: bool,
-    /// Whether to write the file afterwards. `false` is somebody having asked
-    /// for the fixes on their own, without a save behind them.
+    doing: Option<Step>,
+    /// Whether to write the file at the end. `false` is somebody having asked
+    /// for the tidying on its own, without a save behind it.
     write: bool,
     /// Where to write it, for a "save as". Carried the whole way rather than
     /// looked up at the end: by the time the formatter has answered, the
@@ -788,6 +791,18 @@ struct BeforeSave {
     /// When to stop waiting on the outstanding one. A server that never
     /// answers must not mean a file that is never saved.
     due: Instant,
+}
+
+/// One thing that has to happen before a file is written.
+#[derive(Clone, PartialEq, Debug)]
+enum Step {
+    /// One kind of fix — `source.fixAll`, `source.organizeImports` — put to
+    /// one language server.
+    Fix(String, ServerId),
+    /// A program a plugin brought that rewrites the file: `black`, `gofmt`.
+    Rewrite(&'static Tool),
+    /// The language server's own formatter.
+    Format,
 }
 
 /// Something to tell the person using the editor.
@@ -962,11 +977,6 @@ pub struct App {
     session_dirty: bool,
     session_written: Instant,
 
-    /// A document waiting to be written once the formatter answers. Formatting
-    /// on save is a round trip to a language server, so the save cannot happen
-    /// until the edits are in — saving first would write the old text and
-    /// leave the reformatted text unsaved.
-    save_after_format: Option<(DocId, Option<PathBuf>)>,
 }
 
 impl App {
@@ -975,6 +985,9 @@ impl App {
         // has to be known before the language table is built.
         crate::plugin::init(&config.plugins);
         lang::init();
+        // The commands have to be settled before the keys are read: a plugin
+        // can bring one, and a binding for it has to find something to bind to.
+        crate::cmd::init();
         let themes = Themes::load();
         let theme = themes
             .by_name(config.theme_name())
@@ -1031,7 +1044,6 @@ impl App {
             accept_when_resolved: None,
             session_dirty: false,
             session_written: Instant::now(),
-            save_after_format: None,
             config,
         };
         // Any Python environment chosen before, so a project opens pointing at
@@ -1778,6 +1790,7 @@ impl App {
                 }
                 self.files = Some(files);
             }
+            Event::Tool(done) => self.on_tool(*done),
             Event::Found(query, rows) => {
                 if let Overlay::Picker(picker) = &mut self.overlay
                     && picker.kind == Kind::Grep
@@ -1809,7 +1822,7 @@ impl App {
         // Only where it would not otherwise type a character: somebody who has
         // bound this to a plain letter meant that letter in the text, not in
         // the middle of a search box.
-        if key.as_typed().is_none() && self.keys.lookup(key) == Some(Cmd::OpenPath) {
+        if key.as_typed().is_none() && self.keys.lookup(key) == Some(Cmd::OPEN_PATH) {
             return self.open_prompt(PromptKind::OpenPath);
         }
 
@@ -1983,344 +1996,264 @@ impl App {
 
     // ---- Running commands ----
 
+    /// Do what a command says.
+    ///
+    /// The command itself is a number; what it means comes out of the
+    /// registry, so this is the same three lines whether the row was written
+    /// in the table below or brought along by a plugin.
     pub fn run(&mut self, cmd: Cmd) {
+        let behaviour = cmd.behaviour();
         if cmd.writes() && self.refuse_if_read_only() {
             return;
         }
-        if cmd.breaks_undo() {
+        if !behaviour.joins() {
             self.here_mut().close_revision();
         }
         // Backspace is the other key that leaves you still completing a word,
         // and it narrows the list rather than closing it — which it cannot do
         // if the list has already gone.
-        if !matches!(cmd, Cmd::Completion | Cmd::DeleteBackward) {
+        if cmd != Cmd::COMPLETION && cmd != Cmd::DELETE_BACKWARD {
             self.completion = None;
             self.completion_due = None;
             self.accept_when_resolved = None;
         }
 
-        let tab_width = self.config.tab_width();
-        match cmd {
-            // ---- Moving ----
-            Cmd::MoveLeft => self.motion(Motion::Left, false),
-            Cmd::MoveRight => self.motion(Motion::Right, false),
-            Cmd::MoveUp => self.motion(Motion::Up, false),
-            Cmd::MoveDown => self.motion(Motion::Down, false),
-            Cmd::MoveWordLeft => self.motion(Motion::WordLeft, false),
-            Cmd::MoveWordRight => self.motion(Motion::WordRight, false),
-            Cmd::MoveLineStart => self.motion(Motion::LineStart, false),
-            Cmd::MoveLineEnd => self.motion(Motion::LineEnd, false),
-            Cmd::MovePageUp => self.motion(Motion::PageUp, false),
-            Cmd::MovePageDown => self.motion(Motion::PageDown, false),
-            Cmd::MoveDocStart => self.motion(Motion::DocStart, false),
-            Cmd::MoveDocEnd => self.motion(Motion::DocEnd, false),
-            Cmd::MoveParaUp => self.motion(Motion::ParaUp, false),
-            Cmd::MoveParaDown => self.motion(Motion::ParaDown, false),
-            Cmd::ExtendLeft => self.motion(Motion::Left, true),
-            Cmd::ExtendRight => self.motion(Motion::Right, true),
-            Cmd::ExtendUp => self.motion(Motion::Up, true),
-            Cmd::ExtendDown => self.motion(Motion::Down, true),
-            Cmd::ExtendWordLeft => self.motion(Motion::WordLeft, true),
-            Cmd::ExtendWordRight => self.motion(Motion::WordRight, true),
-            Cmd::ExtendLineStart => self.motion(Motion::LineStart, true),
-            Cmd::ExtendLineEnd => self.motion(Motion::LineEnd, true),
-            Cmd::ExtendPageUp => self.motion(Motion::PageUp, true),
-            Cmd::ExtendPageDown => self.motion(Motion::PageDown, true),
-            Cmd::ExtendDocStart => self.motion(Motion::DocStart, true),
-            Cmd::ExtendDocEnd => self.motion(Motion::DocEnd, true),
-
-            Cmd::ScrollUp => self.scroll(-3),
-            Cmd::ScrollDown => self.scroll(3),
-            Cmd::CentreCursor => self.centre(),
-            Cmd::MatchBracket => self.go_to_matching_bracket(),
-            Cmd::GotoLine => self.open_prompt(PromptKind::GotoLine),
-            Cmd::JumpBack => self.jump(false),
-            Cmd::JumpForward => self.jump(true),
-
-            // ---- Selecting ----
-            Cmd::SelectAll => {
-                let (doc, view) = self.pair();
-                edit::select_all(doc, view);
-            }
-            Cmd::SelectLine => {
-                let (doc, view) = self.pair();
-                edit::select_line(doc, view);
-                self.scroll_into_view();
-            }
-            Cmd::SelectWord => {
-                let (doc, view) = self.pair();
-                edit::select_word(doc, view);
-            }
-            Cmd::ExpandSelection => self.expand_selection(),
-            Cmd::AddCursorAbove => {
-                let (doc, view) = self.pair();
-                edit::add_cursor_vertically(doc, view, tab_width, false);
-                self.scroll_into_view();
-            }
-            Cmd::AddCursorBelow => {
-                let (doc, view) = self.pair();
-                edit::add_cursor_vertically(doc, view, tab_width, true);
-                self.scroll_into_view();
-            }
-            Cmd::AddCursorNextMatch => {
-                let (doc, view) = self.pair();
-                let found = edit::add_cursor_next_match(doc, view);
-                if !found {
-                    self.say("no more of those");
-                } else {
-                    self.scroll_into_view();
-                }
-            }
-            Cmd::SelectAllMatches => {
-                let (doc, view) = self.pair();
-                let count = edit::select_all_matches(doc, view);
-                if count > 1 {
-                    self.say(format!("{count} cursors"));
-                }
-            }
-            Cmd::CursorsToLineEnds => {
-                let (doc, view) = self.pair();
-                edit::cursors_to_line_ends(doc, view);
-            }
-            Cmd::CollapseCursors => {
-                self.view_mut().sel.collapse_to_primary();
-                self.scroll_into_view();
-            }
-
-            // ---- Changing text ----
-            Cmd::InsertNewline => {
-                let (doc, view) = self.pair();
-                let mut edits = edit::newline(doc, view, tab_width);
-                edits.extend(edit::newline_closing(doc, view, tab_width));
-                self.after_edit(edits);
-                self.completion = None;
-            }
-            Cmd::DeleteBackward => {
-                let (doc, view) = self.pair();
-                let edits = edit::delete_backward(doc, view, tab_width);
-                self.after_edit(edits);
-                self.refresh_completion();
-            }
-            Cmd::DeleteForward => {
-                let (doc, view) = self.pair();
-                let edits = edit::delete_forward(doc, view);
-                self.after_edit(edits);
-            }
-            Cmd::DeleteWordBackward => {
-                let (doc, view) = self.pair();
-                let edits = edit::delete_word_backward(doc, view);
-                self.after_edit(edits);
-            }
-            Cmd::DeleteWordForward => {
-                let (doc, view) = self.pair();
-                let edits = edit::delete_word_forward(doc, view);
-                self.after_edit(edits);
-            }
-            Cmd::DeleteToLineStart => {
-                let (doc, view) = self.pair();
-                let edits = edit::delete_to_line_start(doc, view);
-                self.after_edit(edits);
-            }
-            Cmd::DeleteToLineEnd => {
-                let (doc, view) = self.pair();
-                let edits = edit::delete_to_line_end(doc, view);
-                self.after_edit(edits);
-            }
-            Cmd::DeleteLine => {
-                let (doc, view) = self.pair();
-                let edits = edit::delete_line(doc, view);
-                self.after_edit(edits);
-            }
-            Cmd::DuplicateLine => {
-                let (doc, view) = self.pair();
-                let edits = edit::duplicate_line(doc, view);
-                self.after_edit(edits);
-            }
-            Cmd::MoveLineUp => {
-                let (doc, view) = self.pair();
-                let edits = edit::move_lines(doc, view, false);
-                self.after_edit(edits);
-            }
-            Cmd::MoveLineDown => {
-                let (doc, view) = self.pair();
-                let edits = edit::move_lines(doc, view, true);
-                self.after_edit(edits);
-            }
-            Cmd::JoinLines => {
-                let (doc, view) = self.pair();
-                let edits = edit::join_lines(doc, view);
-                self.after_edit(edits);
-            }
-            Cmd::Indent => self.on_tab(false),
-            Cmd::Unindent => self.on_tab(true),
-            Cmd::ToggleComment => {
-                let (doc, view) = self.pair();
-                match edit::toggle_comment(doc, view, tab_width) {
-                    Some(edits) => self.after_edit(edits),
-                    None => {
-                        let name = lang::get(self.here().language).name.clone();
-                        self.say(format!("textfold does not know how to comment {name}"));
-                    }
-                }
-            }
-            Cmd::UpperCase => {
-                let (doc, view) = self.pair();
-                let edits = edit::change_case(doc, view, true);
-                self.after_edit(edits);
-            }
-            Cmd::LowerCase => {
-                let (doc, view) = self.pair();
-                let edits = edit::change_case(doc, view, false);
-                self.after_edit(edits);
-            }
-            Cmd::Undo => self.undo(true),
-            Cmd::Redo => self.undo(false),
-            Cmd::Copy => self.copy(false),
-            Cmd::Cut => self.copy(true),
-            Cmd::Paste => {
-                let text = self.system_clipboard();
-                if text.is_empty() {
-                    self.say("nothing to paste");
-                } else {
-                    let (doc, view) = self.pair();
-                    let edits = edit::insert_atomic(doc, view, &text);
-                    self.after_edit(edits);
-                }
-            }
-
-            // ---- Files ----
-            Cmd::New => {
-                let id = self.new_scratch();
-                self.show(id);
-            }
-            Cmd::Open => self.open_files_picker(),
-            Cmd::OpenPath => self.open_prompt(PromptKind::OpenPath),
-            Cmd::Save => self.save(None),
-            Cmd::SaveAs => self.open_prompt(PromptKind::SaveAs),
-            Cmd::SaveAll => self.save_all(),
-            Cmd::Reload => self.reload(),
-            Cmd::Close => self.close(false),
-            Cmd::CloseOthers => self.close_many(Keep::Others),
-            Cmd::CloseSaved => self.close_many(Keep::Unsaved),
-            Cmd::CloseAll => self.close_many(Keep::Nothing),
-            Cmd::CopyPath => self.copy_path(false),
-            Cmd::CopyRelativePath => self.copy_path(true),
-            Cmd::ContextMenu => self.open_context_menu(),
-            Cmd::NextChange => self.change_step(true),
-            Cmd::PrevChange => self.change_step(false),
-            Cmd::CloseForce => self.close(true),
-            Cmd::Quit => self.leave(false),
-            Cmd::QuitForce => self.leave(true),
-            Cmd::NextBuffer => self.step_buffer(1),
-            Cmd::PrevBuffer => self.step_buffer(-1),
-            Cmd::MoveTabLeft => self.step_tab(-1),
-            Cmd::MoveTabRight => self.step_tab(1),
-            Cmd::Buffers => self.open_buffers_picker(),
-
-            // ---- Searching ----
-            Cmd::Find => self.open_prompt(PromptKind::Find),
-            Cmd::FindNext => self.find_step(1),
-            Cmd::FindPrev => self.find_step(-1),
-            Cmd::FindWordUnderCursor => {
-                let at = self.view().cursor();
-                match text::word_text_at(&self.here().rope, at) {
-                    Some(word) => {
-                        self.last_search = word;
-                        self.find_step(1);
-                    }
-                    None => self.say("the cursor is not on a word"),
-                }
-            }
-            Cmd::Replace => self.open_prompt(PromptKind::ReplaceFind),
-            Cmd::Grep => self.open_grep_picker(),
-
-            // ---- Language servers ----
-            Cmd::Completion => self.ask_for_completions(None, true),
-            Cmd::GotoDefinition => self.ask_goto(Goto::Definition),
-            Cmd::GotoTypeDefinition => self.ask_goto(Goto::Type),
-            Cmd::GotoImplementation => self.ask_goto(Goto::Implementation),
-            Cmd::References => self.ask_references(),
-            Cmd::Hover => self.ask_hover(self.view().cursor()),
-            Cmd::Rename => self.start_rename(),
-            Cmd::CodeAction => self.ask_code_actions(),
-            Cmd::FixIt => self.fix_it(),
-            Cmd::FixAll => self.fix_all(&[SOURCE_FIX_ALL.into()]),
-            Cmd::OrganizeImports => self.fix_all(&[SOURCE_ORGANIZE_IMPORTS.into()]),
-            Cmd::Format => self.format(),
-            Cmd::FormatAndFix => self.format_and_fix(),
-            Cmd::Symbols => self.ask_symbols(),
-            Cmd::WorkspaceSymbols => self.open_workspace_symbols(),
-            Cmd::Diagnostics => self.open_diagnostics_picker(),
-            Cmd::NextDiagnostic => self.step_diagnostic(1),
-            Cmd::PrevDiagnostic => self.step_diagnostic(-1),
-            Cmd::SignatureHelp => {
-                let at = self.view().cursor();
-                let (doc, lsp) = self.doc_and_lsp();
-                if lsp.signature(doc, at).is_none() {
-                    self.say("no language server here");
-                }
-            }
-            Cmd::DiffPanes => self.toggle_diff(),
-            Cmd::PythonEnvironment => self.open_environment_picker(),
-            Cmd::RestartServers => {
-                self.lsp.restart();
-                let docs: Vec<DocId> = self.docs.iter().map(|d| d.id).collect();
-                for id in docs {
-                    self.lsp_open(id);
-                }
-                self.say("starting the language servers again");
-            }
-            Cmd::ServerStatus => self.show_server_status(),
-
-            // ---- The view ----
-            Cmd::CommandPalette => self.open_commands_picker(),
-            Cmd::Split => self.split(),
-            Cmd::ClosePane => self.close_pane(),
-            Cmd::FocusNextPane => self.focus_pane(1),
-            Cmd::FocusPrevPane => self.focus_pane(-1),
-            Cmd::SwapSplitDirection => {
-                self.side_by_side = !self.side_by_side;
-            }
-            Cmd::ThemePicker => self.open_theme_picker(),
-            Cmd::NextTheme => self.step_theme(1),
-            Cmd::PrevTheme => self.step_theme(-1),
-            Cmd::ToggleLineNumbers => self.toggle_setting("line_numbers"),
-            Cmd::ToggleRelativeNumbers => self.toggle_setting("relative_numbers"),
-            Cmd::ToggleWrap => {
-                let wrap = !self.view().wrap;
-                self.view_mut().wrap = wrap;
-                self.view_mut().left = 0;
-                self.scroll_into_view();
-                self.say(if wrap {
-                    "long lines fold"
-                } else {
-                    "long lines run off the side"
-                });
-            }
-            Cmd::ToggleWhitespace => self.toggle_setting("show_whitespace"),
-            Cmd::ToggleMouse => self.toggle_setting("mouse"),
-            Cmd::SetLanguage => self.open_language_picker(),
-            Cmd::Settings => self.open_settings_picker(),
-            Cmd::RestoreSession => {
-                let count = self.restore_session(true);
-                if count > 0 {
-                    self.say_good(format!(
-                        "brought back {count} {}",
-                        plural("file", count)
-                    ));
-                }
-            }
-            Cmd::Plugins => self.open_plugins_picker(),
-
-            // ---- Getting out ----
-            Cmd::Escape => self.escape(),
-            Cmd::Help => self.overlay = Overlay::Help(0),
-            Cmd::About => self.say(format!(
-                "textfold {} — {} languages, {} themes",
-                env!("CARGO_PKG_VERSION"),
-                lang::names().len(),
-                self.themes.entries.len()
+        match cmd.run() {
+            cmd::Run::Built(run) => run(self),
+            cmd::Run::Tool(tool) => self.run_tool(tool),
+            cmd::Run::Gone => self.say(format!(
+                "{} came from a plugin that is switched off",
+                cmd.name()
             )),
+        }
+    }
+
+    fn select_all(&mut self) {
+        let (doc, view) = self.pair();
+        edit::select_all(doc, view);
+    }
+
+    fn select_line(&mut self) {
+        let (doc, view) = self.pair();
+        edit::select_line(doc, view);
+        self.scroll_into_view();
+    }
+
+    fn select_word(&mut self) {
+        let (doc, view) = self.pair();
+        edit::select_word(doc, view);
+    }
+
+    fn add_cursor_above(&mut self) {
+        let tab_width = self.config.tab_width();
+        let (doc, view) = self.pair();
+        edit::add_cursor_vertically(doc, view, tab_width, false);
+        self.scroll_into_view();
+    }
+
+    fn add_cursor_below(&mut self) {
+        let tab_width = self.config.tab_width();
+        let (doc, view) = self.pair();
+        edit::add_cursor_vertically(doc, view, tab_width, true);
+        self.scroll_into_view();
+    }
+
+    fn add_cursor_at_next_match(&mut self) {
+        let (doc, view) = self.pair();
+        let found = edit::add_cursor_next_match(doc, view);
+        if !found {
+            self.say("no more of those");
+        } else {
+            self.scroll_into_view();
+        }
+    }
+
+    fn select_every_match(&mut self) {
+        let (doc, view) = self.pair();
+        let count = edit::select_all_matches(doc, view);
+        if count > 1 {
+            self.say(format!("{count} cursors"));
+        }
+    }
+
+    fn cursors_to_line_ends(&mut self) {
+        let (doc, view) = self.pair();
+        edit::cursors_to_line_ends(doc, view);
+    }
+
+    fn collapse_cursors(&mut self) {
+        self.view_mut().sel.collapse_to_primary();
+        self.scroll_into_view();
+    }
+
+    fn insert_newline(&mut self) {
+        let tab_width = self.config.tab_width();
+        let (doc, view) = self.pair();
+        let mut edits = edit::newline(doc, view, tab_width);
+        edits.extend(edit::newline_closing(doc, view, tab_width));
+        self.after_edit(edits);
+        self.completion = None;
+    }
+
+    fn delete_backward(&mut self) {
+        let tab_width = self.config.tab_width();
+        let (doc, view) = self.pair();
+        let edits = edit::delete_backward(doc, view, tab_width);
+        self.after_edit(edits);
+        self.refresh_completion();
+    }
+
+    fn delete_forward(&mut self) {
+        let (doc, view) = self.pair();
+        let edits = edit::delete_forward(doc, view);
+        self.after_edit(edits);
+    }
+
+    fn delete_word_backward(&mut self) {
+        let (doc, view) = self.pair();
+        let edits = edit::delete_word_backward(doc, view);
+        self.after_edit(edits);
+    }
+
+    fn delete_word_forward(&mut self) {
+        let (doc, view) = self.pair();
+        let edits = edit::delete_word_forward(doc, view);
+        self.after_edit(edits);
+    }
+
+    fn delete_to_line_start(&mut self) {
+        let (doc, view) = self.pair();
+        let edits = edit::delete_to_line_start(doc, view);
+        self.after_edit(edits);
+    }
+
+    fn delete_to_line_end(&mut self) {
+        let (doc, view) = self.pair();
+        let edits = edit::delete_to_line_end(doc, view);
+        self.after_edit(edits);
+    }
+
+    fn delete_line(&mut self) {
+        let (doc, view) = self.pair();
+        let edits = edit::delete_line(doc, view);
+        self.after_edit(edits);
+    }
+
+    fn duplicate_line(&mut self) {
+        let (doc, view) = self.pair();
+        let edits = edit::duplicate_line(doc, view);
+        self.after_edit(edits);
+    }
+
+    fn move_line_up(&mut self) {
+        let (doc, view) = self.pair();
+        let edits = edit::move_lines(doc, view, false);
+        self.after_edit(edits);
+    }
+
+    fn move_line_down(&mut self) {
+        let (doc, view) = self.pair();
+        let edits = edit::move_lines(doc, view, true);
+        self.after_edit(edits);
+    }
+
+    fn join_lines(&mut self) {
+        let (doc, view) = self.pair();
+        let edits = edit::join_lines(doc, view);
+        self.after_edit(edits);
+    }
+
+    fn toggle_comment(&mut self) {
+        let tab_width = self.config.tab_width();
+        let (doc, view) = self.pair();
+        match edit::toggle_comment(doc, view, tab_width) {
+            Some(edits) => self.after_edit(edits),
+            None => {
+                let name = lang::get(self.here().language).name.clone();
+                self.say(format!("textfold does not know how to comment {name}"));
+            }
+        }
+    }
+
+    fn upper_case(&mut self) {
+        let (doc, view) = self.pair();
+        let edits = edit::change_case(doc, view, true);
+        self.after_edit(edits);
+    }
+
+    fn lower_case(&mut self) {
+        let (doc, view) = self.pair();
+        let edits = edit::change_case(doc, view, false);
+        self.after_edit(edits);
+    }
+
+    fn paste(&mut self) {
+        let text = self.system_clipboard();
+        if text.is_empty() {
+            self.say("nothing to paste");
+        } else {
+            let (doc, view) = self.pair();
+            let edits = edit::insert_atomic(doc, view, &text);
+            self.after_edit(edits);
+        }
+    }
+
+    fn new_buffer(&mut self) {
+        let id = self.new_scratch();
+        self.show(id);
+    }
+
+    fn find_word_under_cursor(&mut self) {
+        let at = self.view().cursor();
+        match text::word_text_at(&self.here().rope, at) {
+            Some(word) => {
+                self.last_search = word;
+                self.find_step(1);
+            }
+            None => self.say("the cursor is not on a word"),
+        }
+    }
+
+    fn ask_signature(&mut self) {
+        let at = self.view().cursor();
+        let (doc, lsp) = self.doc_and_lsp();
+        if lsp.signature(doc, at).is_none() {
+            self.say("no language server here");
+        }
+    }
+
+    fn restart_servers(&mut self) {
+        self.lsp.restart();
+        let docs: Vec<DocId> = self.docs.iter().map(|d| d.id).collect();
+        for id in docs {
+            self.lsp_open(id);
+        }
+        self.say("starting the language servers again");
+    }
+
+    fn swap_split_direction(&mut self) {
+        self.side_by_side = !self.side_by_side;
+    }
+
+    fn toggle_wrap(&mut self) {
+        let wrap = !self.view().wrap;
+        self.view_mut().wrap = wrap;
+        self.view_mut().left = 0;
+        self.scroll_into_view();
+        self.say(if wrap {
+            "long lines fold"
+        } else {
+            "long lines run off the side"
+        });
+    }
+
+    fn bring_back_session(&mut self) {
+        let count = self.restore_session(true);
+        if count > 0 {
+            self.say_good(format!(
+                "brought back {count} {}",
+                plural("file", count)
+            ));
         }
     }
 
@@ -2562,12 +2495,18 @@ impl App {
             // Nowhere to write it yet, so there is nothing to get ready.
             return self.write_now(to);
         }
-        let kinds = self.config.code_actions_on_save().to_vec();
-        let format = self.config.format_on_save();
-        if kinds.is_empty() && !format {
+        let mut steps = self.fix_steps(id, self.config.code_actions_on_save());
+        // A tool that rewrites the file is a formatter, so it goes where the
+        // formatter goes: after the fixes, which put text in, and before the
+        // write, which is the point of all this.
+        steps.extend(self.rewriters_on_save(id).into_iter().map(Step::Rewrite));
+        if self.config.format_on_save() {
+            steps.push(Step::Format);
+        }
+        if steps.is_empty() {
             return self.write_now(to);
         }
-        self.start_before_save(id, &kinds, format, true, to);
+        self.begin(id, steps, true, to);
     }
 
     /// Ask every server what it would fix in this file on its own, and do it.
@@ -2582,9 +2521,11 @@ impl App {
             return;
         }
         let id = self.view().doc;
-        if !self.start_before_save(id, kinds, false, false, None) {
-            self.say("no language server here with fixes of its own");
+        let steps = self.fix_steps(id, kinds);
+        if steps.is_empty() {
+            return self.say("no language server here with fixes of its own");
         }
+        self.begin(id, steps, false, None);
     }
 
     /// Both halves of tidying a file up: the servers' own fixes, and then the
@@ -2599,106 +2540,127 @@ impl App {
             return;
         }
         let id = self.view().doc;
-        let kinds = [
-            SOURCE_FIX_ALL.to_string(),
-            SOURCE_ORGANIZE_IMPORTS.to_string(),
-        ];
-        if !self.start_before_save(id, &kinds, true, false, None) {
-            self.format();
+        let both = [SOURCE_FIX_ALL.to_string(), SOURCE_ORGANIZE_IMPORTS.to_string()];
+        let mut steps = self.fix_steps(id, &both);
+        if steps.is_empty() {
+            return self.format();
         }
+        steps.push(Step::Format);
+        self.begin(id, steps, false, None);
     }
 
-    /// Line up one question per kind per server, and ask the first.
-    ///
-    /// Answers whether there was anybody to ask. Where there is not, the
-    /// caller decides what "nothing to do" means — a save still saves, and
-    /// `fix-all` says so.
-    fn start_before_save(
-        &mut self,
-        doc: DocId,
-        kinds: &[String],
-        format: bool,
-        write: bool,
-        to: Option<PathBuf>,
-    ) -> bool {
-        let App { docs, lsp, .. } = self;
-        let Some(open) = docs.iter().find(|d| d.id == doc) else {
-            return false;
-        };
-        let servers = lsp.who_all_can(open, "codeActionProvider");
-        let left: Vec<(String, ServerId)> = kinds
-            .iter()
-            .flat_map(|kind| servers.iter().map(move |id| (kind.clone(), *id)))
-            .collect();
-        if left.is_empty() {
-            // Nobody to ask. A save still saves; anything else is the
-            // caller's to explain, since only it knows what was wanted.
-            if write {
-                self.format_or_write(doc, format, write, to);
-            }
-            return false;
+    /// One step per kind of fix per server that can answer for one.
+    fn fix_steps(&self, doc: DocId, kinds: &[String]) -> Vec<Step> {
+        if kinds.is_empty() {
+            return Vec::new();
         }
+        let Some(open) = self.docs.iter().find(|d| d.id == doc) else {
+            return Vec::new();
+        };
+        let servers = self.lsp.who_all_can(open, "codeActionProvider");
+        kinds
+            .iter()
+            .flat_map(|kind| {
+                servers
+                    .iter()
+                    .map(move |id| Step::Fix(kind.clone(), *id))
+            })
+            .collect()
+    }
+
+    /// The tools a plugin asked to be run on every save that rewrite the file.
+    fn rewriters_on_save(&self, doc: DocId) -> Vec<&'static Tool> {
+        let Some(language) = self.doc(doc).map(|d| lang::get(d.language).name.clone()) else {
+            return Vec::new();
+        };
+        crate::cmd::all()
+            .iter()
+            .filter_map(|cmd| cmd.tool())
+            .filter(|tool| {
+                tool.on_save && tool.output == Output::Replace && tool.wants(&language)
+            })
+            .collect()
+    }
+
+    fn begin(&mut self, doc: DocId, steps: Vec<Step>, write: bool, to: Option<PathBuf>) {
         self.before_save = Some(BeforeSave {
             doc,
-            left,
-            asking: None,
-            format,
+            left: steps,
+            doing: None,
             write,
             to,
             due: Instant::now(),
         });
-        self.ask_next_fix();
-        true
+        self.advance();
     }
 
-    /// Put the next question, or finish up when there are none left.
-    fn ask_next_fix(&mut self) {
+    /// Start the next step, or finish up when there are none left.
+    fn advance(&mut self) {
         loop {
             let Some(before) = &mut self.before_save else {
                 return;
             };
-            let Some((kind, server)) = before.left.first().cloned() else {
-                let (doc, format, write) = (before.doc, before.format, before.write);
+            let Some(step) = before.left.first().cloned() else {
+                let write = before.write;
                 let to = before.to.take();
                 self.before_save = None;
-                return self.format_or_write(doc, format, write, to);
+                if write {
+                    self.write_now(to);
+                }
+                return;
             };
             before.left.remove(0);
-            before.asking = Some((kind.clone(), server));
+            before.doing = Some(step.clone());
             before.due = Instant::now() + BEFORE_SAVE_WAIT;
 
             let doc = before.doc;
-            let App { docs, lsp, .. } = self;
-            let asked = docs
-                .iter()
-                .find(|d| d.id == doc)
-                .is_some_and(|open| lsp.source_action(open, &kind, server));
-            if asked {
+            let started = match step {
+                Step::Fix(kind, server) => {
+                    let App { docs, lsp, .. } = self;
+                    docs.iter()
+                        .find(|d| d.id == doc)
+                        .is_some_and(|open| lsp.source_action(open, &kind, server))
+                }
+                Step::Rewrite(tool) => self.start_tool(tool, doc),
+                Step::Format => self.start_formatter(doc),
+            };
+            if started {
                 return;
             }
-            // That server has gone, or cannot do code actions after all. Try
-            // the next question rather than waiting for an answer that is not
-            // coming.
+            // That server has gone, or the tool would not start. Go on to the
+            // next rather than waiting for an answer that is not coming.
         }
+    }
+
+    /// Ask the language server's own formatter. Answers whether there was one.
+    fn start_formatter(&mut self, id: DocId) -> bool {
+        let tab_width = self.config.tab_width();
+        let spaces = self
+            .doc(id)
+            .is_some_and(|d| matches!(d.indent, Indent::Spaces(_)));
+        let App { docs, lsp, .. } = self;
+        docs.iter()
+            .find(|d| d.id == id)
+            .filter(|doc| doc.path.is_some())
+            .is_some_and(|doc| lsp.format(doc, tab_width, spaces).is_some())
     }
 
     /// One server's answer about what it would fix in the whole file.
     ///
-    /// At most one action is taken from each answer, and then the next
-    /// question is asked afresh. Nobody is choosing between these — they are
-    /// the fixes a server is certain enough about to have called
-    /// `source.fixAll` — but they still cannot be stacked up and applied
-    /// together, because each was worked out against the file as it was.
+    /// At most one action is taken from each answer, and then the next step
+    /// starts afresh. Nobody is choosing between these — they are the fixes a
+    /// server is certain enough about to have called `source.fixAll` — but
+    /// they still cannot be stacked up and applied together, because each was
+    /// worked out against the file as it was.
     fn take_source_actions(&mut self, server: ServerId, doc: DocId, version: i32, value: Value) {
-        let waiting = self
-            .before_save
-            .as_ref()
-            .is_some_and(|b| b.doc == doc && b.asking.as_ref().is_some_and(|(_, id)| *id == server));
+        let waiting = self.before_save.as_ref().is_some_and(|b| {
+            b.doc == doc && matches!(b.doing, Some(Step::Fix(_, id)) if id == server)
+        });
         if !waiting {
             return;
         }
         if let Some(before) = &mut self.before_save {
-            before.asking = None;
+            before.doing = None;
         }
         // A file that moved on while the server was thinking. The edits are
         // about text that is no longer there, so they are dropped — but the
@@ -2711,45 +2673,283 @@ impl App {
         {
             self.do_code_action(server, action);
         }
-        self.ask_next_fix();
+        self.advance();
     }
 
-    /// What happens once the servers' own fixes are in: the formatter, and
-    /// then the file.
-    fn format_or_write(&mut self, id: DocId, format: bool, write: bool, to: Option<PathBuf>) {
-        if format && self.save_after_format.is_none() {
-            let tab_width = self.config.tab_width();
-            let spaces = self
-                .doc(id)
-                .is_some_and(|d| matches!(d.indent, Indent::Spaces(_)));
-            let App { docs, lsp, .. } = self;
-            if let Some(doc) = docs.iter().find(|d| d.id == id)
-                && doc.path.is_some()
-                && lsp.format(doc, tab_width, spaces).is_some()
-            {
-                if write {
-                    self.save_after_format = Some((id, to));
-                }
-                return;
-            }
-        }
-        if write {
-            self.write_now(to);
-        }
-    }
-
-    /// A save that has been waiting too long on a server goes ahead without
-    /// it. A file you pressed Ctrl-S on is a file that gets written.
+    /// A step that has been waiting too long is given up on. A file you
+    /// pressed Ctrl-S on is a file that gets written.
     fn check_before_save(&mut self) {
         let waited = self
             .before_save
             .as_ref()
-            .is_some_and(|b| b.asking.is_some() && b.due <= Instant::now());
+            .is_some_and(|b| b.doing.is_some() && b.due <= Instant::now());
         if waited {
             if let Some(before) = &mut self.before_save {
-                before.asking = None;
+                before.doing = None;
             }
-            self.ask_next_fix();
+            self.advance();
+        }
+    }
+
+    /// Whether a save is waiting on this step right now.
+    fn waiting_on(&self, step: &Step) -> bool {
+        self.before_save
+            .as_ref()
+            .is_some_and(|b| b.doing.as_ref() == Some(step))
+    }
+
+    // ---- Tools a plugin brought ----
+
+    /// Run a tool on the file in front of you.
+    ///
+    /// Nothing here waits: the program is started on a thread and the answer
+    /// arrives as an event, the same way a language server's does. A test run
+    /// that takes a minute costs a minute of it running, not a minute of the
+    /// editor being gone.
+    fn run_tool(&mut self, tool: &'static Tool) {
+        let id = self.view().doc;
+        let language = lang::get(self.here().language).name.clone();
+        if !tool.wants(&language) {
+            return self.say(format!("{} is not for {language} files", tool.name));
+        }
+        if self.here().path.is_none() {
+            return self.say(format!("{} needs a file on disk to work on", tool.name));
+        }
+        if self.start_tool(tool, id) {
+            self.say(format!("running {}…", tool.name));
+        }
+    }
+
+    /// Start a tool, quietly. Answers whether it is on its way — a step in a
+    /// save asks this rather than `run_tool`, because a tool that would not
+    /// start must not leave the save waiting for it.
+    fn start_tool(&mut self, tool: &'static Tool, id: DocId) -> bool {
+        let Some(path) = self.doc(id).and_then(|d| d.path.clone()) else {
+            return false;
+        };
+        let root = lang::project_root(&path, &tool.roots);
+
+        // The same placeholders a language server's settings may use, so that
+        // a Python tool lands in the project's environment without any of that
+        // being written into the editor as a special case, plus the one thing
+        // a tool needs that a server does not: which file.
+        let environment = self.lsp.environment_for(&root);
+        let mut vars = crate::venv::Vars::new(&root, environment.as_ref());
+        vars.set("file", path.display().to_string());
+        let args: Vec<String> = tool.args.iter().filter_map(|a| vars.fill(a)).collect();
+        let mut env: Vec<(String, String)> = Vec::new();
+        if let Some(found) = &environment {
+            // A tool run in a project with an environment should be the one
+            // inside it: `black` from the venv, not whichever is on PATH.
+            env.push(("VIRTUAL_ENV".into(), found.root.display().to_string()));
+            let path_var = std::env::var("PATH").unwrap_or_default();
+            env.push((
+                "PATH".into(),
+                format!("{}:{path_var}", found.bin().display()),
+            ));
+        }
+
+        let Some(doc) = self.doc(id) else { return false };
+        let version = doc.version;
+        let stdin = tool.stdin.then(|| doc.rope.to_string());
+        let tx = self.tx.clone();
+        match crate::tool::spawn(tool, id, version, &root, args, env, stdin, tx) {
+            Ok(()) => true,
+            Err(why) => {
+                self.say_bad(why);
+                false
+            }
+        }
+    }
+
+    /// A tool has finished. Do as its plugin said with what it printed.
+    fn on_tool(&mut self, done: crate::tool::Finished) {
+        let Some(tool) = crate::cmd::by_name(&done.tool).and_then(|c| c.tool()) else {
+            // Its plugin was switched off while it was running.
+            return;
+        };
+        // A save may be standing behind this one waiting its turn.
+        let in_a_save = self.waiting_on(&Step::Rewrite(tool));
+        if in_a_save && let Some(before) = &mut self.before_save {
+            before.doing = None;
+        }
+        let complaint = done
+            .err
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .to_string();
+
+        match tool.output {
+            Output::Replace => self.take_tool_text(tool, done, &complaint),
+            Output::Show => {
+                let text = match done.out.trim().is_empty() {
+                    true => done.err.clone(),
+                    false => done.out.clone(),
+                };
+                if text.trim().is_empty() {
+                    return self.say(format!("{} said nothing", tool.name));
+                }
+                self.show_in_a_buffer(&format!("{} output", tool.name), &text);
+            }
+            Output::Problems => self.take_tool_problems(tool, &done),
+            Output::Ignore => match done.ok {
+                true => self.say_good(format!("{} finished", tool.name)),
+                false => self.say_bad(match complaint.is_empty() {
+                    true => format!("{} failed", tool.name),
+                    false => format!("{}: {complaint}", tool.name),
+                }),
+            },
+        }
+        if in_a_save {
+            self.advance();
+        }
+    }
+
+    /// What a formatter printed, put back into the buffer.
+    fn take_tool_text(&mut self, tool: &'static Tool, done: crate::tool::Finished, why: &str) {
+        if !done.ok {
+            return self.say_bad(match why.is_empty() {
+                true => format!("{} would not run", tool.name),
+                false => format!("{}: {why}", tool.name),
+            });
+        }
+        if self.doc(done.doc).map(|d| d.version) != Some(done.version) {
+            // The file moved on while it was thinking, so what came back is
+            // about text that is no longer there. Putting it in would undo
+            // whatever was typed in the meantime.
+            return self.say(format!("{} answered too late — the file has moved on", tool.name));
+        }
+        if done.out.trim().is_empty() {
+            // A tool that printed nothing has almost certainly failed in a way
+            // it did not admit to, and emptying somebody's file over it is not
+            // a recoverable kind of wrong.
+            return self.say_bad(format!("{} printed nothing — the file is untouched", tool.name));
+        }
+        let Some(doc) = self.doc_mut(done.doc) else {
+            return;
+        };
+        if doc.rope == done.out.as_str() {
+            return self.say(format!("{} had nothing to change", tool.name));
+        }
+        let len = doc.len_chars();
+        let sel = crate::text::Selections::single(Range::point(0));
+        let edits = doc.apply_atomic(
+            vec![crate::doc::Change::replace(0, len, done.out.clone())],
+            &sel,
+        );
+        self.after_edit_to(done.doc, edits, None);
+        self.say_good(format!("{} reformatted this", tool.name));
+    }
+
+    /// What a linter printed, read as problems and shown in the margin.
+    fn take_tool_problems(&mut self, tool: &'static Tool, done: &crate::tool::Finished) {
+        let Some(pattern) = &tool.pattern else {
+            return self.say_bad(format!(
+                "{} is set to find problems but says nothing about how to read them",
+                tool.name
+            ));
+        };
+        let told = crate::doc::Told::Tool(tool.id.as_str());
+        // A tool sends its complete opinion every time, so its old findings go
+        // and everybody else's stay — the same rule a language server gets.
+        for doc in &mut self.docs {
+            doc.diagnostics.retain(|d| d.told != told);
+        }
+
+        let mut both = done.out.clone();
+        both.push('\n');
+        both.push_str(&done.err);
+        let found = crate::tool::problems(pattern, &both);
+        let mut count = 0;
+        for problem in found {
+            let full = match problem.file.is_absolute() {
+                true => problem.file.clone(),
+                false => self.project.join(&problem.file),
+            };
+            let Some(id) = self
+                .docs
+                .iter()
+                .find(|d| {
+                    d.path.as_deref() == Some(full.as_path())
+                        || d.path.as_deref() == Some(problem.file.as_path())
+                })
+                .map(|d| d.id)
+            else {
+                // About a file that is not open. Perfectly normal for a tool
+                // pointed at a whole project.
+                continue;
+            };
+            let Some(doc) = self.doc_mut(id) else { continue };
+            let at = doc.char_at_lsp_point(problem.line, problem.column);
+            let end = doc.char_at_lsp_point(problem.line, problem.column + 1);
+            doc.diagnostics.push(crate::doc::Diagnostic {
+                range: Range::new(at, end.max(at)),
+                severity: problem.severity,
+                message: problem.message,
+                source: Some(tool.name.clone()),
+                code: None,
+                data: None,
+                told,
+            });
+            count += 1;
+        }
+        match count {
+            0 if done.ok => self.say_good(format!("{}: nothing to report", tool.name)),
+            0 => self.say(format!("{} found nothing it could read", tool.name)),
+            n => self.say(format!("{}: {n} {}", tool.name, plural("problem", n))),
+        }
+    }
+
+    /// Put some text in a buffer of its own, for reading rather than editing.
+    fn show_in_a_buffer(&mut self, name: &str, text: &str) {
+        // The same buffer each time, so running a test suite twice does not
+        // leave two tabs of output to close.
+        let existing = self
+            .docs
+            .iter()
+            .find(|d| d.path.is_none() && d.name == name)
+            .map(|d| d.id);
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let id = self.new_scratch();
+                if let Some(doc) = self.doc_mut(id) {
+                    doc.name = name.to_string();
+                }
+                id
+            }
+        };
+        if let Some(doc) = self.doc_mut(id) {
+            let len = doc.len_chars();
+            let sel = crate::text::Selections::single(Range::point(0));
+            let edits =
+                doc.apply_atomic(vec![crate::doc::Change::replace(0, len, text.to_string())], &sel);
+            doc.mark_saved();
+            self.after_edit_to(id, edits, None);
+        }
+        self.show(id);
+        self.view_mut().sel = crate::text::Selections::single(Range::point(0));
+        self.scroll_into_view();
+    }
+
+    /// The tools a plugin asked to be run every time this file is saved.
+    fn tools_on_save(&mut self, doc: DocId) {
+        let Some(language) = self
+            .doc(doc)
+            .map(|d| lang::get(d.language).name.clone())
+        else {
+            return;
+        };
+        let wanted: Vec<&'static Tool> = crate::cmd::all()
+            .iter()
+            .filter_map(|cmd| cmd.tool())
+            .filter(|tool| {
+                tool.on_save && tool.output != Output::Replace && tool.wants(&language)
+            })
+            .collect();
+        for tool in wanted {
+            self.start_tool(tool, doc);
         }
     }
 
@@ -2759,7 +2959,6 @@ impl App {
             Some(path) => path,
             None => return self.open_prompt(PromptKind::SaveAs),
         };
-        self.save_after_format = None;
         if self.config.trim_trailing_whitespace() {
             self.trim_trailing_whitespace();
         }
@@ -2781,6 +2980,11 @@ impl App {
                 // and how a "save as" becomes a different file entirely.
                 self.git.forget_baseline(id);
                 self.say_good(format!("saved {name}, {lines} lines"));
+                // And whatever a plugin asked to have run over the file every
+                // time it is written. Not the ones that rewrite it — those went
+                // in before the write, where they belong — but the linters,
+                // whose whole job is to look at what has just been saved.
+                self.tools_on_save(id);
             }
             Err(e) => self.say_bad(format!("{e}")),
         }
@@ -3788,25 +3992,25 @@ impl App {
         let row = |label: &str, cmd: Cmd| menu::Item::new(label, cmd).key(self.key_for(cmd));
         Menu::new(
             vec![
-                row("Cut", Cmd::Cut).enabled(writable),
-                row("Copy", Cmd::Copy),
-                row("Paste", Cmd::Paste).enabled(writable),
+                row("Cut", Cmd::CUT).enabled(writable),
+                row("Copy", Cmd::COPY),
+                row("Paste", Cmd::PASTE).enabled(writable),
                 menu::Item::divider(),
-                row("Undo", Cmd::Undo).enabled(writable && can_undo),
-                row("Redo", Cmd::Redo).enabled(writable && can_redo),
+                row("Undo", Cmd::UNDO).enabled(writable && can_undo),
+                row("Redo", Cmd::REDO).enabled(writable && can_redo),
                 menu::Item::divider(),
-                row("Go to definition", Cmd::GotoDefinition).enabled(can("definitionProvider")),
-                row("Find references", Cmd::References).enabled(can("referencesProvider")),
-                row("Rename…", Cmd::Rename).enabled(can("renameProvider") && writable),
-                row("Fix it", Cmd::FixIt).enabled(self.fixes.is_some()),
-                row("What can be done here…", Cmd::CodeAction)
+                row("Go to definition", Cmd::GOTO_DEFINITION).enabled(can("definitionProvider")),
+                row("Find references", Cmd::REFERENCES).enabled(can("referencesProvider")),
+                row("Rename…", Cmd::RENAME).enabled(can("renameProvider") && writable),
+                row("Fix it", Cmd::FIX_IT).enabled(self.fixes.is_some()),
+                row("What can be done here…", Cmd::CODE_ACTION)
                     .enabled(can("codeActionProvider") && writable),
-                row("What is this?", Cmd::Hover).enabled(can("hoverProvider")),
+                row("What is this?", Cmd::HOVER).enabled(can("hoverProvider")),
                 menu::Item::divider(),
-                row("Select line", Cmd::SelectLine),
-                row("Select all", Cmd::SelectAll),
-                row("Comment out", Cmd::ToggleComment).enabled(writable),
-                row("Reformat the file", Cmd::Format)
+                row("Select line", Cmd::SELECT_LINE),
+                row("Select all", Cmd::SELECT_ALL),
+                row("Comment out", Cmd::TOGGLE_COMMENT).enabled(writable),
+                row("Reformat the file", Cmd::FORMAT)
                     .enabled(can("documentFormattingProvider") && writable),
                 // Two rows rather than one, because they are two different
                 // things and a file usually wants both: the formatter lays
@@ -3814,13 +4018,13 @@ impl App {
                 // away. Lit whenever anything attached to the file does code
                 // actions at all — which server has the fixes is not
                 // something a person should have to know.
-                row("Fix what can be fixed", Cmd::FixAll)
+                row("Fix what can be fixed", Cmd::FIX_ALL)
                     .enabled(can("codeActionProvider") && writable),
-                row("Tidy the imports", Cmd::OrganizeImports)
+                row("Tidy the imports", Cmd::ORGANIZE_IMPORTS)
                     .enabled(can("codeActionProvider") && writable),
                 menu::Item::divider(),
-                row("Find this word", Cmd::FindWordUnderCursor).enabled(word || selected),
-                row("Find it in every file", Cmd::Grep),
+                row("Find this word", Cmd::FIND_WORD_UNDER_CURSOR).enabled(word || selected),
+                row("Find it in every file", Cmd::GREP),
             ],
             anchor,
         )
@@ -3840,21 +4044,21 @@ impl App {
         let row = |label: &str, cmd: Cmd| menu::Item::on(id, label, cmd).key(self.key_for(cmd));
         Menu::new(
             vec![
-                row("Save", Cmd::Save).enabled(modified || !named),
-                row("Read again from disk", Cmd::Reload).enabled(named),
+                row("Save", Cmd::SAVE).enabled(modified || !named),
+                row("Read again from disk", Cmd::RELOAD).enabled(named),
                 menu::Item::divider(),
-                row("Move left", Cmd::MoveTabLeft).enabled(!first),
-                row("Move right", Cmd::MoveTabRight).enabled(!last),
+                row("Move left", Cmd::MOVE_TAB_LEFT).enabled(!first),
+                row("Move right", Cmd::MOVE_TAB_RIGHT).enabled(!last),
                 menu::Item::divider(),
-                row("Close", Cmd::Close),
-                row("Close the others", Cmd::CloseOthers).enabled(others),
-                row("Close the saved ones", Cmd::CloseSaved).enabled(any_saved),
-                row("Close them all", Cmd::CloseAll),
+                row("Close", Cmd::CLOSE),
+                row("Close the others", Cmd::CLOSE_OTHERS).enabled(others),
+                row("Close the saved ones", Cmd::CLOSE_SAVED).enabled(any_saved),
+                row("Close them all", Cmd::CLOSE_ALL),
                 menu::Item::divider(),
-                row("Copy its path", Cmd::CopyPath).enabled(named),
-                row("Copy its path from here", Cmd::CopyRelativePath).enabled(named),
+                row("Copy its path", Cmd::COPY_PATH).enabled(named),
+                row("Copy its path from here", Cmd::COPY_RELATIVE_PATH).enabled(named),
                 menu::Item::divider(),
-                row("Open it in another pane", Cmd::Split),
+                row("Open it in another pane", Cmd::SPLIT),
             ],
             anchor,
         )
@@ -4163,8 +4367,14 @@ impl App {
     }
 
     fn open_commands_picker(&mut self) {
-        let rows: Vec<Row> = crate::cmd::ALL
+        // A tool for another language is not something you can do here, so it
+        // is not offered here. Everything else is: a command you cannot use
+        // right now still tells you it exists, which is half of what a palette
+        // is for.
+        let language = lang::get(self.here().language).name.clone();
+        let rows: Vec<Row> = crate::cmd::all()
             .iter()
+            .filter(|cmd| cmd.tool().is_none_or(|tool| tool.wants(&language)))
             .map(|cmd| {
                 Row::new(cmd.name(), Choice::Command(*cmd))
                     .detail(cmd.about())
@@ -4330,6 +4540,14 @@ impl App {
                     .detail(format!("{} — {}", plugin.id, plugin.detail()))
                     .tag(if on { "on" } else { "off" }),
             );
+            for tool in &plugin.tools {
+                let ready = on && crate::plugin::is_on(&tool.id);
+                rows.push(
+                    Row::new(format!("  {}", tool.name), Choice::Plugin(tool.id.clone()))
+                        .detail(format!("{} — runs {}", tool.id, tool.command))
+                        .tag(if ready { "on" } else { "off" }),
+                );
+            }
             for server in &plugin.servers {
                 // Off with its plugin, and said so, rather than shown as on
                 // and quietly doing nothing.
@@ -4373,6 +4591,13 @@ impl App {
         self.remember_settings();
 
         crate::lang::rebuild();
+        crate::cmd::rebuild();
+        // Which changes what there is to bind a key to, and what colours there
+        // are to pick from.
+        self.keys = Keys::new(&self.config.keys);
+        self.themes = Themes::load();
+        let wanted = self.config.theme_name().to_string();
+        self.set_theme(&wanted);
         for doc in &mut self.docs {
             doc.redetect_language();
         }
@@ -4562,7 +4787,7 @@ impl App {
                     if picker.kind == Kind::Files && picker.query.is_empty() {
                         match c {
                             '>' => return self.open_commands_picker(),
-                            '@' => return self.run(Cmd::Symbols),
+                            '@' => return self.run(Cmd::SYMBOLS),
                             '#' => return self.open_workspace_symbols(),
                             ':' => return self.open_prompt(PromptKind::GotoLine),
                             _ => {}
@@ -5646,7 +5871,7 @@ impl App {
         };
         // A server sends its complete opinion every time, so its old findings
         // go and everybody else's stay.
-        doc.diagnostics.retain(|d| d.server != id.0);
+        doc.diagnostics.retain(|d| d.told != crate::doc::Told::Server(id.0));
         doc.diagnostics.extend(fresh);
 
         // What is wrong here has changed, so what could be done about it has
@@ -5925,7 +6150,7 @@ impl App {
         {
             let key = self
                 .keys
-                .shortcut(Cmd::FixIt)
+                .shortcut(Cmd::FIX_IT)
                 .unwrap_or_else(|| "Alt-i".into());
             popup.lines.push(DocLine::prose(RULE.to_string()));
             popup.lines.push(DocLine::prose(format!("{key}: {title}")));
@@ -6161,21 +6386,17 @@ impl App {
     }
 
     fn take_format(&mut self, doc: DocId, version: i32, value: Value) {
-        let waiting = match self.save_after_format.take() {
-            Some((id, to)) if id == doc => Some(to),
-            // Somebody else's, or nobody's: put it back rather than losing a
-            // save that was waiting on a different buffer.
-            other => {
-                self.save_after_format = other;
-                None
-            }
-        };
+        let in_a_save = self.waiting_on(&Step::Format)
+            && self.before_save.as_ref().is_some_and(|b| b.doc == doc);
+        if in_a_save && let Some(before) = &mut self.before_save {
+            before.doing = None;
+        }
+        // A file that moved on while the formatter was thinking. Applying
+        // these edits now would scramble it — but a save that was waiting on
+        // them should still happen, or Ctrl-S would have done nothing.
         if self.doc(doc).map(|d| d.version) != Some(version) {
-            // The file moved on while the formatter was thinking. Applying
-            // these edits now would scramble it — but a save that was waiting
-            // on them should still happen, or Ctrl-S would have done nothing.
-            if let Some(to) = waiting {
-                self.write_now(to);
+            if in_a_save {
+                self.advance();
             }
             return;
         }
@@ -6183,10 +6404,10 @@ impl App {
             Value::Array(edits) => self.apply_edits_to(doc, edits),
             _ => 0,
         };
-        match waiting {
-            Some(to) => self.write_now(to),
-            None if count > 0 => self.say_good("formatted"),
-            None => {}
+        if in_a_save {
+            self.advance();
+        } else if count > 0 {
+            self.say_good("formatted");
         }
     }
 
@@ -7014,7 +7235,7 @@ impl App {
             MouseEventKind::Down(MouseButton::Middle) => {
                 if let Some(at) = self.position_at(column, row) {
                     self.place_cursor(at, false, false);
-                    self.run(Cmd::Paste);
+                    self.run(Cmd::PASTE);
                 }
             }
             _ => {}
@@ -7219,7 +7440,7 @@ impl App {
         // definition of the thing under the pointer.
         if mods.contains(KeyModifiers::CONTROL) {
             self.place_cursor(at, false, false);
-            return self.run(Cmd::GotoDefinition);
+            return self.run(Cmd::GOTO_DEFINITION);
         }
         match count {
             2 => {
@@ -7586,6 +7807,359 @@ fn hits(area: Rect, column: u16, row: u16) -> bool {
         && row < area.y + area.height
 }
 
+// ---- Everything textfold can be told to do ----
+
+/// The command table.
+///
+/// One row per command, and the row is the only place that command is written
+/// down: the name a settings file binds a key to, the group and the line the
+/// palette shows, what it does to the text, and what it actually does. The key
+/// bindings, the palette and the context menus all read this, so there is no
+/// second list for somebody to forget.
+///
+/// It lives here rather than in [`crate::cmd`] because a row *is* behaviour
+/// now — it names a method on `App`, and those are this module's to reach.
+macro_rules! commands {
+    ($($konst:ident => $name:literal, $group:ident, $behaviour:ident, $about:literal,
+        $run:expr;)*) => {
+        pub const BUILT_IN: &[Spec] = &[
+            $(Spec {
+                name: $name,
+                group: Group::$group,
+                behaviour: Behaviour::$behaviour,
+                about: $about,
+                run: $run,
+            },)*
+        ];
+
+        /// A constant per command, so that a menu row or a default binding
+        /// names one the way it always did. Worked out from the table at
+        /// compile time: a constant naming a command that is not in the table
+        /// does not build.
+        ///
+        /// Every command gets one whether or not anything in this build
+        /// happens to name it — it is the handle on the row, not a convenience
+        /// for whoever needed one first.
+        #[allow(dead_code)]
+        impl Cmd {
+            $(pub const $konst: Cmd = Cmd::at(index_of($name));)*
+        }
+    };
+}
+
+/// Where a name sits in the table, worked out while compiling.
+const fn index_of(name: &str) -> u16 {
+    let mut at = 0;
+    while at < BUILT_IN.len() {
+        if same(BUILT_IN[at].name, name) {
+            return at as u16;
+        }
+        at += 1;
+    }
+    panic!("a command constant naming a command that is not in the table");
+}
+
+const fn same(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut at = 0;
+    while at < a.len() {
+        if a[at] != b[at] {
+            return false;
+        }
+        at += 1;
+    }
+    true
+}
+
+commands! {
+    NEW => "new", File, Passive, "Start an empty buffer",
+        |app| app.new_buffer();
+    OPEN => "open", File, Passive, "Open a file by name, fuzzily",
+        |app| app.open_files_picker();
+    OPEN_PATH => "open-path", File, Passive, "Open a file by typing its path, exactly",
+        |app| app.open_prompt(PromptKind::OpenPath);
+    SAVE => "save", File, Passive, "Write this file to disk",
+        |app| app.save(None);
+    SAVE_AS => "save-as", File, Passive, "Write this file somewhere else",
+        |app| app.open_prompt(PromptKind::SaveAs);
+    SAVE_ALL => "save-all", File, Passive, "Write every changed file",
+        |app| app.save_all();
+    RELOAD => "reload", File, Passive, "Read this file again, throwing away changes",
+        |app| app.reload();
+    CLOSE => "close", File, Passive, "Close this buffer, asking about unsaved changes",
+        |app| app.close(false);
+    CLOSE_FORCE => "close!", File, Passive, "Close this buffer, changes and all",
+        |app| app.close(true);
+    CLOSE_OTHERS => "close-others", File, Passive, "Close every buffer but this one",
+        |app| app.close_many(Keep::Others);
+    CLOSE_SAVED => "close-saved", File, Passive, "Close every buffer with nothing unsaved in it",
+        |app| app.close_many(Keep::Unsaved);
+    CLOSE_ALL => "close-all", File, Passive, "Close every buffer",
+        |app| app.close_many(Keep::Nothing);
+    COPY_PATH => "copy-path", File, Passive, "Copy this file's full path",
+        |app| app.copy_path(false);
+    COPY_RELATIVE_PATH => "copy-relative-path", File, Passive, "Copy this file's path from the project root",
+        |app| app.copy_path(true);
+    NEXT_BUFFER => "next-buffer", File, Passive, "The buffer after this one",
+        |app| app.step_buffer(1);
+    PREV_BUFFER => "prev-buffer", File, Passive, "The buffer before this one",
+        |app| app.step_buffer(-1);
+    MOVE_TAB_LEFT => "move-tab-left", File, Passive, "Move this tab one place towards the front",
+        |app| app.step_tab(-1);
+    MOVE_TAB_RIGHT => "move-tab-right", File, Passive, "Move this tab one place towards the back",
+        |app| app.step_tab(1);
+    BUFFERS => "buffers", File, Passive, "Pick from the open buffers",
+        |app| app.open_buffers_picker();
+    QUIT => "quit", File, Passive, "Leave, asking about unsaved changes",
+        |app| app.leave(false);
+    QUIT_FORCE => "quit!", File, Passive, "Leave, changes and all",
+        |app| app.leave(true);
+    MOVE_LEFT => "left", Move, Passive, "One character left",
+        |app| app.motion(Motion::Left, false);
+    MOVE_RIGHT => "right", Move, Passive, "One character right",
+        |app| app.motion(Motion::Right, false);
+    MOVE_UP => "up", Move, Passive, "One line up",
+        |app| app.motion(Motion::Up, false);
+    MOVE_DOWN => "down", Move, Passive, "One line down",
+        |app| app.motion(Motion::Down, false);
+    MOVE_WORD_LEFT => "word-left", Move, Passive, "To the start of the word before",
+        |app| app.motion(Motion::WordLeft, false);
+    MOVE_WORD_RIGHT => "word-right", Move, Passive, "To the end of the word after",
+        |app| app.motion(Motion::WordRight, false);
+    MOVE_LINE_START => "line-start", Move, Passive, "To the first thing on the line, then to column one",
+        |app| app.motion(Motion::LineStart, false);
+    MOVE_LINE_END => "line-end", Move, Passive, "To the end of the line",
+        |app| app.motion(Motion::LineEnd, false);
+    MOVE_PAGE_UP => "page-up", Move, Passive, "A screenful up",
+        |app| app.motion(Motion::PageUp, false);
+    MOVE_PAGE_DOWN => "page-down", Move, Passive, "A screenful down",
+        |app| app.motion(Motion::PageDown, false);
+    MOVE_DOC_START => "doc-start", Move, Passive, "To the top of the file",
+        |app| app.motion(Motion::DocStart, false);
+    MOVE_DOC_END => "doc-end", Move, Passive, "To the bottom of the file",
+        |app| app.motion(Motion::DocEnd, false);
+    MOVE_PARA_UP => "para-up", Move, Passive, "To the blank line above",
+        |app| app.motion(Motion::ParaUp, false);
+    MOVE_PARA_DOWN => "para-down", Move, Passive, "To the blank line below",
+        |app| app.motion(Motion::ParaDown, false);
+    MATCH_BRACKET => "match-bracket", Move, Passive, "To the bracket matching this one",
+        |app| app.go_to_matching_bracket();
+    GOTO_LINE => "goto-line", Move, Passive, "Jump to a line by number",
+        |app| app.open_prompt(PromptKind::GotoLine);
+    JUMP_BACK => "jump-back", Move, Passive, "Back to where you were before the last jump",
+        |app| app.jump(false);
+    JUMP_FORWARD => "jump-forward", Move, Passive, "Forward again",
+        |app| app.jump(true);
+    SCROLL_UP => "scroll-up", Move, Passive, "Move the view up, leaving the cursor",
+        |app| app.scroll(-3);
+    SCROLL_DOWN => "scroll-down", Move, Passive, "Move the view down, leaving the cursor",
+        |app| app.scroll(3);
+    CENTRE_CURSOR => "centre-cursor", Move, Passive, "Put the cursor's line in the middle of the screen",
+        |app| app.centre();
+    EXTEND_LEFT => "extend-left", Select, Passive, "Select one character left",
+        |app| app.motion(Motion::Left, true);
+    EXTEND_RIGHT => "extend-right", Select, Passive, "Select one character right",
+        |app| app.motion(Motion::Right, true);
+    EXTEND_UP => "extend-up", Select, Passive, "Select one line up",
+        |app| app.motion(Motion::Up, true);
+    EXTEND_DOWN => "extend-down", Select, Passive, "Select one line down",
+        |app| app.motion(Motion::Down, true);
+    EXTEND_WORD_LEFT => "extend-word-left", Select, Passive, "Select to the word before",
+        |app| app.motion(Motion::WordLeft, true);
+    EXTEND_WORD_RIGHT => "extend-word-right", Select, Passive, "Select to the word after",
+        |app| app.motion(Motion::WordRight, true);
+    EXTEND_LINE_START => "extend-line-start", Select, Passive, "Select to the start of the line",
+        |app| app.motion(Motion::LineStart, true);
+    EXTEND_LINE_END => "extend-line-end", Select, Passive, "Select to the end of the line",
+        |app| app.motion(Motion::LineEnd, true);
+    EXTEND_PAGE_UP => "extend-page-up", Select, Passive, "Select a screenful up",
+        |app| app.motion(Motion::PageUp, true);
+    EXTEND_PAGE_DOWN => "extend-page-down", Select, Passive, "Select a screenful down",
+        |app| app.motion(Motion::PageDown, true);
+    EXTEND_DOC_START => "extend-doc-start", Select, Passive, "Select to the top of the file",
+        |app| app.motion(Motion::DocStart, true);
+    EXTEND_DOC_END => "extend-doc-end", Select, Passive, "Select to the bottom of the file",
+        |app| app.motion(Motion::DocEnd, true);
+    SELECT_ALL => "select-all", Select, Passive, "Select the whole file",
+        |app| app.select_all();
+    SELECT_LINE => "select-line", Select, Passive, "Select this line, then the one below",
+        |app| app.select_line();
+    SELECT_WORD => "select-word", Select, Passive, "Select the word under the cursor",
+        |app| app.select_word();
+    EXPAND_SELECTION => "expand-selection", Select, Passive, "Grow the selection to the syntax around it",
+        |app| app.expand_selection();
+    ADD_CURSOR_ABOVE => "add-cursor-above", Select, Passive, "Another cursor on the line above",
+        |app| app.add_cursor_above();
+    ADD_CURSOR_BELOW => "add-cursor-below", Select, Passive, "Another cursor on the line below",
+        |app| app.add_cursor_below();
+    ADD_CURSOR_NEXT_MATCH => "add-cursor-next-match", Select, Passive, "Another cursor at the next copy of this word",
+        |app| app.add_cursor_at_next_match();
+    SELECT_ALL_MATCHES => "select-all-matches", Select, Passive, "A cursor at every copy of this word",
+        |app| app.select_every_match();
+    CURSORS_TO_LINE_ENDS => "cursors-to-line-ends", Select, Passive, "A cursor at the end of every selected line",
+        |app| app.cursors_to_line_ends();
+    COLLAPSE_CURSORS => "collapse-cursors", Select, Passive, "Back to one cursor",
+        |app| app.collapse_cursors();
+    INSERT_NEWLINE => "newline", Edit, Types, "Break the line, keeping the indentation",
+        |app| app.insert_newline();
+    DELETE_BACKWARD => "delete-backward", Edit, Types, "Rub out the character before",
+        |app| app.delete_backward();
+    DELETE_FORWARD => "delete-forward", Edit, Types, "Rub out the character after",
+        |app| app.delete_forward();
+    DELETE_WORD_BACKWARD => "delete-word-backward", Edit, Edits, "Rub out the word before",
+        |app| app.delete_word_backward();
+    DELETE_WORD_FORWARD => "delete-word-forward", Edit, Edits, "Rub out the word after",
+        |app| app.delete_word_forward();
+    DELETE_TO_LINE_START => "delete-to-line-start", Edit, Edits, "Rub out back to the start of the line",
+        |app| app.delete_to_line_start();
+    DELETE_TO_LINE_END => "delete-to-line-end", Edit, Edits, "Rub out to the end of the line",
+        |app| app.delete_to_line_end();
+    DELETE_LINE => "delete-line", Edit, Edits, "Take out the whole line",
+        |app| app.delete_line();
+    DUPLICATE_LINE => "duplicate-line", Edit, Edits, "Another copy of the line below it",
+        |app| app.duplicate_line();
+    MOVE_LINE_UP => "move-line-up", Edit, Edits, "Swap this line with the one above",
+        |app| app.move_line_up();
+    MOVE_LINE_DOWN => "move-line-down", Edit, Edits, "Swap this line with the one below",
+        |app| app.move_line_down();
+    JOIN_LINES => "join-lines", Edit, Edits, "Pull the next line onto this one",
+        |app| app.join_lines();
+    INDENT => "indent", Edit, Edits, "Push the line right one level",
+        |app| app.on_tab(false);
+    UNINDENT => "unindent", Edit, Edits, "Pull the line left one level",
+        |app| app.on_tab(true);
+    TOGGLE_COMMENT => "toggle-comment", Edit, Edits, "Comment the selected lines out, or back in",
+        |app| app.toggle_comment();
+    UNDO => "undo", Edit, Edits, "Put back what you just changed",
+        |app| app.undo(true);
+    REDO => "redo", Edit, Edits, "Do it again after all",
+        |app| app.undo(false);
+    COPY => "copy", Edit, Passive, "Copy the selection, or the line if nothing is selected",
+        |app| app.copy(false);
+    CUT => "cut", Edit, Edits, "Cut the selection, or the line if nothing is selected",
+        |app| app.copy(true);
+    PASTE => "paste", Edit, Edits, "Put back what was copied",
+        |app| app.paste();
+    UPPER_CASE => "upper-case", Edit, Edits, "Make the selection shout",
+        |app| app.upper_case();
+    LOWER_CASE => "lower-case", Edit, Edits, "Make the selection quiet",
+        |app| app.lower_case();
+    FIND => "find", Search, Passive, "Search this file as you type",
+        |app| app.open_prompt(PromptKind::Find);
+    FIND_NEXT => "find-next", Search, Passive, "The next hit",
+        |app| app.find_step(1);
+    FIND_PREV => "find-prev", Search, Passive, "The one before",
+        |app| app.find_step(-1);
+    FIND_WORD_UNDER_CURSOR => "find-word", Search, Passive, "Search for the word the cursor is on",
+        |app| app.find_word_under_cursor();
+    REPLACE => "replace", Search, Edits, "Search and replace in this file",
+        |app| app.open_prompt(PromptKind::ReplaceFind);
+    NEXT_CHANGE => "next-change", Search, Passive, "To the next line that differs from the last commit",
+        |app| app.change_step(true);
+    PREV_CHANGE => "prev-change", Search, Passive, "To the change before",
+        |app| app.change_step(false);
+    GREP => "grep", Search, Passive, "Search every file in the project",
+        |app| app.open_grep_picker();
+    COMPLETION => "completion", Code, Passive, "Suggest what comes next",
+        |app| app.ask_for_completions(None, true);
+    GOTO_DEFINITION => "goto-definition", Code, Passive, "Where this is defined",
+        |app| app.ask_goto(Goto::Definition);
+    GOTO_TYPE_DEFINITION => "goto-type-definition", Code, Passive, "Where its type is defined",
+        |app| app.ask_goto(Goto::Type);
+    GOTO_IMPLEMENTATION => "goto-implementation", Code, Passive, "Where it is implemented",
+        |app| app.ask_goto(Goto::Implementation);
+    REFERENCES => "references", Code, Passive, "Everywhere this is used",
+        |app| app.ask_references();
+    HOVER => "hover", Code, Passive, "What the language server knows about this",
+        |app| app.ask_hover(app.view().cursor());
+    RENAME => "rename", Code, Edits, "Rename this everywhere it appears",
+        |app| app.start_rename();
+    CODE_ACTION => "code-action", Code, Edits, "What the language server offers to do about this",
+        |app| app.ask_code_actions();
+    FIX_IT => "fix-it", Code, Edits, "Do the obvious thing about the problem here: add the import, fix the typo",
+        |app| app.fix_it();
+    FIX_ALL => "fix-all", Code, Edits, "Apply every fix the servers would make to this file on their own",
+        |app| app.fix_all(&[SOURCE_FIX_ALL.to_string()]);
+    ORGANIZE_IMPORTS => "organize-imports", Code, Edits, "Put this file's imports in order and drop the unused ones",
+        |app| app.fix_all(&[SOURCE_ORGANIZE_IMPORTS.to_string()]);
+    FORMAT => "format", Code, Edits, "Reformat the file",
+        |app| app.format();
+    FORMAT_AND_FIX => "format-and-fix", Code, Edits, "Reformat the file and apply the servers' own fixes",
+        |app| app.format_and_fix();
+    SYMBOLS => "symbols", Code, Passive, "Pick from what this file defines",
+        |app| app.ask_symbols();
+    WORKSPACE_SYMBOLS => "workspace-symbols", Code, Passive, "Pick from what the project defines",
+        |app| app.open_workspace_symbols();
+    DIAGNOSTICS => "diagnostics", Code, Passive, "Pick from the problems found",
+        |app| app.open_diagnostics_picker();
+    NEXT_DIAGNOSTIC => "next-diagnostic", Code, Passive, "To the next problem",
+        |app| app.step_diagnostic(1);
+    PREV_DIAGNOSTIC => "prev-diagnostic", Code, Passive, "To the problem before",
+        |app| app.step_diagnostic(-1);
+    SIGNATURE_HELP => "signature-help", Code, Passive, "What arguments this call takes",
+        |app| app.ask_signature();
+    PYTHON_ENVIRONMENT => "python-environment", Code, Passive, "Choose which Python this project uses",
+        |app| app.open_environment_picker();
+    RESTART_SERVERS => "restart-servers", Code, Passive, "Start the language servers again",
+        |app| app.restart_servers();
+    SERVER_STATUS => "server-status", Code, Passive, "What the language servers are doing",
+        |app| app.show_server_status();
+    COMMAND_PALETTE => "command-palette", View, Passive, "Everything textfold can do, by name",
+        |app| app.open_commands_picker();
+    SPLIT => "split", View, Passive, "Another pane onto the same file",
+        |app| app.split();
+    CLOSE_PANE => "close-pane", View, Passive, "Close this pane",
+        |app| app.close_pane();
+    FOCUS_NEXT_PANE => "focus-next-pane", View, Passive, "Into the next pane",
+        |app| app.focus_pane(1);
+    FOCUS_PREV_PANE => "focus-prev-pane", View, Passive, "Into the pane before",
+        |app| app.focus_pane(-1);
+    SWAP_SPLIT_DIRECTION => "swap-split-direction", View, Passive, "Side by side, or one above the other",
+        |app| app.swap_split_direction();
+    DIFF_PANES => "diff-panes", View, Passive, "Compare the two panes, and scroll them together",
+        |app| app.toggle_diff();
+    THEME_PICKER => "theme", View, Passive, "Pick a set of colours",
+        |app| app.open_theme_picker();
+    NEXT_THEME => "next-theme", View, Passive, "The next set of colours along",
+        |app| app.step_theme(1);
+    PREV_THEME => "prev-theme", View, Passive, "The set before",
+        |app| app.step_theme(-1);
+    TOGGLE_LINE_NUMBERS => "toggle-line-numbers", View, Passive, "Line numbers on or off",
+        |app| app.toggle_setting("line_numbers");
+    TOGGLE_RELATIVE_NUMBERS => "toggle-relative-numbers", View, Passive, "Count from the cursor instead of the top",
+        |app| app.toggle_setting("relative_numbers");
+    TOGGLE_WRAP => "toggle-wrap", View, Passive, "Fold long lines, or let them run off the side",
+        |app| app.toggle_wrap();
+    TOGGLE_WHITESPACE => "toggle-whitespace", View, Passive, "Show spaces and tabs",
+        |app| app.toggle_setting("show_whitespace");
+    TOGGLE_MOUSE => "toggle-mouse", View, Passive, "Let the terminal have the mouse back",
+        |app| app.toggle_setting("mouse");
+    SET_LANGUAGE => "set-language", View, Passive, "Say what language this file is",
+        |app| app.open_language_picker();
+    SETTINGS => "settings", View, Passive, "Change a setting, and keep it",
+        |app| app.open_settings_picker();
+    RESTORE_SESSION => "restore-session", View, Passive, "Open again the files that were open here last time",
+        |app| app.bring_back_session();
+    PLUGINS => "plugins", View, Passive, "Turn languages and language servers on or off",
+        |app| app.open_plugins_picker();
+    CONTEXT_MENU => "context-menu", Edit, Passive, "What can be done where the cursor is",
+        |app| app.open_context_menu();
+    ESCAPE => "escape", Help, Passive, "Close what is open, or drop back to one cursor",
+        |app| app.escape();
+    HELP => "help", Help, Passive, "The keys, and what they do",
+        |app| app.overlay = Overlay::Help(0);
+    ABOUT => "about", Help, Passive, "Which textfold this is",
+        |app| app.say(format!(
+                        "textfold {} — {} languages, {} themes",
+                        env!("CARGO_PKG_VERSION"),
+                        lang::names().len(),
+                        app.themes.entries.len()
+                    ));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -7616,7 +8190,7 @@ mod tests {
     fn typed(app: &mut App, text: &str) {
         for c in text.chars() {
             if c == '\n' {
-                app.run(Cmd::InsertNewline);
+                app.run(Cmd::INSERT_NEWLINE);
             } else {
                 app.type_char(c);
             }
@@ -7977,7 +8551,7 @@ mod tests {
         );
         assert_eq!(app.completion.as_ref().map(Completion::len), Some(1));
 
-        app.run(Cmd::DeleteBackward);
+        app.run(Cmd::DELETE_BACKWARD);
         assert_eq!(
             app.completion.as_ref().map(Completion::len),
             Some(2),
@@ -8074,7 +8648,7 @@ mod tests {
         // The program sending it cannot see the screen, so a list, a prompt or
         // a question in the way has to give up the key rather than eat it.
         let (mut app, _rx) = editor();
-        for opened in [Cmd::Open, Cmd::Find, Cmd::CommandPalette] {
+        for opened in [Cmd::OPEN, Cmd::FIND, Cmd::COMMAND_PALETTE] {
             app.run(opened);
             keyed(&mut app, "alt-e");
             assert!(
@@ -8094,7 +8668,7 @@ mod tests {
         let (tx, _rx) = mpsc::channel();
         let mut app = App::new(config, tx);
         app.screen = Rect::new(0, 0, 100, 30);
-        app.run(Cmd::Find);
+        app.run(Cmd::FIND);
         keyed(&mut app, "e");
         match &app.overlay {
             Overlay::Prompt(prompt) => assert_eq!(prompt.input, "e"),
@@ -8121,7 +8695,7 @@ mod tests {
         app.files = Some(vec![dir.join("old.txt")]);
         std::fs::write(dir.join("new.txt"), "made just now\n").expect("written");
 
-        app.run(Cmd::Open);
+        app.run(Cmd::OPEN);
         assert!(matches!(&app.overlay, Overlay::Picker(p) if p.kind == Kind::Files));
         let shown = match &app.overlay {
             Overlay::Picker(picker) => picker.len(),
@@ -8329,7 +8903,7 @@ mod tests {
         app.do_reload(app.view().doc);
         assert_eq!(app.here().rope.to_string(), "two\n");
 
-        app.run(Cmd::Undo);
+        app.run(Cmd::UNDO);
         assert_eq!(app.here().rope.to_string(), "one\n");
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
@@ -8387,8 +8961,8 @@ mod tests {
         assert_eq!(app.git.mark(id, 1), Some(crate::git::Mark::Changed));
         assert_eq!(app.git.mark(id, 0), None);
 
-        app.run(Cmd::MoveDocStart);
-        app.run(Cmd::NextChange);
+        app.run(Cmd::MOVE_DOC_START);
+        app.run(Cmd::NEXT_CHANGE);
         assert_eq!(
             text::line_of(&app.here().rope, app.view().cursor()),
             1,
@@ -8402,7 +8976,7 @@ mod tests {
         let (mut app, _rx) = editor();
         typed(&mut app, "alpha beta alpha");
         app.last_search = "alpha".into();
-        app.run(Cmd::Find);
+        app.run(Cmd::FIND);
         match &app.overlay {
             Overlay::Prompt(p) => assert_eq!(p.input, "", "the box kept the last search"),
             other => panic!("no search box: {:?}", matches!(other, Overlay::None)),
@@ -8415,8 +8989,8 @@ mod tests {
     fn enter_in_the_search_box_walks_the_matches_without_closing_it() {
         let (mut app, _rx) = editor();
         typed(&mut app, "alpha beta alpha gamma alpha");
-        app.run(Cmd::MoveDocStart);
-        app.run(Cmd::Find);
+        app.run(Cmd::MOVE_DOC_START);
+        app.run(Cmd::FIND);
         typed_into_prompt(&mut app, "alpha");
         let first = app.view().sel.primary().start();
 
@@ -8444,8 +9018,8 @@ mod tests {
     fn leaving_the_search_box_keeps_where_enter_took_you() {
         let (mut app, _rx) = editor();
         typed(&mut app, "alpha beta alpha");
-        app.run(Cmd::MoveDocStart);
-        app.run(Cmd::Find);
+        app.run(Cmd::MOVE_DOC_START);
+        app.run(Cmd::FIND);
         typed_into_prompt(&mut app, "alpha");
         keyed(&mut app, "enter");
         let landed = app.view().sel.primary().start();
@@ -8457,9 +9031,9 @@ mod tests {
     fn changing_your_mind_about_a_search_puts_the_cursor_back() {
         let (mut app, _rx) = editor();
         typed(&mut app, "alpha beta alpha");
-        app.run(Cmd::MoveDocStart);
+        app.run(Cmd::MOVE_DOC_START);
         let was = app.view().sel.primary().start();
-        app.run(Cmd::Find);
+        app.run(Cmd::FIND);
         typed_into_prompt(&mut app, "beta");
         assert_ne!(
             app.view().sel.primary().start(),
@@ -8480,7 +9054,7 @@ mod tests {
         }
         let here = app.view().doc;
         assert_eq!(app.docs().len(), 3);
-        app.run(Cmd::CloseOthers);
+        app.run(Cmd::CLOSE_OTHERS);
         assert_eq!(app.docs().len(), 1);
         assert_eq!(app.view().doc, here);
         std::fs::remove_dir_all(scratch("a.txt").parent().unwrap()).ok();
@@ -8492,10 +9066,10 @@ mod tests {
         let saved = scratch("saved.txt");
         std::fs::write(&saved, "on disk\n").expect("written");
         app.open_path(&saved);
-        app.run(Cmd::New);
+        app.run(Cmd::NEW);
         typed(&mut app, "not saved anywhere");
 
-        app.run(Cmd::CloseAll);
+        app.run(Cmd::CLOSE_ALL);
         let left: Vec<String> = app.docs().iter().map(|d| d.name.clone()).collect();
         assert_eq!(left.len(), 1, "{left:?}");
         assert!(app.here().is_modified());
@@ -8513,7 +9087,7 @@ mod tests {
             source: Some("rustc".into()),
             code: Some("E0425".into()),
             data: None,
-            server: 0,
+            told: crate::doc::Told::Server(0),
         }];
         let said: Vec<String> = app
             .problem_lines(4)
@@ -8544,7 +9118,7 @@ mod tests {
             source: None,
             code: None,
             data: None,
-            server: 0,
+            told: crate::doc::Told::Server(0),
         };
         app.here_mut().diagnostics = vec![
             at(crate::doc::Severity::Hint, "unused"),
@@ -8572,7 +9146,7 @@ mod tests {
             source: Some("clippy".into()),
             code: None,
             data: None,
-            server: 0,
+            told: crate::doc::Told::Server(0),
         }];
         app.ask_hover(4);
         let hover = app.hover.as_ref().expect("no box appeared");
@@ -8594,7 +9168,7 @@ mod tests {
         std::fs::write(&a, left).expect("written");
         std::fs::write(&b, right).expect("written");
         app.open_path(&a);
-        app.run(Cmd::Split);
+        app.run(Cmd::SPLIT);
         app.open_path(&b);
         assert_eq!(app.panes.len(), 2, "the split did not happen");
         (app, rx, a.parent().expect("a directory").to_path_buf())
@@ -8603,7 +9177,7 @@ mod tests {
     #[test]
     fn comparing_two_panes_marks_what_differs_on_both_sides() {
         let (mut app, _rx, dir) = two_panes("dcmp", "one\ntwo\nthree\n", "one\nextra\ntwo\nthree\n");
-        app.run(Cmd::DiffPanes);
+        app.run(Cmd::DIFF_PANES);
         let diff = app.diff.as_ref().expect("nothing was compared");
         assert!(!diff.same());
         let (left, right) = diff.panes();
@@ -8633,7 +9207,7 @@ mod tests {
         }
         let (mut app, _rx, dir) = two_panes("dscroll", &left, &right);
         // The focus is the pane opened second, which is the right-hand file.
-        app.run(Cmd::DiffPanes);
+        app.run(Cmd::DIFF_PANES);
         let (left_pane, right_pane) = app.diff.as_ref().expect("compared").panes();
         let here = app.focus.min(app.panes.len() - 1);
         let there = if here == left_pane { right_pane } else { left_pane };
@@ -8661,11 +9235,11 @@ mod tests {
     #[test]
     fn an_edit_is_taken_into_account_without_asking_again() {
         let (mut app, _rx, dir) = two_panes("dedit", "one\ntwo\n", "one\nTWO\n");
-        app.run(Cmd::DiffPanes);
+        app.run(Cmd::DIFF_PANES);
         assert!(!app.diff.as_ref().expect("compared").same());
 
         // Make the two agree. The comparison should notice on its own.
-        app.run(Cmd::SelectAll);
+        app.run(Cmd::SELECT_ALL);
         typed(&mut app, "one\ntwo\n");
         app.tick();
         assert!(
@@ -8678,9 +9252,9 @@ mod tests {
     #[test]
     fn closing_a_pane_ends_the_comparison() {
         let (mut app, _rx, dir) = two_panes("dclose", "one\n", "two\n");
-        app.run(Cmd::DiffPanes);
+        app.run(Cmd::DIFF_PANES);
         assert!(app.diff.is_some());
-        app.run(Cmd::ClosePane);
+        app.run(Cmd::CLOSE_PANE);
         app.tick();
         assert!(app.diff.is_none(), "a comparison of one pane");
         std::fs::remove_dir_all(&dir).ok();
@@ -8689,7 +9263,7 @@ mod tests {
     #[test]
     fn comparing_needs_two_panes() {
         let (mut app, _rx) = editor();
-        app.run(Cmd::DiffPanes);
+        app.run(Cmd::DIFF_PANES);
         assert!(app.diff.is_none());
     }
 
@@ -8697,7 +9271,7 @@ mod tests {
     fn right_clicking_inside_a_selection_keeps_it() {
         let (mut app, _rx) = editor();
         typed(&mut app, "one two three");
-        app.run(Cmd::SelectAll);
+        app.run(Cmd::SELECT_ALL);
         let was = app.view().sel.primary();
 
         // Somewhere in the middle of the line, which is inside the selection.
@@ -8714,7 +9288,7 @@ mod tests {
     fn a_tab_held_against_the_end_of_a_full_row_keeps_moving() {
         let (mut app, _rx) = editor();
         for _ in 0..4 {
-            app.run(Cmd::New);
+            app.run(Cmd::NEW);
         }
         let id = app.view().doc;
         let was = app.docs.iter().position(|d| d.id == id).expect("open");
@@ -8746,7 +9320,7 @@ mod tests {
     #[test]
     fn a_tab_held_against_the_end_does_not_walk_off_it() {
         let (mut app, _rx) = editor();
-        app.run(Cmd::New);
+        app.run(Cmd::NEW);
         let id = app.docs[0].id;
         app.show(id);
         app.tab_scroll = 4;
@@ -8767,7 +9341,7 @@ mod tests {
     #[test]
     fn letting_go_of_a_tab_ends_the_drag() {
         let (mut app, _rx) = editor();
-        app.run(Cmd::New);
+        app.run(Cmd::NEW);
         let id = app.view().doc;
         app.drag = Some(Drag::Tab {
             id,
@@ -8788,8 +9362,8 @@ mod tests {
     #[test]
     fn a_tab_menu_offers_moving_it_and_says_where_it_cannot_go() {
         let (mut app, _rx) = editor();
-        app.run(Cmd::New);
-        app.run(Cmd::New);
+        app.run(Cmd::NEW);
+        app.run(Cmd::NEW);
         let first = app.docs[0].id;
         let menu = app.tab_menu(first, (0, 0));
         let row = |cmd: Cmd| {
@@ -8799,10 +9373,10 @@ mod tests {
                 .unwrap_or_else(|| panic!("no row for {cmd:?}"))
         };
         assert!(
-            !row(Cmd::MoveTabLeft).enabled,
+            !row(Cmd::MOVE_TAB_LEFT).enabled,
             "the first tab was offered a move left"
         );
-        assert!(row(Cmd::MoveTabRight).enabled);
+        assert!(row(Cmd::MOVE_TAB_RIGHT).enabled);
     }
 
     #[test]
@@ -8821,7 +9395,7 @@ mod tests {
         assert!(
             menu.items
                 .iter()
-                .any(|i| matches!(i.action, crate::menu::Action::RunOn(_, Cmd::CloseOthers))),
+                .any(|i| matches!(i.action, crate::menu::Action::RunOn(_, Cmd::CLOSE_OTHERS))),
             "a tab menu with nothing about tabs in it"
         );
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
@@ -8925,11 +9499,11 @@ mod tests {
     fn escape_takes_off_one_layer_at_a_time() {
         let (mut app, _rx) = editor();
         typed(&mut app, "one two three");
-        app.run(Cmd::SelectAll);
-        app.run(Cmd::AddCursorBelow);
+        app.run(Cmd::SELECT_ALL);
+        app.run(Cmd::ADD_CURSOR_BELOW);
         // Whatever the cursors ended up as, Escape works back to one bare one.
         for _ in 0..4 {
-            app.run(Cmd::Escape);
+            app.run(Cmd::ESCAPE);
         }
         assert_eq!(app.view().sel.len(), 1);
         assert!(app.view().sel.primary().is_empty());
@@ -8939,16 +9513,16 @@ mod tests {
     fn find_walks_the_matches_and_wraps_round() {
         let (mut app, _rx) = editor();
         typed(&mut app, "alpha beta alpha gamma alpha");
-        app.run(Cmd::MoveDocStart);
+        app.run(Cmd::MOVE_DOC_START);
         app.last_search = "alpha".into();
 
-        app.run(Cmd::FindNext);
+        app.run(Cmd::FIND_NEXT);
         let first = app.view().sel.primary().start();
-        app.run(Cmd::FindNext);
+        app.run(Cmd::FIND_NEXT);
         let second = app.view().sel.primary().start();
         assert!(second > first);
-        app.run(Cmd::FindNext);
-        app.run(Cmd::FindNext);
+        app.run(Cmd::FIND_NEXT);
+        app.run(Cmd::FIND_NEXT);
         // Four steps through three matches comes back to the first.
         assert_eq!(app.view().sel.primary().start(), first);
     }
@@ -8965,10 +9539,10 @@ mod tests {
     fn replacing_changes_every_match_as_one_undo() {
         let (mut app, _rx) = editor();
         typed(&mut app, "red green red blue red");
-        app.run(Cmd::MoveDocStart);
+        app.run(Cmd::MOVE_DOC_START);
         app.replace_all("red", "amber");
         assert_eq!(app.here().rope.to_string(), "amber green amber blue amber");
-        app.run(Cmd::Undo);
+        app.run(Cmd::UNDO);
         assert_eq!(app.here().rope.to_string(), "red green red blue red");
     }
 
@@ -8988,7 +9562,7 @@ mod tests {
         std::fs::write(&path, "content\n").expect("written");
         app.open_path(&path);
         let first = app.view().doc;
-        app.run(Cmd::New);
+        app.run(Cmd::NEW);
         app.open_path(&path);
         assert_eq!(app.view().doc, first);
         assert_eq!(
@@ -9004,7 +9578,7 @@ mod tests {
     #[test]
     fn closing_the_last_buffer_leaves_one_to_type_in() {
         let (mut app, _rx) = editor();
-        app.run(Cmd::CloseForce);
+        app.run(Cmd::CLOSE_FORCE);
         assert_eq!(app.docs().len(), 1);
         assert!(!app.quit);
     }
@@ -9013,7 +9587,7 @@ mod tests {
     fn quitting_with_unsaved_work_asks_first() {
         let (mut app, _rx) = editor();
         typed(&mut app, "unsaved");
-        app.run(Cmd::Quit);
+        app.run(Cmd::QUIT);
         assert!(!app.quit);
         assert!(matches!(app.overlay, Overlay::Confirm(_)));
         // Saying no keeps everything.
@@ -9021,7 +9595,7 @@ mod tests {
         assert!(!app.quit);
         assert_eq!(app.here().rope.to_string(), "unsaved");
         // Saying discard leaves.
-        app.run(Cmd::Quit);
+        app.run(Cmd::QUIT);
         app.confirm_key(Key::parse("d").unwrap());
         assert!(app.quit);
     }
@@ -9030,7 +9604,7 @@ mod tests {
     fn the_palette_runs_what_you_choose() {
         let (mut app, _rx) = editor();
         typed(&mut app, "one\ntwo\nthree");
-        app.run(Cmd::CommandPalette);
+        app.run(Cmd::COMMAND_PALETTE);
         let Overlay::Picker(picker) = &mut app.overlay else {
             panic!("the palette did not open");
         };
@@ -9046,7 +9620,7 @@ mod tests {
     fn a_setting_changed_from_the_list_takes_effect_and_the_list_stays_open() {
         let (mut app, _rx) = editor();
         let before = app.config.show_whitespace();
-        app.run(Cmd::Settings);
+        app.run(Cmd::SETTINGS);
         let Overlay::Picker(picker) = &mut app.overlay else {
             panic!("the settings did not open");
         };
@@ -9064,7 +9638,7 @@ mod tests {
     fn a_pane_split_in_two_keeps_both_cursors_pointing_at_the_same_text() {
         let (mut app, _rx) = editor();
         typed(&mut app, "alpha\nbeta\ngamma");
-        app.run(Cmd::Split);
+        app.run(Cmd::SPLIT);
         assert_eq!(app.panes.len(), 2);
         // Put the other pane's cursor at the end, then type at the start.
         app.panes[0].sel = Selections::single(Range::point(app.here().len_chars()));
@@ -9082,7 +9656,7 @@ mod tests {
         typed(&mut app, "fixed");
         let id = app.view().doc;
         app.doc_mut(id).expect("open").read_only = true;
-        app.run(Cmd::DeleteLine);
+        app.run(Cmd::DELETE_LINE);
         typed(&mut app, "more");
         assert_eq!(app.here().rope.to_string(), "fixed");
         assert_eq!(app.status.tone, Tone::Bad);

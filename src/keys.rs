@@ -200,65 +200,65 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     // Files. Ctrl-Q leaves, because Ctrl-C is copy here as it is everywhere
     // else, and an editor you cannot get out of is the oldest joke in the
     // trade.
-    (Cmd::Quit, &["ctrl-q"]),
-    (Cmd::Save, &["ctrl-s"]),
-    (Cmd::SaveAs, &["alt-s"]),
-    (Cmd::Close, &["ctrl-w"]),
-    (Cmd::New, &["ctrl-n"]),
-    (Cmd::Open, &["ctrl-p", "ctrl-o"]),
+    (Cmd::QUIT, &["ctrl-q"]),
+    (Cmd::SAVE, &["ctrl-s"]),
+    (Cmd::SAVE_AS, &["alt-s"]),
+    (Cmd::CLOSE, &["ctrl-w"]),
+    (Cmd::NEW, &["ctrl-n"]),
+    (Cmd::OPEN, &["ctrl-p", "ctrl-o"]),
     // Two keys because this one is also typed by other programs rather than
     // by people: `alt-e` is short, and F4 is one self-contained escape
     // sequence, which is the safer thing to write down a pipe.
-    (Cmd::OpenPath, &["alt-e", "f4"]),
-    (Cmd::Buffers, &["ctrl-b"]),
-    (Cmd::NextBuffer, &["alt-."]),
-    (Cmd::PrevBuffer, &["alt-,"]),
+    (Cmd::OPEN_PATH, &["alt-e", "f4"]),
+    (Cmd::BUFFERS, &["ctrl-b"]),
+    (Cmd::NEXT_BUFFER, &["alt-."]),
+    (Cmd::PREV_BUFFER, &["alt-,"]),
     // The keys VS Code and every browser use for moving a tab along, and a
     // modified special key rather than a modified letter — those always
     // encode which modifiers were held, so this arrives on a plain terminal
     // as well as on one with the extended protocol.
-    (Cmd::MoveTabLeft, &["ctrl-shift-pageup"]),
-    (Cmd::MoveTabRight, &["ctrl-shift-pagedown"]),
-    (Cmd::CommandPalette, &["alt-x", "ctrl-shift-p"]),
-    (Cmd::Help, &["f1"]),
+    (Cmd::MOVE_TAB_LEFT, &["ctrl-shift-pageup"]),
+    (Cmd::MOVE_TAB_RIGHT, &["ctrl-shift-pagedown"]),
+    (Cmd::COMMAND_PALETTE, &["alt-x", "ctrl-shift-p"]),
+    (Cmd::HELP, &["f1"]),
 
     // Moving.
-    (Cmd::MoveLeft, &["left"]),
-    (Cmd::MoveRight, &["right"]),
-    (Cmd::MoveUp, &["up"]),
-    (Cmd::MoveDown, &["down"]),
-    (Cmd::MoveWordLeft, &["ctrl-left", "alt-left"]),
-    (Cmd::MoveWordRight, &["ctrl-right", "alt-right"]),
-    (Cmd::MoveLineStart, &["home"]),
-    (Cmd::MoveLineEnd, &["end"]),
-    (Cmd::MovePageUp, &["pageup"]),
-    (Cmd::MovePageDown, &["pagedown"]),
-    (Cmd::MoveDocStart, &["ctrl-home"]),
-    (Cmd::MoveDocEnd, &["ctrl-end"]),
-    (Cmd::MoveParaUp, &["ctrl-up"]),
-    (Cmd::MoveParaDown, &["ctrl-down"]),
-    (Cmd::MatchBracket, &["alt-b"]),
-    (Cmd::GotoLine, &["ctrl-g"]),
-    (Cmd::JumpBack, &["alt-["]),
-    (Cmd::JumpForward, &["alt-]"]),
-    (Cmd::CentreCursor, &["alt-m"]),
+    (Cmd::MOVE_LEFT, &["left"]),
+    (Cmd::MOVE_RIGHT, &["right"]),
+    (Cmd::MOVE_UP, &["up"]),
+    (Cmd::MOVE_DOWN, &["down"]),
+    (Cmd::MOVE_WORD_LEFT, &["ctrl-left", "alt-left"]),
+    (Cmd::MOVE_WORD_RIGHT, &["ctrl-right", "alt-right"]),
+    (Cmd::MOVE_LINE_START, &["home"]),
+    (Cmd::MOVE_LINE_END, &["end"]),
+    (Cmd::MOVE_PAGE_UP, &["pageup"]),
+    (Cmd::MOVE_PAGE_DOWN, &["pagedown"]),
+    (Cmd::MOVE_DOC_START, &["ctrl-home"]),
+    (Cmd::MOVE_DOC_END, &["ctrl-end"]),
+    (Cmd::MOVE_PARA_UP, &["ctrl-up"]),
+    (Cmd::MOVE_PARA_DOWN, &["ctrl-down"]),
+    (Cmd::MATCH_BRACKET, &["alt-b"]),
+    (Cmd::GOTO_LINE, &["ctrl-g"]),
+    (Cmd::JUMP_BACK, &["alt-["]),
+    (Cmd::JUMP_FORWARD, &["alt-]"]),
+    (Cmd::CENTRE_CURSOR, &["alt-m"]),
 
     // Selecting. Shift and a movement, which is what it is everywhere.
-    (Cmd::ExtendLeft, &["shift-left"]),
-    (Cmd::ExtendRight, &["shift-right"]),
-    (Cmd::ExtendUp, &["shift-up"]),
-    (Cmd::ExtendDown, &["shift-down"]),
-    (Cmd::ExtendWordLeft, &["ctrl-shift-left", "alt-shift-left"]),
-    (Cmd::ExtendWordRight, &["ctrl-shift-right", "alt-shift-right"]),
-    (Cmd::ExtendLineStart, &["shift-home"]),
-    (Cmd::ExtendLineEnd, &["shift-end"]),
-    (Cmd::ExtendPageUp, &["shift-pageup"]),
-    (Cmd::ExtendPageDown, &["shift-pagedown"]),
-    (Cmd::ExtendDocStart, &["ctrl-shift-home"]),
-    (Cmd::ExtendDocEnd, &["ctrl-shift-end"]),
-    (Cmd::SelectAll, &["ctrl-a"]),
-    (Cmd::SelectLine, &["ctrl-l"]),
-    (Cmd::ExpandSelection, &["alt-="]),
+    (Cmd::EXTEND_LEFT, &["shift-left"]),
+    (Cmd::EXTEND_RIGHT, &["shift-right"]),
+    (Cmd::EXTEND_UP, &["shift-up"]),
+    (Cmd::EXTEND_DOWN, &["shift-down"]),
+    (Cmd::EXTEND_WORD_LEFT, &["ctrl-shift-left", "alt-shift-left"]),
+    (Cmd::EXTEND_WORD_RIGHT, &["ctrl-shift-right", "alt-shift-right"]),
+    (Cmd::EXTEND_LINE_START, &["shift-home"]),
+    (Cmd::EXTEND_LINE_END, &["shift-end"]),
+    (Cmd::EXTEND_PAGE_UP, &["shift-pageup"]),
+    (Cmd::EXTEND_PAGE_DOWN, &["shift-pagedown"]),
+    (Cmd::EXTEND_DOC_START, &["ctrl-shift-home"]),
+    (Cmd::EXTEND_DOC_END, &["ctrl-shift-end"]),
+    (Cmd::SELECT_ALL, &["ctrl-a"]),
+    (Cmd::SELECT_LINE, &["ctrl-l"]),
+    (Cmd::EXPAND_SELECTION, &["alt-="]),
     // Another cursor above or below is Ctrl-Alt-arrow in every editor that has
     // the feature, and a desktop is allowed to take a keystroke before the
     // terminal under it ever sees it — GNOME and KDE both take exactly that
@@ -267,41 +267,41 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     // and Ctrl-Alt-arrow is bound beside it for the desktops that leave it
     // alone. The first is what the help screen shows, because a key in the
     // help that does nothing is worse than no help.
-    (Cmd::AddCursorAbove, &["ctrl-shift-up", "ctrl-alt-up"]),
-    (Cmd::AddCursorBelow, &["ctrl-shift-down", "ctrl-alt-down"]),
-    (Cmd::AddCursorNextMatch, &["ctrl-d"]),
-    (Cmd::SelectAllMatches, &["ctrl-shift-l"]),
-    (Cmd::CursorsToLineEnds, &["alt-shift-i"]),
-    (Cmd::CollapseCursors, &["alt-shift-c"]),
+    (Cmd::ADD_CURSOR_ABOVE, &["ctrl-shift-up", "ctrl-alt-up"]),
+    (Cmd::ADD_CURSOR_BELOW, &["ctrl-shift-down", "ctrl-alt-down"]),
+    (Cmd::ADD_CURSOR_NEXT_MATCH, &["ctrl-d"]),
+    (Cmd::SELECT_ALL_MATCHES, &["ctrl-shift-l"]),
+    (Cmd::CURSORS_TO_LINE_ENDS, &["alt-shift-i"]),
+    (Cmd::COLLAPSE_CURSORS, &["alt-shift-c"]),
 
     // Changing text.
-    (Cmd::InsertNewline, &["enter"]),
-    (Cmd::DeleteBackward, &["backspace"]),
-    (Cmd::DeleteForward, &["delete"]),
-    (Cmd::DeleteWordBackward, &["ctrl-backspace", "alt-backspace"]),
-    (Cmd::DeleteWordForward, &["ctrl-delete", "alt-delete"]),
-    (Cmd::DeleteLine, &["ctrl-shift-k"]),
-    (Cmd::DuplicateLine, &["alt-shift-down", "alt-shift-up"]),
-    (Cmd::MoveLineUp, &["alt-up"]),
-    (Cmd::MoveLineDown, &["alt-down"]),
-    (Cmd::JoinLines, &["alt-j"]),
-    (Cmd::Indent, &["tab"]),
-    (Cmd::Unindent, &["shift-tab"]),
+    (Cmd::INSERT_NEWLINE, &["enter"]),
+    (Cmd::DELETE_BACKWARD, &["backspace"]),
+    (Cmd::DELETE_FORWARD, &["delete"]),
+    (Cmd::DELETE_WORD_BACKWARD, &["ctrl-backspace", "alt-backspace"]),
+    (Cmd::DELETE_WORD_FORWARD, &["ctrl-delete", "alt-delete"]),
+    (Cmd::DELETE_LINE, &["ctrl-shift-k"]),
+    (Cmd::DUPLICATE_LINE, &["alt-shift-down", "alt-shift-up"]),
+    (Cmd::MOVE_LINE_UP, &["alt-up"]),
+    (Cmd::MOVE_LINE_DOWN, &["alt-down"]),
+    (Cmd::JOIN_LINES, &["alt-j"]),
+    (Cmd::INDENT, &["tab"]),
+    (Cmd::UNINDENT, &["shift-tab"]),
     // Terminals disagree about Ctrl-/: some send it as Ctrl-_, which is the
     // same byte with a different name. Both are bound rather than explained.
-    (Cmd::ToggleComment, &["ctrl-/", "ctrl-_"]),
-    (Cmd::Undo, &["ctrl-z"]),
-    (Cmd::Redo, &["ctrl-y", "ctrl-shift-z"]),
-    (Cmd::Copy, &["ctrl-c"]),
-    (Cmd::Cut, &["ctrl-x"]),
-    (Cmd::Paste, &["ctrl-v"]),
+    (Cmd::TOGGLE_COMMENT, &["ctrl-/", "ctrl-_"]),
+    (Cmd::UNDO, &["ctrl-z"]),
+    (Cmd::REDO, &["ctrl-y", "ctrl-shift-z"]),
+    (Cmd::COPY, &["ctrl-c"]),
+    (Cmd::CUT, &["ctrl-x"]),
+    (Cmd::PASTE, &["ctrl-v"]),
 
     // Finding.
-    (Cmd::Find, &["ctrl-f"]),
-    (Cmd::FindNext, &["f3"]),
-    (Cmd::FindPrev, &["shift-f3"]),
-    (Cmd::FindWordUnderCursor, &["alt-f"]),
-    (Cmd::Replace, &["ctrl-h"]),
+    (Cmd::FIND, &["ctrl-f"]),
+    (Cmd::FIND_NEXT, &["f3"]),
+    (Cmd::FIND_PREV, &["shift-f3"]),
+    (Cmd::FIND_WORD_UNDER_CURSOR, &["alt-f"]),
+    (Cmd::REPLACE, &["ctrl-h"]),
     // Ctrl-Shift-F is the key everyone reaches for, and it is also the one
     // most likely never to arrive: a terminal without the extended keyboard
     // protocol cannot tell it from Ctrl-F, and tmux, screen and a fair number
@@ -309,46 +309,46 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     // that always get through — Alt-G, and F7 for anything driving the
     // terminal down a pipe. Alt-G is shown in the help, because a key in the
     // help that does nothing on your machine is worse than no help.
-    (Cmd::Grep, &["alt-g", "ctrl-shift-f", "f7"]),
+    (Cmd::GREP, &["alt-g", "ctrl-shift-f", "f7"]),
     // Beside the keys for the next problem, since stepping through your own
     // changes is the same shape of thing as stepping through the compiler's.
-    (Cmd::NextChange, &["f9"]),
-    (Cmd::PrevChange, &["shift-f9"]),
+    (Cmd::NEXT_CHANGE, &["f9"]),
+    (Cmd::PREV_CHANGE, &["shift-f9"]),
 
     // Language servers.
-    (Cmd::Completion, &["ctrl-space"]),
-    (Cmd::GotoDefinition, &["f12", "ctrl-enter"]),
-    (Cmd::References, &["shift-f12"]),
-    (Cmd::Hover, &["alt-k"]),
-    (Cmd::Rename, &["f2"]),
-    (Cmd::CodeAction, &["alt-enter", "ctrl-."]),
+    (Cmd::COMPLETION, &["ctrl-space"]),
+    (Cmd::GOTO_DEFINITION, &["f12", "ctrl-enter"]),
+    (Cmd::REFERENCES, &["shift-f12"]),
+    (Cmd::HOVER, &["alt-k"]),
+    (Cmd::RENAME, &["f2"]),
+    (Cmd::CODE_ACTION, &["alt-enter", "ctrl-."]),
     // The one that puts the missing import in without a list in between,
     // which is what you want ninety times out of a hundred.
-    (Cmd::FixIt, &["alt-i"]),
-    (Cmd::Format, &["alt-shift-f"]),
-    (Cmd::NextDiagnostic, &["f8"]),
-    (Cmd::PrevDiagnostic, &["shift-f8"]),
-    (Cmd::Diagnostics, &["alt-d"]),
-    (Cmd::Symbols, &["alt-o", "ctrl-shift-o"]),
+    (Cmd::FIX_IT, &["alt-i"]),
+    (Cmd::FORMAT, &["alt-shift-f"]),
+    (Cmd::NEXT_DIAGNOSTIC, &["f8"]),
+    (Cmd::PREV_DIAGNOSTIC, &["shift-f8"]),
+    (Cmd::DIAGNOSTICS, &["alt-d"]),
+    (Cmd::SYMBOLS, &["alt-o", "ctrl-shift-o"]),
     // Not Ctrl-Shift-Space: with shift folded into the character, that is the
     // same keystroke as Ctrl-Space, which already asks for completions.
-    (Cmd::SignatureHelp, &["alt-p"]),
+    (Cmd::SIGNATURE_HELP, &["alt-p"]),
 
     // Panes and the view.
-    (Cmd::Split, &["alt-v"]),
-    (Cmd::ClosePane, &["alt-q"]),
-    (Cmd::FocusNextPane, &["alt-w"]),
-    (Cmd::SwapSplitDirection, &["alt-\\"]),
-    (Cmd::DiffPanes, &["alt-c"]),
-    (Cmd::ThemePicker, &["alt-t"]),
-    (Cmd::ToggleLineNumbers, &["alt-n"]),
-    (Cmd::ToggleWrap, &["alt-z"]),
+    (Cmd::SPLIT, &["alt-v"]),
+    (Cmd::CLOSE_PANE, &["alt-q"]),
+    (Cmd::FOCUS_NEXT_PANE, &["alt-w"]),
+    (Cmd::SWAP_SPLIT_DIRECTION, &["alt-\\"]),
+    (Cmd::DIFF_PANES, &["alt-c"]),
+    (Cmd::THEME_PICKER, &["alt-t"]),
+    (Cmd::TOGGLE_LINE_NUMBERS, &["alt-n"]),
+    (Cmd::TOGGLE_WRAP, &["alt-z"]),
 
     // What a keyboard with a menu key sends, and the key Windows and GTK have
     // both meant by it for thirty years for keyboards without one.
-    (Cmd::ContextMenu, &["shift-f10", "menu"]),
+    (Cmd::CONTEXT_MENU, &["shift-f10", "menu"]),
 
-    (Cmd::Escape, &["esc"]),
+    (Cmd::ESCAPE, &["esc"]),
 ];
 
 /// The bindings in force: what textfold ships, with your changes folded in.
@@ -389,8 +389,33 @@ impl Keys {
                 }
             }
         }
+        // What the plugins would like bound. Only where the key is going
+        // spare: a plugin gets to suggest a key, not to take one. A plugin
+        // that quietly rebound Ctrl-S would be a plugin nobody could install
+        // safely, and the answer if you want it anyway is one line in your own
+        // settings, which is read after this and wins.
+        for plugin in crate::plugin::active() {
+            for (name, bindings) in &plugin.keys {
+                let Some(cmd) = crate::cmd::by_name(name) else {
+                    keys.problems.push(format!(
+                        "{}: there is no command called {name:?}",
+                        plugin.id
+                    ));
+                    continue;
+                };
+                for text in bindings {
+                    match Key::parse(text) {
+                        Some(key) => keys.suggest(key, cmd),
+                        None => keys
+                            .problems
+                            .push(format!("{}: {text:?} is not a key", plugin.id)),
+                    }
+                }
+            }
+        }
+
         for (name, bindings) in overrides {
-            let Some(cmd) = Cmd::from_name(name) else {
+            let Some(cmd) = crate::cmd::by_name(name) else {
                 keys.problems
                     .push(format!("there is no command called {name:?}"));
                 continue;
@@ -419,6 +444,18 @@ impl Keys {
             list.retain(|k| *k != key);
         }
         self.shown.entry(cmd).or_default().push(key);
+    }
+
+    /// Bind a key only if it is going spare.
+    ///
+    /// What a plugin's suggestions get. The difference between this and
+    /// [`Keys::bind`] is the whole of what makes a plugin safe to install: it
+    /// can have the keys nothing else wanted, and it cannot take one you were
+    /// already using.
+    fn suggest(&mut self, key: Key, cmd: Cmd) {
+        if !self.map.contains_key(&key) {
+            self.bind(key, cmd);
+        }
     }
 
     /// What this keystroke does, if anything.
@@ -477,8 +514,8 @@ mod tests {
                 )
         };
         let keys = Keys::default();
-        for cmd in crate::cmd::ALL {
-            let bound = keys.keys_for(*cmd);
+        for cmd in crate::cmd::all() {
+            let bound = keys.keys_for(cmd);
             assert!(
                 bound.is_empty() || !bound.iter().all(taken),
                 "{} can only be reached by a key the desktop takes first",
@@ -493,26 +530,26 @@ mod tests {
         // binding has to be the one that works.
         let keys = Keys::default();
         assert_eq!(
-            keys.shortcut(Cmd::AddCursorAbove).as_deref(),
+            keys.shortcut(Cmd::ADD_CURSOR_ABOVE).as_deref(),
             Some("Ctrl-Shift-\u{2191}")
         );
         assert_eq!(
-            keys.shortcut(Cmd::AddCursorBelow).as_deref(),
+            keys.shortcut(Cmd::ADD_CURSOR_BELOW).as_deref(),
             Some("Ctrl-Shift-\u{2193}")
         );
         let press = |code, mods| keys.lookup(Key::from_event(KeyEvent::new(code, mods)));
         let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
-        assert_eq!(press(KeyCode::Up, ctrl_shift), Some(Cmd::AddCursorAbove));
-        assert_eq!(press(KeyCode::Down, ctrl_shift), Some(Cmd::AddCursorBelow));
+        assert_eq!(press(KeyCode::Up, ctrl_shift), Some(Cmd::ADD_CURSOR_ABOVE));
+        assert_eq!(press(KeyCode::Down, ctrl_shift), Some(Cmd::ADD_CURSOR_BELOW));
         // A modified arrow is one escape sequence with a number in it, so
         // Ctrl-Shift-Up is a different key from Ctrl-Up rather than the same
         // byte twice — which is why this pair can be the one shown.
         let ctrl = KeyModifiers::CONTROL;
-        assert_eq!(press(KeyCode::Up, ctrl), Some(Cmd::MoveParaUp));
+        assert_eq!(press(KeyCode::Up, ctrl), Some(Cmd::MOVE_PARA_UP));
         // Still bound, for a desktop that leaves them alone.
         let ctrl_alt = KeyModifiers::CONTROL | KeyModifiers::ALT;
-        assert_eq!(press(KeyCode::Up, ctrl_alt), Some(Cmd::AddCursorAbove));
-        assert_eq!(press(KeyCode::Down, ctrl_alt), Some(Cmd::AddCursorBelow));
+        assert_eq!(press(KeyCode::Up, ctrl_alt), Some(Cmd::ADD_CURSOR_ABOVE));
+        assert_eq!(press(KeyCode::Down, ctrl_alt), Some(Cmd::ADD_CURSOR_BELOW));
     }
 
     #[test]
@@ -521,14 +558,14 @@ mod tests {
         let press = |code, mods| keys.lookup(Key::from_event(KeyEvent::new(code, mods)));
         assert_eq!(
             press(KeyCode::Char('s'), KeyModifiers::CONTROL),
-            Some(Cmd::Save)
+            Some(Cmd::SAVE)
         );
         assert_eq!(
             press(KeyCode::Char('z'), KeyModifiers::CONTROL),
-            Some(Cmd::Undo)
+            Some(Cmd::UNDO)
         );
-        assert_eq!(press(KeyCode::Left, KeyModifiers::SHIFT), Some(Cmd::ExtendLeft));
-        assert_eq!(press(KeyCode::Esc, KeyModifiers::NONE), Some(Cmd::Escape));
+        assert_eq!(press(KeyCode::Left, KeyModifiers::SHIFT), Some(Cmd::EXTEND_LEFT));
+        assert_eq!(press(KeyCode::Esc, KeyModifiers::NONE), Some(Cmd::ESCAPE));
     }
 
     #[test]
@@ -555,7 +592,7 @@ mod tests {
         let backtab = Key::from_event(KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
         let shift_tab = Key::from_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::SHIFT));
         assert_eq!(backtab, shift_tab);
-        assert_eq!(Keys::default().lookup(backtab), Some(Cmd::Unindent));
+        assert_eq!(Keys::default().lookup(backtab), Some(Cmd::UNINDENT));
     }
 
     #[test]
@@ -592,7 +629,7 @@ mod tests {
         let keys = Keys::new(&overrides);
         assert_eq!(
             keys.lookup(Key::parse("f4").unwrap()),
-            Some(Cmd::Save)
+            Some(Cmd::SAVE)
         );
         assert_eq!(keys.lookup(Key::parse("ctrl-s").unwrap()), None);
     }
@@ -604,7 +641,7 @@ mod tests {
         let keys = Keys::new(&overrides);
         assert_eq!(keys.lookup(Key::parse("ctrl-q").unwrap()), None);
         // And the rest of the scheme is untouched.
-        assert_eq!(keys.lookup(Key::parse("ctrl-s").unwrap()), Some(Cmd::Save));
+        assert_eq!(keys.lookup(Key::parse("ctrl-s").unwrap()), Some(Cmd::SAVE));
     }
 
     #[test]
@@ -622,5 +659,34 @@ mod tests {
         assert_eq!(Key::parse("shift-a").and_then(|k| k.as_typed()), Some('A'));
         assert_eq!(Key::parse("ctrl-a").and_then(|k| k.as_typed()), None);
         assert_eq!(Key::parse("alt-a").and_then(|k| k.as_typed()), None);
+    }
+
+    #[test]
+    fn a_plugin_may_have_the_keys_nobody_else_wanted() {
+        let mut keys = Keys::default();
+        let taken = Key::parse("ctrl-s").expect("a key");
+        let spare = Key::parse("f6").expect("a key");
+        let was = keys.lookup(taken);
+        assert!(was.is_some(), "ctrl-s should already do something");
+
+        keys.suggest(taken, Cmd::ABOUT);
+        assert_eq!(
+            keys.lookup(taken),
+            was,
+            "a plugin took a key that was already doing something"
+        );
+
+        keys.suggest(spare, Cmd::ABOUT);
+        assert_eq!(keys.lookup(spare), Some(Cmd::ABOUT));
+    }
+
+    #[test]
+    fn what_you_bind_yourself_beats_what_a_plugin_suggested() {
+        let mut keys = Keys::default();
+        let spare = Key::parse("f6").expect("a key");
+        keys.suggest(spare, Cmd::ABOUT);
+        // Which is what an override does: `bind`, not `suggest`.
+        keys.bind(spare, Cmd::HELP);
+        assert_eq!(keys.lookup(spare), Some(Cmd::HELP));
     }
 }

@@ -283,8 +283,14 @@ In `~/.config/textfold/config.json`, by command name:
 
 Naming a command replaces every key it had, so an empty list unbinds it.
 Commands you do not mention keep what they came with. The names are the ones
-in the command palette. `f1` shows what you actually have, not what textfold
-shipped with.
+in the command palette — including the ones a [plugin](#plugins) brought,
+which are named `plugin/thing`:
+
+```json
+{ "keys": { "pytools/lint": ["f6"] } }
+```
+
+`f1` shows what you actually have, not what textfold shipped with.
 
 ---
 
@@ -963,9 +969,9 @@ expensive and are the answer to one you did.
 
 ## Plugins
 
-Everything textfold knows about a language — how to colour it, how to comment
-it out, and what to run to get intelligence about it — arrives as a plugin, and
-every one of them can be switched off.
+Everything textfold knows that is not the editor itself arrives as a plugin,
+and every one of them can be switched off: the languages, the grammars, the
+language servers, the colours, and the programs it runs for you.
 
 The ones that ship are the JSON files in `src/plugins/`, built into the binary.
 Yours go in `~/.config/textfold/plugins/`, as `name.json` or as
@@ -974,9 +980,9 @@ kinds: nothing textfold ships is reachable by a route your own plugin cannot
 take. A plugin of yours taking an id textfold already uses replaces it, which
 is how you say what Rust means here without editing textfold.
 
-A plugin has an id, and so does each server inside it. `python` is the Python
+A plugin has an id, and so does each thing inside it. `python` is the Python
 plugin; `python/pyright` and `python/ruff` are the two servers in it. Either
-can be switched off, and switching off the plugin switches off the servers with
+can be switched off, and switching off the plugin switches off everything in
 it. `plugins` in the command palette is the list, with a switch beside each
 row; `textfold --list-plugins` prints the same thing.
 
@@ -984,12 +990,105 @@ row; `textfold --list-plugins` prints the same thing.
 { "plugins": { "python/ruff": false } }
 ```
 
-Switching one takes effect where you are standing: the language table is built
-again, the servers are stopped and started, and the buffers you have open work
-out what language they are afresh. A file whose language you set by hand keeps
-what you told it.
+Switching one takes effect where you are standing: the languages, the
+commands, the keys and the colours are all built again, the servers are
+stopped and started, and the buffers you have open work out what language they
+are afresh. A file whose language you set by hand keeps what you told it.
 
-### Writing one
+### What a plugin can contribute
+
+| | |
+|---|---|
+| `languages` | how to colour a language, comment it out, and which servers to run — see [Languages](#languages) |
+| `tools` | programs to run on the file: formatters, linters, test runs — see [Tools](#tools) |
+| `themes` | sets of colours, in the shape a [theme file](#colours) is in |
+| `keys` | keys it would like bound, by command name |
+
+```json
+{ "id": "pytools",
+  "name": "Python tools",
+  "about": "ruff as a formatter and a linter, run as programs",
+  "tools": [
+    { "name": "fmt", "about": "Lay this file out with ruff",
+      "command": "ruff", "args": ["format", "-"],
+      "languages": ["python"], "output": "replace", "on_save": true },
+    { "name": "lint", "about": "Check this file with ruff",
+      "command": "ruff", "args": ["check", "--output-format", "concise", "${file}"],
+      "languages": ["python"], "output": "problems",
+      "pattern": "%f:%l:%c: %m", "on_save": true }
+  ],
+  "keys": { "pytools/lint": ["f6"] } }
+```
+
+Per plugin: `id`, `name`, `about`, `enabled` (say `false` to ship one switched
+off), and the four contribution tables above.
+
+**A plugin's keys are a suggestion, not a claim.** One is bound only if
+nothing already wants that key, so a plugin cannot quietly take Ctrl-S, and a
+plugin you install cannot break the keys you already know. If you want it
+anyway, bind it yourself — your own `keys` are read last and win.
+
+### Tools
+
+A tool is a program textfold runs on the file in front of you, and it becomes
+a command like any other: it is in the palette, you can bind a key to it, and
+`plugins` has a switch for it. This is the half of "an editor with plugins"
+that needs no plugin runtime at all — a great deal of what people write
+plugins for elsewhere is *run this program on my buffer and do something with
+what it printed*, and that is a table rather than code.
+
+| | |
+|---|---|
+| `name` | what it is called; the command becomes `<plugin>/<name>` |
+| `command`, `args` | what to run |
+| `output` | what to do with what it printed — below |
+| `languages` | which languages it is for. Absent means any file, and a tool for another language is not offered in this one |
+| `roots` | what marks the top of the project it runs in. Absent means `.git` |
+| `stdin` | whether the buffer goes in on standard input. Absent means yes for a formatter and no for everything else |
+| `on_save` | whether to run it every time the file is written |
+| `pattern` | how to read a line of output as a problem, for `"problems"` |
+
+`output` is one of four things:
+
+- **`"replace"`** — what it printed replaces the buffer. Formatters: `black -`,
+  `gofmt`, `prettier`. This is the default, because most tools are this.
+- **`"problems"`** — what it printed is a list of problems, read with
+  `pattern`, and shown in the margin beside the language server's own.
+- **`"show"`** — what it printed opens in a buffer of its own. Test runs,
+  `git log`, anything you want to read rather than apply.
+- **`"ignore"`** — nothing to read; textfold says whether it worked.
+
+`pattern` is the shape every compiler-output parser since vi has used: `%f`
+the file, `%l` the line, `%c` the column, `%t` a word saying how bad it is,
+`%m` the message, `%%` a per cent sign. Everything else in it is literal and
+has to be there — a line that does not match is not a problem, which is what
+keeps a tool's headers and summary lines out of your margin.
+
+Nothing waits. The program is started on a thread and its answer arrives on
+the same channel the keyboard and the language servers use, so a test run that
+takes a minute costs a minute of it running, not a minute of the editor being
+gone. A tool that prints nothing when it was meant to rewrite the file is
+treated as having failed, and the buffer is left alone: emptying somebody's
+file over a tool that fell over quietly is not a recoverable kind of wrong.
+
+**`on_save`** puts a tool in the right half of the save. One that rewrites the
+file runs *before* the write, with the formatter, so what lands on disk is what
+you end up looking at; anything else runs *after* it, because a linter's job is
+to look at what has just been saved. So this is a complete `black`-and-`ruff`
+setup with no language server involved at all:
+
+```json
+{ "id": "py", "tools": [
+  { "name": "black", "command": "black", "args": ["-", "-q"],
+    "languages": ["python"], "on_save": true },
+  { "name": "ruff", "command": "ruff",
+    "args": ["check", "--output-format", "concise", "${file}"],
+    "languages": ["python"], "output": "problems",
+    "pattern": "%f:%l:%c: %m", "on_save": true }
+] }
+```
+
+### Languages
 
 ```json
 { "id": "zig", "name": "Zig", "about": "Colours and zls",
@@ -1010,11 +1109,10 @@ Colours come from any tree-sitter grammar built as a shared library —
 `tree-sitter build` produces one — opened at the moment a file of that language
 is first shown.
 
-Per plugin: `id`, `name`, `about`, `enabled` (say `false` to ship one switched
-off), `languages`. Per language: `extensions`, `filenames` (for the many files
-with no extension), `shebangs`, `line_comment`, `block_comment`, `brackets`,
-`lsp_id`, `servers`, `grammar`. Per server: `name`, `command`, `args`, `roots`,
-`settings`, `init_options`, `env`.
+Per language: `extensions`, `filenames` (for the many files with no extension),
+`shebangs`, `line_comment`, `block_comment`, `brackets`, `lsp_id`, `servers`,
+`grammar`. Per server: `name`, `command`, `args`, `roots`, `settings`,
+`init_options`, `env`.
 
 A language named by more than one plugin **merges** field by field, in the
 order the plugins load, so swapping rust-analyzer for something else is three
@@ -1226,12 +1324,23 @@ Ctrl-End on a two-hundred-thousand-line file is the same amount of work as
 pressing Down.
 
 **What textfold knows is data, and the data can be switched off.** Languages,
-grammars and language servers are all plugin manifests read at startup — the
-ones that ship are in the same shape as the ones you write, loaded through the
-same code, and listed in the same place with the same switch beside them.
-Turning one off rebuilds the language table and restarts the servers rather
-than asking you to restart the editor, and a language id survives that, so a
-buffer that was Python is still Python when Python comes back.
+grammars, language servers, colours and tools all arrive as plugin manifests
+read at startup — the ones that ship are in the same shape as the ones you
+write, loaded through the same code, and listed in the same place with the
+same switch beside them. Turning one off rebuilds the languages, the commands,
+the keys and the colours rather than asking you to restart the editor, and an
+id survives that, so a buffer that was Python is still Python when Python
+comes back.
+
+**A command is a number, and the list is open.** `Cmd` is an index into a
+registry, so a key binding, a palette row, a menu row and a status-bar button
+all hold the same thing whether the command behind it is one textfold ships or
+one a plugin brought. The built-ins are one table — the name, the group, the
+line the palette shows, what it does to the text, and what it actually does —
+and that table is the only place any of them is written down. A row that does
+not say what it does will not compile, which is what replaced the exhaustive
+`match` that used to enforce it, and folding "does this change the text" into
+the same row retired two lists that had to be kept in step by hand.
 
 **A menu is a second way to reach the keys, not a second implementation.**
 Every row of every context menu is a `Cmd` the editor already has, shown beside

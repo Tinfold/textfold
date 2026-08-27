@@ -22,6 +22,7 @@ mod session;
 mod syntax;
 mod term;
 mod text;
+mod tool;
 mod theme;
 mod ui;
 mod venv;
@@ -124,6 +125,10 @@ fn main() -> Result<()> {
             for server in &plugin.servers {
                 let state = if plugin::is_on(&server.id) { "on " } else { "off" };
                 println!("{state}    {:<20} runs {}", server.id, server.command);
+            }
+            for tool in &plugin.tools {
+                let state = if plugin::is_on(&tool.id) { "on " } else { "off" };
+                println!("{state}    {:<20} runs {}", tool.id, tool.command);
             }
         }
         for problem in plugin::problems() {

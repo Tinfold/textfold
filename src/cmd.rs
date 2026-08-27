@@ -1,54 +1,47 @@
-//! Everything textfold can be told to do, as one list.
+//! Everything textfold can be told to do — and the machinery that lets
+//! something outside textfold add to that list.
 //!
-//! One name for each action, used in three places at once: the key bindings
-//! that ship, the key bindings you write, and the command palette. There is no
-//! second list to keep in step, so a command that exists is a command you can
-//! bind and a command you can search for, without anybody remembering to add
-//! it in three files.
+//! A command is an id and nothing else: [`Cmd`] is a number into a registry.
+//! That is the whole trick. Keys, the command palette, the context menus and
+//! the status bar buttons all hold a `Cmd`, and none of them knows or cares
+//! whether the command behind it is one textfold ships or one a plugin brought
+//! with it. Adding a command is adding a row, not editing five files.
 //!
-//! The one-line description is not decoration. It is what the palette shows
-//! and, for most people, the only documentation they will read, so it says
-//! what the command does rather than restating its name.
+//! The ones textfold ships are the table in [`crate::app::BUILT_IN`] — one row
+//! each, giving the name, the group, whether it changes the text, the line the
+//! palette shows, and what it actually does. There is no second list to keep
+//! in step: the key bindings, the palette and the menus all read that one, and
+//! a row that does not say what it does will not compile.
+//!
+//! Built-ins take the first block of ids, in table order, which is what lets
+//! `Cmd::SAVE` be an ordinary constant. Everything contributed comes after
+//! them, numbered as it is first seen and kept — so a command keeps its id
+//! when a plugin is switched off and on again, and a key bound to it goes on
+//! meaning the same thing.
 
-macro_rules! commands {
-    ($($variant:ident => $name:literal, $group:ident, $about:literal;)*) => {
-        /// One thing textfold can be told to do.
-        #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
-        pub enum Cmd {
-            $($variant,)*
-        }
+use std::sync::{Mutex, OnceLock, RwLock};
 
-        /// Every command there is, in the order written below — which is the
-        /// order the palette shows them in when you have not typed anything,
-        /// so it is grouped the way a person would look for them.
-        pub const ALL: &[Cmd] = &[$(Cmd::$variant,)*];
+use crate::app::App;
+use crate::plugin::Tool;
 
-        impl Cmd {
-            /// The name in a config file and in the palette.
-            pub fn name(&self) -> &'static str {
-                match self { $(Cmd::$variant => $name,)* }
-            }
+/// One thing textfold can be told to do.
+///
+/// Deliberately opaque and deliberately `Copy`: it is a number, it is cheap to
+/// pass about, and nothing outside this module can take it apart and start
+/// depending on which command is which.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
+pub struct Cmd(u16);
 
-            /// The line under the name in the palette.
-            pub fn about(&self) -> &'static str {
-                match self { $(Cmd::$variant => $about,)* }
-            }
-
-            pub fn group(&self) -> Group {
-                match self { $(Cmd::$variant => Group::$group,)* }
-            }
-
-            /// The command of that name, for a key binding in a config file.
-            pub fn from_name(name: &str) -> Option<Cmd> {
-                let name = name.trim();
-                match name { $($name => Some(Cmd::$variant),)* _ => None }
-            }
-        }
-    };
+impl Cmd {
+    /// The command with this id. Only the table's own macro should call this;
+    /// everywhere else names a constant or looks a name up.
+    pub(crate) const fn at(index: u16) -> Cmd {
+        Cmd(index)
+    }
 }
 
 /// What part of the editor a command belongs to. Shown beside it in the
-/// palette, so a list of ninety things reads as six lists of fifteen.
+/// palette, so a list of a hundred and forty things reads as eight lists.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Group {
     File,
@@ -59,6 +52,8 @@ pub enum Group {
     Code,
     View,
     Help,
+    /// Something a plugin runs for you: a formatter, a linter, a test run.
+    Tool,
 }
 
 impl Group {
@@ -72,216 +67,237 @@ impl Group {
             Group::Code => "code",
             Group::View => "view",
             Group::Help => "help",
+            Group::Tool => "tool",
         }
     }
 }
 
-commands! {
-    // ---- Files and buffers ----
-    New => "new", File, "Start an empty buffer";
-    Open => "open", File, "Open a file by name, fuzzily";
-    OpenPath => "open-path", File, "Open a file by typing its path, exactly";
-    Save => "save", File, "Write this file to disk";
-    SaveAs => "save-as", File, "Write this file somewhere else";
-    SaveAll => "save-all", File, "Write every changed file";
-    Reload => "reload", File, "Read this file again, throwing away changes";
-    Close => "close", File, "Close this buffer, asking about unsaved changes";
-    CloseForce => "close!", File, "Close this buffer, changes and all";
-    CloseOthers => "close-others", File, "Close every buffer but this one";
-    CloseSaved => "close-saved", File, "Close every buffer with nothing unsaved in it";
-    CloseAll => "close-all", File, "Close every buffer";
-    CopyPath => "copy-path", File, "Copy this file's full path";
-    CopyRelativePath => "copy-relative-path", File, "Copy this file's path from the project root";
-    NextBuffer => "next-buffer", File, "The buffer after this one";
-    PrevBuffer => "prev-buffer", File, "The buffer before this one";
-    MoveTabLeft => "move-tab-left", File, "Move this tab one place towards the front";
-    MoveTabRight => "move-tab-right", File, "Move this tab one place towards the back";
-    Buffers => "buffers", File, "Pick from the open buffers";
-    Quit => "quit", File, "Leave, asking about unsaved changes";
-    QuitForce => "quit!", File, "Leave, changes and all";
+/// What a command does to the text, which is the only thing the editor needs
+/// to know about one before running it.
+///
+/// One column rather than two lists kept by hand. Whether a command may run on
+/// a read-only file and whether the next keystroke can join its undo step are
+/// the same question asked twice, and asking it once in the table is what
+/// stops a command from being added to one list and forgotten in the other.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Behaviour {
+    /// Leaves the text alone. Moving, searching, opening things.
+    Passive,
+    /// Changes the text, and stands on its own in the undo history.
+    Edits,
+    /// Changes the text the way typing does: quick keystrokes in a row merge
+    /// into one thing to undo.
+    Types,
+}
 
-    // ---- Moving ----
-    MoveLeft => "left", Move, "One character left";
-    MoveRight => "right", Move, "One character right";
-    MoveUp => "up", Move, "One line up";
-    MoveDown => "down", Move, "One line down";
-    MoveWordLeft => "word-left", Move, "To the start of the word before";
-    MoveWordRight => "word-right", Move, "To the end of the word after";
-    MoveLineStart => "line-start", Move, "To the first thing on the line, then to column one";
-    MoveLineEnd => "line-end", Move, "To the end of the line";
-    MovePageUp => "page-up", Move, "A screenful up";
-    MovePageDown => "page-down", Move, "A screenful down";
-    MoveDocStart => "doc-start", Move, "To the top of the file";
-    MoveDocEnd => "doc-end", Move, "To the bottom of the file";
-    MoveParaUp => "para-up", Move, "To the blank line above";
-    MoveParaDown => "para-down", Move, "To the blank line below";
-    MatchBracket => "match-bracket", Move, "To the bracket matching this one";
-    GotoLine => "goto-line", Move, "Jump to a line by number";
-    JumpBack => "jump-back", Move, "Back to where you were before the last jump";
-    JumpForward => "jump-forward", Move, "Forward again";
-    ScrollUp => "scroll-up", Move, "Move the view up, leaving the cursor";
-    ScrollDown => "scroll-down", Move, "Move the view down, leaving the cursor";
-    CentreCursor => "centre-cursor", Move, "Put the cursor's line in the middle of the screen";
+impl Behaviour {
+    /// Whether this needs a document that can be changed.
+    pub fn writes(&self) -> bool {
+        !matches!(self, Behaviour::Passive)
+    }
 
-    // ---- Extending a selection ----
-    ExtendLeft => "extend-left", Select, "Select one character left";
-    ExtendRight => "extend-right", Select, "Select one character right";
-    ExtendUp => "extend-up", Select, "Select one line up";
-    ExtendDown => "extend-down", Select, "Select one line down";
-    ExtendWordLeft => "extend-word-left", Select, "Select to the word before";
-    ExtendWordRight => "extend-word-right", Select, "Select to the word after";
-    ExtendLineStart => "extend-line-start", Select, "Select to the start of the line";
-    ExtendLineEnd => "extend-line-end", Select, "Select to the end of the line";
-    ExtendPageUp => "extend-page-up", Select, "Select a screenful up";
-    ExtendPageDown => "extend-page-down", Select, "Select a screenful down";
-    ExtendDocStart => "extend-doc-start", Select, "Select to the top of the file";
-    ExtendDocEnd => "extend-doc-end", Select, "Select to the bottom of the file";
-    SelectAll => "select-all", Select, "Select the whole file";
-    SelectLine => "select-line", Select, "Select this line, then the one below";
-    SelectWord => "select-word", Select, "Select the word under the cursor";
-    ExpandSelection => "expand-selection", Select, "Grow the selection to the syntax around it";
-    AddCursorAbove => "add-cursor-above", Select, "Another cursor on the line above";
-    AddCursorBelow => "add-cursor-below", Select, "Another cursor on the line below";
-    AddCursorNextMatch => "add-cursor-next-match", Select, "Another cursor at the next copy of this word";
-    SelectAllMatches => "select-all-matches", Select, "A cursor at every copy of this word";
-    CursorsToLineEnds => "cursors-to-line-ends", Select, "A cursor at the end of every selected line";
-    CollapseCursors => "collapse-cursors", Select, "Back to one cursor";
+    /// Whether a following keystroke can join the same undo step. Anything
+    /// that moves rather than types closes the current one, so that undo goes
+    /// back to a place you recognise.
+    pub fn joins(&self) -> bool {
+        matches!(self, Behaviour::Types)
+    }
+}
 
-    // ---- Changing text ----
-    InsertNewline => "newline", Edit, "Break the line, keeping the indentation";
-    DeleteBackward => "delete-backward", Edit, "Rub out the character before";
-    DeleteForward => "delete-forward", Edit, "Rub out the character after";
-    DeleteWordBackward => "delete-word-backward", Edit, "Rub out the word before";
-    DeleteWordForward => "delete-word-forward", Edit, "Rub out the word after";
-    DeleteToLineStart => "delete-to-line-start", Edit, "Rub out back to the start of the line";
-    DeleteToLineEnd => "delete-to-line-end", Edit, "Rub out to the end of the line";
-    DeleteLine => "delete-line", Edit, "Take out the whole line";
-    DuplicateLine => "duplicate-line", Edit, "Another copy of the line below it";
-    MoveLineUp => "move-line-up", Edit, "Swap this line with the one above";
-    MoveLineDown => "move-line-down", Edit, "Swap this line with the one below";
-    JoinLines => "join-lines", Edit, "Pull the next line onto this one";
-    Indent => "indent", Edit, "Push the line right one level";
-    Unindent => "unindent", Edit, "Pull the line left one level";
-    ToggleComment => "toggle-comment", Edit, "Comment the selected lines out, or back in";
-    Undo => "undo", Edit, "Put back what you just changed";
-    Redo => "redo", Edit, "Do it again after all";
-    Copy => "copy", Edit, "Copy the selection, or the line if nothing is selected";
-    Cut => "cut", Edit, "Cut the selection, or the line if nothing is selected";
-    Paste => "paste", Edit, "Put back what was copied";
-    UpperCase => "upper-case", Edit, "Make the selection shout";
-    LowerCase => "lower-case", Edit, "Make the selection quiet";
+/// One built-in command, as the table writes it.
+pub struct Spec {
+    pub name: &'static str,
+    pub group: Group,
+    pub behaviour: Behaviour,
+    /// The line under the name in the palette. Not decoration: for most people
+    /// it is the only documentation they will read, so it says what the
+    /// command does rather than restating its name.
+    pub about: &'static str,
+    pub run: fn(&mut App),
+}
 
-    // ---- Finding ----
-    Find => "find", Search, "Search this file as you type";
-    FindNext => "find-next", Search, "The next hit";
-    FindPrev => "find-prev", Search, "The one before";
-    FindWordUnderCursor => "find-word", Search, "Search for the word the cursor is on";
-    Replace => "replace", Search, "Search and replace in this file";
-    NextChange => "next-change", Search, "To the next line that differs from the last commit";
-    PrevChange => "prev-change", Search, "To the change before";
-    Grep => "grep", Search, "Search every file in the project";
+/// What running a command means.
+#[derive(Clone, Copy)]
+pub enum Run {
+    /// Something textfold does itself.
+    Built(fn(&mut App)),
+    /// A program a plugin brought with it.
+    Tool(&'static Tool),
+    /// Contributed by a plugin that is switched off. The id is kept — a key
+    /// bound to it should say where the command went rather than do nothing.
+    Gone,
+}
 
-    // ---- Language servers ----
-    Completion => "completion", Code, "Suggest what comes next";
-    GotoDefinition => "goto-definition", Code, "Where this is defined";
-    GotoTypeDefinition => "goto-type-definition", Code, "Where its type is defined";
-    GotoImplementation => "goto-implementation", Code, "Where it is implemented";
-    References => "references", Code, "Everywhere this is used";
-    Hover => "hover", Code, "What the language server knows about this";
-    Rename => "rename", Code, "Rename this everywhere it appears";
-    CodeAction => "code-action", Code, "What the language server offers to do about this";
-    FixIt => "fix-it", Code, "Do the obvious thing about the problem here: add the import, fix the typo";
-    FixAll => "fix-all", Code, "Apply every fix the servers would make to this file on their own";
-    OrganizeImports => "organize-imports", Code, "Put this file's imports in order and drop the unused ones";
-    Format => "format", Code, "Reformat the file";
-    FormatAndFix => "format-and-fix", Code, "Reformat the file and apply the servers' own fixes";
-    Symbols => "symbols", Code, "Pick from what this file defines";
-    WorkspaceSymbols => "workspace-symbols", Code, "Pick from what the project defines";
-    Diagnostics => "diagnostics", Code, "Pick from the problems found";
-    NextDiagnostic => "next-diagnostic", Code, "To the next problem";
-    PrevDiagnostic => "prev-diagnostic", Code, "To the problem before";
-    SignatureHelp => "signature-help", Code, "What arguments this call takes";
-    PythonEnvironment => "python-environment", Code, "Choose which Python this project uses";
-    RestartServers => "restart-servers", Code, "Start the language servers again";
-    ServerStatus => "server-status", Code, "What the language servers are doing";
+/// One command as the registry holds it.
+pub struct Entry {
+    pub name: String,
+    pub about: String,
+    pub group: Group,
+    pub behaviour: Behaviour,
+    pub run: Run,
+}
 
-    // ---- The view ----
-    CommandPalette => "command-palette", View, "Everything textfold can do, by name";
-    Split => "split", View, "Another pane onto the same file";
-    ClosePane => "close-pane", View, "Close this pane";
-    FocusNextPane => "focus-next-pane", View, "Into the next pane";
-    FocusPrevPane => "focus-prev-pane", View, "Into the pane before";
-    SwapSplitDirection => "swap-split-direction", View, "Side by side, or one above the other";
-    DiffPanes => "diff-panes", View, "Compare the two panes, and scroll them together";
-    ThemePicker => "theme", View, "Pick a set of colours";
-    NextTheme => "next-theme", View, "The next set of colours along";
-    PrevTheme => "prev-theme", View, "The set before";
-    ToggleLineNumbers => "toggle-line-numbers", View, "Line numbers on or off";
-    ToggleRelativeNumbers => "toggle-relative-numbers", View, "Count from the cursor instead of the top";
-    ToggleWrap => "toggle-wrap", View, "Fold long lines, or let them run off the side";
-    ToggleWhitespace => "toggle-whitespace", View, "Show spaces and tabs";
-    ToggleMouse => "toggle-mouse", View, "Let the terminal have the mouse back";
-    SetLanguage => "set-language", View, "Say what language this file is";
-    Settings => "settings", View, "Change a setting, and keep it";
-    RestoreSession => "restore-session", View, "Open again the files that were open here last time";
-    Plugins => "plugins", View, "Turn languages and language servers on or off";
+// ---- The registry ----
 
-    // ---- Getting out of things ----
-    ContextMenu => "context-menu", Edit, "What can be done where the cursor is";
+/// Which id each command name has, in order, growing only. What makes a `Cmd`
+/// mean the same thing before and after a plugin is switched off.
+static NAMES: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-    Escape => "escape", Help, "Close what is open, or drop back to one cursor";
-    Help => "help", Help, "The keys, and what they do";
-    About => "about", Help, "Which textfold this is";
+/// Swapped whole when the plugins change. The old one is leaked rather than
+/// dropped, because a `&'static Entry` handed out before the swap may still be
+/// in a menu that is on the screen. This happens a handful of times in a
+/// session, so a few stale tables is a price worth not thinking about.
+static REGISTRY: OnceLock<RwLock<&'static [Entry]>> = OnceLock::new();
+
+fn cell() -> &'static RwLock<&'static [Entry]> {
+    REGISTRY.get_or_init(|| RwLock::new(build()))
+}
+
+/// Build the registry. Called once, before anything asks after a command.
+pub fn init() {
+    cell();
+}
+
+/// Read the plugins again and build the table afresh, for after one has been
+/// turned on or off.
+pub fn rebuild() {
+    *cell().write().unwrap_or_else(|e| e.into_inner()) = build();
+}
+
+fn entries() -> &'static [Entry] {
+    *cell().read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Every command that can be run now, in table order — which is the order the
+/// palette shows them in when nothing has been typed, so it is grouped the way
+/// a person would look for them.
+///
+/// A command whose plugin is switched off is not in this list. It still has
+/// its id, so a key bound to it still resolves; it simply is not offered.
+pub fn all() -> Vec<Cmd> {
+    entries()
+        .iter()
+        .enumerate()
+        .filter(|(_, e)| !matches!(e.run, Run::Gone))
+        .map(|(at, _)| Cmd(at as u16))
+        .collect()
+}
+
+/// The command of that name, for a key binding in a settings file.
+pub fn by_name(name: &str) -> Option<Cmd> {
+    let name = name.trim();
+    entries()
+        .iter()
+        .position(|e| e.name == name)
+        .map(|at| Cmd(at as u16))
+}
+
+fn entry(cmd: Cmd) -> Option<&'static Entry> {
+    entries().get(cmd.0 as usize)
 }
 
 impl Cmd {
-    /// Whether this changes the text, and so needs a document that can be
-    /// changed. Checked in one place so that a read-only file cannot be
-    /// edited by a route somebody forgot about.
-    pub fn writes(&self) -> bool {
-        matches!(
-            self,
-            Cmd::InsertNewline
-                | Cmd::DeleteBackward
-                | Cmd::DeleteForward
-                | Cmd::DeleteWordBackward
-                | Cmd::DeleteWordForward
-                | Cmd::DeleteToLineStart
-                | Cmd::DeleteToLineEnd
-                | Cmd::DeleteLine
-                | Cmd::DuplicateLine
-                | Cmd::MoveLineUp
-                | Cmd::MoveLineDown
-                | Cmd::JoinLines
-                | Cmd::Indent
-                | Cmd::Unindent
-                | Cmd::ToggleComment
-                | Cmd::Undo
-                | Cmd::Redo
-                | Cmd::Cut
-                | Cmd::Paste
-                | Cmd::UpperCase
-                | Cmd::LowerCase
-                | Cmd::Replace
-                | Cmd::Rename
-                | Cmd::Format
-                | Cmd::CodeAction
-                | Cmd::FixIt
-                | Cmd::FixAll
-                | Cmd::OrganizeImports
-                | Cmd::FormatAndFix
-        )
+    /// The name in a settings file and in the palette.
+    pub fn name(&self) -> &'static str {
+        entry(*self).map(|e| e.name.as_str()).unwrap_or("")
     }
 
-    /// Whether doing this leaves the cursors where a following keystroke could
-    /// join the same undo. Anything that moves rather than types closes the
-    /// current undo step, so that undo goes back to a place you recognise.
-    pub fn breaks_undo(&self) -> bool {
-        !matches!(
-            self,
-            Cmd::InsertNewline | Cmd::DeleteBackward | Cmd::DeleteForward
-        )
+    pub fn about(&self) -> &'static str {
+        entry(*self).map(|e| e.about.as_str()).unwrap_or("")
     }
+
+    pub fn group(&self) -> Group {
+        entry(*self).map(|e| e.group).unwrap_or(Group::Help)
+    }
+
+    pub fn behaviour(&self) -> Behaviour {
+        entry(*self)
+            .map(|e| e.behaviour)
+            .unwrap_or(Behaviour::Passive)
+    }
+
+    /// Whether this changes the text, and so needs a document that can be
+    /// changed. Asked in one place so that a read-only file cannot be edited
+    /// by a route somebody forgot about.
+    pub fn writes(&self) -> bool {
+        self.behaviour().writes()
+    }
+
+    /// What to actually do.
+    pub fn run(&self) -> Run {
+        entry(*self).map(|e| e.run).unwrap_or(Run::Gone)
+    }
+
+    /// The program behind this, where it is a tool a plugin brought. What the
+    /// palette asks before offering a Python formatter in a Rust file.
+    pub fn tool(&self) -> Option<&'static Tool> {
+        match self.run() {
+            Run::Tool(tool) => Some(tool),
+            _ => None,
+        }
+    }
+}
+
+/// Build the table: the built-ins first, in the order they are written, and
+/// then whatever the plugins that are on have brought.
+fn build() -> &'static [Entry] {
+    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    if names.is_empty() {
+        // The built-ins take the first block of ids, in table order, which is
+        // the promise `Cmd::SAVE` and its neighbours are built on.
+        names.extend(
+            crate::app::BUILT_IN
+                .iter()
+                .map(|spec| spec.name.to_string()),
+        );
+    }
+
+    let mut tools: Vec<&'static Tool> = Vec::new();
+    for plugin in crate::plugin::active() {
+        for tool in &plugin.tools {
+            if !crate::plugin::is_on(&tool.id) {
+                continue;
+            }
+            if !names.contains(&tool.id) {
+                names.push(tool.id.clone());
+            }
+            tools.push(tool);
+        }
+    }
+
+    let table: Vec<Entry> = names
+        .iter()
+        .enumerate()
+        .map(|(at, name)| match crate::app::BUILT_IN.get(at) {
+            // A built-in, still where it was written.
+            Some(spec) if spec.name == name => Entry {
+                name: spec.name.to_string(),
+                about: spec.about.to_string(),
+                group: spec.group,
+                behaviour: spec.behaviour,
+                run: Run::Built(spec.run),
+            },
+            _ => match tools.iter().find(|t| &t.id == name) {
+                Some(tool) => Entry {
+                    name: tool.id.clone(),
+                    about: tool.about.clone(),
+                    group: Group::Tool,
+                    behaviour: tool.behaviour(),
+                    run: Run::Tool(tool),
+                },
+                // Contributed by something that is switched off now. The id
+                // stays taken so that turning it back on gets it back.
+                None => Entry {
+                    name: name.clone(),
+                    about: String::new(),
+                    group: Group::Tool,
+                    behaviour: Behaviour::Passive,
+                    run: Run::Gone,
+                },
+            },
+        })
+        .collect();
+    Box::leak(table.into_boxed_slice())
 }
 
 #[cfg(test)]
@@ -292,29 +308,66 @@ mod tests {
     #[test]
     fn every_command_has_its_own_name() {
         let mut seen = HashSet::new();
-        for cmd in ALL {
-            assert!(seen.insert(cmd.name()), "two commands called {}", cmd.name());
+        for spec in crate::app::BUILT_IN {
+            assert!(seen.insert(spec.name), "two commands called {}", spec.name);
         }
     }
 
     #[test]
     fn a_name_finds_the_command_it_names() {
-        for cmd in ALL {
-            assert_eq!(Cmd::from_name(cmd.name()), Some(*cmd));
+        init();
+        for spec in crate::app::BUILT_IN {
+            let found = by_name(spec.name).unwrap_or_else(|| panic!("{} is lost", spec.name));
+            assert_eq!(found.name(), spec.name);
         }
-        assert_eq!(Cmd::from_name("fly-to-the-moon"), None);
+        assert_eq!(by_name("fly-to-the-moon"), None);
+    }
+
+    #[test]
+    fn the_constants_point_at_the_commands_they_are_named_for() {
+        // The consts are worked out from the table at compile time, so a name
+        // changed in one and not the other is a build that does not happen —
+        // but that the numbering lines up at all is worth one assertion.
+        init();
+        assert_eq!(Cmd::SAVE.name(), "save");
+        assert_eq!(Cmd::QUIT.name(), "quit");
+        assert_eq!(Cmd::ABOUT.name(), "about");
     }
 
     #[test]
     fn descriptions_say_something_the_name_does_not() {
-        for cmd in ALL {
-            let about = cmd.about();
-            assert!(!about.is_empty(), "{} says nothing", cmd.name());
+        for spec in crate::app::BUILT_IN {
+            assert!(!spec.about.is_empty(), "{} says nothing", spec.name);
             assert!(
-                about.chars().next().is_some_and(char::is_uppercase),
+                spec.about.chars().next().is_some_and(char::is_uppercase),
                 "{} starts lowercase",
-                cmd.name()
+                spec.name
             );
         }
+    }
+
+    #[test]
+    fn nothing_contributed_can_take_a_built_in_name() {
+        // Everything a plugin brings is named `plugin/thing`, and no built-in
+        // has a slash in its name. That is what keeps the first block of ids —
+        // the one the constants are worked out from — the built-ins' own.
+        for spec in crate::app::BUILT_IN {
+            assert!(
+                !spec.name.contains('/'),
+                "{} could be shadowed by a plugin",
+                spec.name
+            );
+        }
+    }
+
+    #[test]
+    fn what_a_command_does_to_the_text_is_asked_once() {
+        // The two questions that used to be two hand-kept lists.
+        assert!(Behaviour::Types.writes(), "typing changes the text");
+        assert!(Behaviour::Types.joins());
+        assert!(Behaviour::Edits.writes());
+        assert!(!Behaviour::Edits.joins(), "an edit stands on its own to undo");
+        assert!(!Behaviour::Passive.writes());
+        assert!(!Behaviour::Passive.joins());
     }
 }
