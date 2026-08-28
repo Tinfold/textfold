@@ -1,7 +1,7 @@
 {
   "id": "typescript",
   "name": "TypeScript",
-  "about": "Colours, and the TypeScript server",
+  "about": "What TypeScript is: colours, comments, and what a .ts file is",
   "languages": {
     "typescript": {
       "extensions": [
@@ -16,21 +16,7 @@
       ],
       "grammar": {
         "built_in": "typescript"
-      },
-      "servers": [
-        {
-          "name": "tsserver",
-          "command": "typescript-language-server",
-          "args": [
-            "--stdio"
-          ],
-          "roots": [
-            "package.json",
-            "tsconfig.json",
-            ".git"
-          ]
-        }
-      ]
+      }
     }
   }
 }

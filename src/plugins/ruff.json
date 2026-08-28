@@ -1,0 +1,46 @@
+{
+  "id": "ruff",
+  "name": "Ruff",
+  "about": "Lint and formatting for Python",
+  "needs": ["ruff"],
+  "install": [
+    {
+      "about": "ruff, with uv",
+      "run": ["uv", "tool", "install", "ruff"],
+      "unless": "ruff"
+    },
+    {
+      "about": "ruff, with pipx",
+      "run": ["pipx", "install", "ruff"],
+      "unless": "ruff"
+    },
+    {
+      "about": "ruff, with pip",
+      "run": ["pip", "install", "--user", "ruff"],
+      "unless": "ruff"
+    }
+  ],
+  "uninstall": [
+    { "run": ["uv", "tool", "uninstall", "ruff"] }
+  ],
+  "see": "https://docs.astral.sh/ruff/installation/",
+  "languages": {
+    "python": {
+      "servers": [
+        {
+          "name": "ruff",
+          "command": "ruff",
+          "args": ["server"],
+          "roots": ["pyproject.toml", "ruff.toml", ".ruff.toml", ".git"],
+          "env": {
+            "VIRTUAL_ENV": "${venv}",
+            "PATH": "${venv_bin}:${env:PATH}"
+          },
+          "settings": {
+            "settings": { "interpreter": ["${python}"] }
+          }
+        }
+      ]
+    }
+  }
+}

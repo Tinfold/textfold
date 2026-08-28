@@ -1,7 +1,7 @@
 {
   "id": "toml",
   "name": "TOML",
-  "about": "Colours, and taplo",
+  "about": "What TOML is: colours, comments, and what a .toml file is",
   "languages": {
     "toml": {
       "extensions": [
@@ -13,17 +13,7 @@
       "line_comment": "#",
       "grammar": {
         "built_in": "toml"
-      },
-      "servers": [
-        {
-          "name": "taplo",
-          "command": "taplo",
-          "args": [
-            "lsp",
-            "stdio"
-          ]
-        }
-      ]
+      }
     }
   }
 }

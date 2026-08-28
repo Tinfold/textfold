@@ -1,0 +1,67 @@
+{
+  "id": "marksman",
+  "name": "Marksman",
+  "about": "Links between Markdown notes, and the headings in them",
+
+  "_about": [
+    "One static binary, published per platform. Fetched straight from the",
+    "releases rather than through a package manager, which is what `${bin}`",
+    "and the `os`/`arch` conditions are for — and which means it works the",
+    "same on Linux and macOS, and lands in textfold's own tools directory",
+    "either way."
+  ],
+
+  "needs": ["marksman"],
+  "install": [
+    {
+      "about": "marksman, from its releases",
+      "run": ["curl", "-fsSL", "-o", "${bin}/marksman",
+              "https://github.com/artempyanykh/marksman/releases/latest/download/marksman-linux-x64"],
+      "os": "linux",
+      "arch": "x86_64",
+      "unless": "marksman"
+    },
+    {
+      "about": "marksman, from its releases",
+      "run": ["curl", "-fsSL", "-o", "${bin}/marksman",
+              "https://github.com/artempyanykh/marksman/releases/latest/download/marksman-linux-arm64"],
+      "os": "linux",
+      "arch": "aarch64",
+      "unless": "marksman"
+    },
+    {
+      "about": "marksman, from its releases",
+      "run": ["curl", "-fsSL", "-o", "${bin}/marksman",
+              "https://github.com/artempyanykh/marksman/releases/latest/download/marksman-macos"],
+      "os": "macos",
+      "unless": "marksman"
+    },
+    {
+      "about": "letting it be run",
+      "run": ["chmod", "+x", "${bin}/marksman"],
+      "os": ["linux", "macos"],
+      "unless": "marksman"
+    },
+    {
+      "about": "marksman, with brew",
+      "run": ["brew", "install", "marksman"],
+      "system": true,
+      "unless": "marksman"
+    }
+  ],
+  "uninstall": [
+    { "run": ["rm", "-f", "${bin}/marksman"] }
+  ],
+  "see": "https://github.com/artempyanykh/marksman/releases",
+  "languages": {
+    "markdown": {
+      "servers": [
+        {
+          "name": "marksman",
+          "command": "marksman",
+          "args": ["server"]
+        }
+      ]
+    }
+  }
+}

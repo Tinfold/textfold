@@ -1,0 +1,158 @@
+{
+  "id": "taplo",
+  "name": "Taplo",
+  "about": "Completions, formatting and schema checking for TOML",
+  "_about": [
+    "Fetched as the binary taplo publishes for each platform, which takes a",
+    "second \u2014 `cargo install taplo-cli` builds the same thing from source and",
+    "takes minutes, so it is kept as the way out for a platform with no build",
+    "published.",
+    "",
+    "Taplo's completions are entirely schema-driven: without a schema there",
+    "are no keys to complete, because TOML has none of its own. The settings",
+    "below say which schema each of the TOML files people actually edit uses.",
+    "`evenBetterToml` is the section taplo asks the editor for by name.",
+    "",
+    "Associations rather than `schema.catalogs`: taplo 0.10 cannot decode",
+    "either schemastore's catalog or its own index, and logs an error on every",
+    "start for its trouble. For a file that is not listed here, put",
+    "`#:schema <url>` on its first line \u2014 taplo reads that too."
+  ],
+  "needs": [
+    "taplo"
+  ],
+  "install": [
+    {
+      "about": "taplo, from its releases",
+      "run": [
+        "curl",
+        "-fsSL",
+        "-o",
+        "${bin}/taplo.gz",
+        "https://github.com/tamasfe/taplo/releases/latest/download/taplo-linux-x86_64.gz"
+      ],
+      "os": "linux",
+      "arch": "x86_64",
+      "unless": "taplo"
+    },
+    {
+      "about": "taplo, from its releases",
+      "run": [
+        "curl",
+        "-fsSL",
+        "-o",
+        "${bin}/taplo.gz",
+        "https://github.com/tamasfe/taplo/releases/latest/download/taplo-linux-aarch64.gz"
+      ],
+      "os": "linux",
+      "arch": "aarch64",
+      "unless": "taplo"
+    },
+    {
+      "about": "taplo, from its releases",
+      "run": [
+        "curl",
+        "-fsSL",
+        "-o",
+        "${bin}/taplo.gz",
+        "https://github.com/tamasfe/taplo/releases/latest/download/taplo-darwin-x86_64.gz"
+      ],
+      "os": "macos",
+      "arch": "x86_64",
+      "unless": "taplo"
+    },
+    {
+      "about": "taplo, from its releases",
+      "run": [
+        "curl",
+        "-fsSL",
+        "-o",
+        "${bin}/taplo.gz",
+        "https://github.com/tamasfe/taplo/releases/latest/download/taplo-darwin-aarch64.gz"
+      ],
+      "os": "macos",
+      "arch": "aarch64",
+      "unless": "taplo"
+    },
+    {
+      "about": "unpacking it",
+      "run": [
+        "gunzip",
+        "-f",
+        "${bin}/taplo.gz"
+      ],
+      "when": "${bin}/taplo.gz",
+      "unless": "taplo"
+    },
+    {
+      "about": "letting it be run",
+      "run": [
+        "chmod",
+        "+x",
+        "${bin}/taplo"
+      ],
+      "when": "${bin}/taplo",
+      "unless": "taplo"
+    },
+    {
+      "about": "taplo, built from source",
+      "run": [
+        "cargo",
+        "install",
+        "taplo-cli",
+        "--locked"
+      ],
+      "unless": "taplo"
+    },
+    {
+      "about": "taplo, with brew",
+      "run": [
+        "brew",
+        "install",
+        "taplo"
+      ],
+      "system": true,
+      "unless": "taplo"
+    }
+  ],
+  "uninstall": [
+    {
+      "run": [
+        "rm",
+        "-f",
+        "${bin}/taplo"
+      ]
+    }
+  ],
+  "see": "https://taplo.tamasfe.dev/cli/installation/binary.html",
+  "languages": {
+    "toml": {
+      "servers": [
+        {
+          "name": "taplo",
+          "command": "taplo",
+          "args": [
+            "lsp",
+            "stdio"
+          ],
+          "settings": {
+            "evenBetterToml": {
+              "schema": {
+                "enabled": true,
+                "associations": {
+                  ".*Cargo\\.toml": "https://json.schemastore.org/cargo.json",
+                  ".*pyproject\\.toml": "https://json.schemastore.org/pyproject.json",
+                  ".*rust-toolchain\\.toml": "https://json.schemastore.org/rust-toolchain.json",
+                  ".*\\.?rustfmt\\.toml": "https://json.schemastore.org/rustfmt.json",
+                  ".*\\.?taplo\\.toml": "https://json.schemastore.org/taplo.json",
+                  ".*netlify\\.toml": "https://json.schemastore.org/netlify.json",
+                  ".*pdm\\.toml": "https://json.schemastore.org/pdm.json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -150,6 +150,15 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub plugins: BTreeMap<String, bool>,
 
+    /// Where else to look for plugins you could install, besides
+    /// `~/.config/textfold/packages`.
+    ///
+    /// This is what makes `install-plugin` a list rather than a path you have
+    /// to remember. Point it at a checkout of somebody's plugins and every
+    /// directory in it with a `plugin.json` becomes a row you can choose.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_paths: Vec<String>,
+
     /// Keys of your own, by what they do: `"save": ["ctrl-s", "f2"]`.
     ///
     /// Only what you have changed is written here; everything else keeps the
@@ -318,6 +327,11 @@ impl Config {
 
     pub fn rulers(&self) -> &[usize] {
         self.rulers.as_deref().unwrap_or(&[])
+    }
+
+    /// Where else to look for packages.
+    pub fn package_paths(&self) -> &[String] {
+        &self.package_paths
     }
 }
 

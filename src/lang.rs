@@ -469,7 +469,12 @@ fn default_brackets() -> Vec<(char, char)> {
 
 /// Write one plugin's definition over a language.
 fn apply(lang: &mut Lang, plugin: &str, def: &FileLang, problems: &mut Vec<String>) {
-    lang.provided = true;
+    // A plugin that only names a server for a language does not bring that
+    // language into being. `pyright` is for Python; it is not what Python is,
+    // and switching off the Python plugin should leave you with no Python
+    // rather than with a Python that has a type checker and no idea what a
+    // `.py` file is.
+    lang.provided |= def.says_what_it_is();
     if let Some(v) = &def.lsp_id {
         lang.lsp_id = v.clone();
     }
@@ -500,16 +505,31 @@ fn apply(lang: &mut Lang, plugin: &str, def: &FileLang, problems: &mut Vec<Strin
             })
             .collect();
     }
+    // Servers are added to rather than written over, because a language and
+    // the servers for it now come from different plugins: Python is the
+    // `python` plugin, and `pyright` and `ruff` are two more that say they are
+    // for it. Written over, the second one to be read would take the first
+    // one's place and you would get whichever plugin sorted last.
+    //
+    // A server of the same *name* does still take the earlier one's place,
+    // which is what keeps `servers` in your own `languages.json` meaning what
+    // it always meant: say `rust-analyzer` there and yours is the one that
+    // runs, rather than the one that runs second.
     if let Some(v) = &def.servers {
-        lang.servers = v
-            .iter()
-            .filter(|s| !s.command.trim().is_empty())
+        for s in v.iter().filter(|s| !s.command.trim().is_empty()) {
+            let name = s.plugin_name();
+            let id = crate::plugin::server_id(plugin, &name);
             // A server switched off is a server that is not in the table, so
-            // nothing downstream has to ask again whether it is wanted.
-            .filter(|s| crate::plugin::is_on(&format!("{plugin}/{}", s.plugin_name())))
-            .map(|s| Server {
-                id: format!("{plugin}/{}", s.plugin_name()),
-                name: s.plugin_name(),
+            // nothing downstream has to ask again whether it is wanted. It is
+            // taken out of the table rather than skipped, so that switching
+            // one off gets rid of a namesake an earlier plugin put there.
+            lang.servers.retain(|already| already.name != name);
+            if !crate::plugin::is_on(&id) {
+                continue;
+            }
+            lang.servers.push(Server {
+                id,
+                name,
                 command: s.command.clone(),
                 args: s.args.clone(),
                 roots: if s.roots.is_empty() {
@@ -522,8 +542,8 @@ fn apply(lang: &mut Lang, plugin: &str, def: &FileLang, problems: &mut Vec<Strin
                 init_options: s.init_options.clone(),
                 settings: s.settings.clone(),
                 env: s.env.clone(),
-            })
-            .collect();
+            });
+        }
     }
     if let Some(g) = &def.grammar {
         match g {
@@ -651,6 +671,22 @@ pub struct FileLang {
     grammar: Option<FileGrammar>,
 }
 
+impl FileLang {
+    /// Whether this says anything about what the language *is*, as against
+    /// what to run for it. A definition that is nothing but `servers` is a
+    /// plugin attaching itself to somebody else's language.
+    fn says_what_it_is(&self) -> bool {
+        self.lsp_id.is_some()
+            || self.extensions.is_some()
+            || self.filenames.is_some()
+            || self.shebangs.is_some()
+            || self.line_comment.is_some()
+            || self.block_comment.is_some()
+            || self.brackets.is_some()
+            || self.grammar.is_some()
+    }
+}
+
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct FileServer {
@@ -758,23 +794,89 @@ mod tests {
             problems: Vec::new(),
         };
         let first: BTreeMap<String, FileLang> = serde_json::from_str(
-            r#"{"rust":{"extensions":["rs"],"line_comment":"//",
-               "servers":[{"command":"rust-analyzer"}]}}"#,
+            r#"{"rust":{"extensions":["rs"],"line_comment":"//"}}"#,
         )
         .unwrap();
         langs.merge("rust", &first);
         let second: BTreeMap<String, FileLang> =
-            serde_json::from_str(r#"{"rust":{"servers":[{"command":"ra-multiplex"}]}}"#).unwrap();
-        langs.merge("mine", &second);
+            serde_json::from_str(r#"{"rust":{"servers":[{"command":"rust-analyzer"}]}}"#).unwrap();
+        langs.merge("rust-analyzer", &second);
 
         let rust = &langs.langs[0];
-        assert_eq!(rust.servers[0].command, "ra-multiplex");
-        // A server with no name of its own is called after its command, so
-        // that it still has an id to be switched off by.
-        assert_eq!(rust.servers[0].id, "mine/ra-multiplex");
+        // A plugin that is one server is named once rather than twice.
+        assert_eq!(rust.servers[0].id, "rust-analyzer");
         // The parts the second plugin said nothing about survived.
         assert_eq!(rust.line_comment.as_deref(), Some("//"));
         assert_eq!(rust.extensions, ["rs"]);
+    }
+
+    #[test]
+    fn two_plugins_can_each_bring_a_server_for_the_same_language() {
+        // Which is the whole shape of it now: Python is one plugin, and
+        // pyright and ruff are two more that say they are for it. Written
+        // over rather than added to, you would get whichever plugin happened
+        // to sort last and no idea why the other one never started.
+        let mut langs = Languages {
+            langs: vec![blank(LangId(0), "python")],
+            problems: Vec::new(),
+        };
+        let one: BTreeMap<String, FileLang> = serde_json::from_str(
+            r#"{"python":{"servers":[{"name":"pyright","command":"pyright-langserver"}]}}"#,
+        )
+        .unwrap();
+        langs.merge("pyright", &one);
+        let two: BTreeMap<String, FileLang> =
+            serde_json::from_str(r#"{"python":{"servers":[{"command":"ruff"}]}}"#).unwrap();
+        langs.merge("ruff", &two);
+
+        let names: Vec<&str> = langs.langs[0]
+            .servers
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(names, ["pyright", "ruff"]);
+    }
+
+    #[test]
+    fn a_server_of_your_own_takes_the_place_of_one_by_the_same_name() {
+        // What keeps `servers` in your own languages.json meaning what it
+        // always meant: say `rust-analyzer` there and yours is the one that
+        // runs, rather than the one that runs second.
+        let mut langs = Languages {
+            langs: vec![blank(LangId(0), "rust")],
+            problems: Vec::new(),
+        };
+        let ships: BTreeMap<String, FileLang> =
+            serde_json::from_str(r#"{"rust":{"servers":[{"command":"rust-analyzer"}]}}"#).unwrap();
+        langs.merge("rust-analyzer", &ships);
+        let mine: BTreeMap<String, FileLang> = serde_json::from_str(
+            r#"{"rust":{"servers":[{"name":"rust-analyzer","command":"ra-multiplex"}]}}"#,
+        )
+        .unwrap();
+        langs.merge("local", &mine);
+
+        assert_eq!(langs.langs[0].servers.len(), 1);
+        assert_eq!(langs.langs[0].servers[0].command, "ra-multiplex");
+        assert_eq!(langs.langs[0].servers[0].id, "local/rust-analyzer");
+    }
+
+    #[test]
+    fn a_plugin_that_only_brings_a_server_does_not_make_the_language_exist() {
+        // Switching off the Python plugin should leave you with no Python, not
+        // with a Python that has a type checker and no idea what a .py file is.
+        let mut langs = Languages {
+            langs: vec![blank(LangId(0), "python")],
+            problems: Vec::new(),
+        };
+        let servers: BTreeMap<String, FileLang> =
+            serde_json::from_str(r#"{"python":{"servers":[{"command":"ruff"}]}}"#).unwrap();
+        langs.merge("ruff", &servers);
+        assert!(!langs.langs[0].is_available());
+
+        let what_it_is: BTreeMap<String, FileLang> =
+            serde_json::from_str(r#"{"python":{"extensions":["py"]}}"#).unwrap();
+        langs.merge("python", &what_it_is);
+        assert!(langs.langs[0].is_available());
     }
 
     #[test]

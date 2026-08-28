@@ -213,6 +213,20 @@ pub struct Document {
     /// What that comparison last said. Kept rather than worked out on demand
     /// because the drawing asks every frame and the answer costs a `stat`.
     pub on_disk: OnDisk,
+    /// What the file looked like at the check before this one, which is how a
+    /// file that has finished changing is told from one that is still being
+    /// written.
+    seen: Option<Stamp>,
+    /// Whether it looked the same at the last two checks.
+    settled: bool,
+    /// The state of the file we last said something about, or tried to read.
+    ///
+    /// Compared against the stamp rather than against [`OnDisk`], which is too
+    /// coarse to tell "the same change we already mentioned" from "it has
+    /// changed again since". Getting that wrong either repeats a message every
+    /// second or — worse — leaves a file that has changed twice stuck on the
+    /// first change forever.
+    told: Option<Stamp>,
 
     done: Vec<Revision>,
     undone: Vec<Revision>,
@@ -380,6 +394,47 @@ impl Stamp {
     }
 }
 
+/// How many times to try reading a file that keeps moving under us.
+///
+/// Three, because the point is not to win a race against a program writing in
+/// a loop — it is to get past the ordinary case, which is one write landing
+/// while we happened to be reading. A file that is still moving after three
+/// tries is a file that is being written continuously, and the answer to that
+/// one is to wait rather than to try harder.
+const READ_TRIES: usize = 3;
+
+/// Read a file, and know that what came back is a whole file.
+///
+/// `std::fs::read` on a file that something else is writing gives you as much
+/// of it as had been written when you looked, which is not an error and does
+/// not look like one — it looks like the file, shorter. A build that
+/// regenerates a file, a formatter that truncates before writing, a log being
+/// appended to: read one of those at the wrong moment and you get half a file,
+/// very often cut in the middle of a character.
+///
+/// So the file is stamped on both sides of the read, and content that does not
+/// come back with the same stamp it went in with is thrown away rather than
+/// used. That pairing is the whole point. Content read at one moment and
+/// stamped with metadata from another is worse than a torn read on its own,
+/// because [`Document::check_disk`] then compares against a stamp that says
+/// the buffer is up to date and the damage never corrects itself.
+///
+/// `None` for a file that would not sit still.
+pub fn read_whole(path: &Path) -> Result<Option<(Vec<u8>, Stamp)>> {
+    for _ in 0..READ_TRIES {
+        let before = Stamp::of(path);
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let after = Stamp::of(path);
+        if let Some(stamp) = after
+            && before == after
+        {
+            return Ok(Some((bytes, stamp)));
+        }
+    }
+    Ok(None)
+}
+
 /// What has happened to the file behind a buffer since we last read or wrote
 /// it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -447,6 +502,9 @@ impl Document {
             hint: None,
             colours_off: None,
             stamp: None,
+            seen: None,
+            told: None,
+            settled: true,
             on_disk: OnDisk::Same,
         }
     }
@@ -460,13 +518,26 @@ impl Document {
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| path.display().to_string());
 
-        let (text, existed) = match std::fs::read(&path) {
-            Ok(bytes) => (
+        // Stamped at the same moment as it was read, or not stamped at all.
+        // A file that would not sit still still opens — you asked for it —
+        // but with no stamp, so the first disk check reads it again properly
+        // rather than believing a snapshot taken mid-write.
+        let (text, existed, stamp) = match read_whole(&path) {
+            Ok(Some((bytes, stamp))) => (
                 String::from_utf8_lossy(&bytes).into_owned(),
                 true,
+                Some(stamp),
             ),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (String::new(), false),
-            Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+            Ok(None) => match std::fs::read(&path) {
+                Ok(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), true, None),
+                Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+            },
+            Err(e) => match e.downcast_ref::<std::io::Error>() {
+                Some(io) if io.kind() == std::io::ErrorKind::NotFound => {
+                    (String::new(), false, None)
+                }
+                _ => return Err(e),
+            },
         };
 
         // `\r\n` is a fact about the file, not about the text in it. It is
@@ -484,7 +555,7 @@ impl Document {
         let rope = Rope::from_str(&text);
         let indent = detect_indent(&rope).unwrap_or(fallback_indent);
         let language = crate::lang::detect(&path, &rope);
-        let stamp = existed.then(|| Stamp::of(&path)).flatten();
+        let stamp = existed.then_some(stamp).flatten();
 
         let mut doc = Self {
             id,
@@ -510,6 +581,12 @@ impl Document {
             panel: None,
             hint: None,
             colours_off: None,
+            seen: stamp,
+            told: stamp,
+            // A file that would not sit still has no stamp, and a buffer with
+            // no stamp for a file that is there reads as changed — which is
+            // exactly right, and gets it re-read once it stops moving.
+            settled: stamp.is_some(),
             stamp,
             on_disk: OnDisk::Same,
         };
@@ -991,6 +1068,12 @@ impl Document {
     ///
     /// A `stat`, which is cheap, rather than a read. Called on a timer for
     /// every open file, so it has to stay that way.
+    ///
+    /// It also notices whether the file is *still* changing, by remembering
+    /// what it looked like last time. A file being written to continuously — a
+    /// log, a build's output, a download in progress — is a file that has no
+    /// settled contents to read, and reading it anyway gets you a snapshot of
+    /// something mid-write.
     pub fn check_disk(&mut self) -> OnDisk {
         let Some(path) = self.path.as_deref() else {
             return OnDisk::Same;
@@ -1005,7 +1088,32 @@ impl Document {
             (Some(was), Some(is)) if was == is => OnDisk::Same,
             (Some(_), Some(_)) => OnDisk::Changed,
         };
+        // It has settled if it looks the same as it did a moment ago. The
+        // first sighting of a change is never settled, which costs one extra
+        // check before an ordinary `git checkout` is taken and is what keeps a
+        // file that is halfway through being written out of your buffer.
+        self.settled = self.seen == now;
+        self.seen = now;
         self.on_disk
+    }
+
+    /// Whether the file has stopped changing: it looked the same at the last
+    /// two checks. Only meaningful just after [`Document::check_disk`].
+    pub fn has_settled(&self) -> bool {
+        self.settled
+    }
+
+    /// Whether what is on disk now is something we have not already dealt
+    /// with. What keeps one `git checkout` to one line in the status bar, and
+    /// what makes a *second* one a fresh thing to notice.
+    pub fn is_news(&self) -> bool {
+        self.told != self.seen
+    }
+
+    /// Remember that we have said something about the file as it is now, or
+    /// have tried to read it and would not take it.
+    pub fn noted(&mut self) {
+        self.told = self.seen;
     }
 
     /// Take what is on disk now as the truth, without reading it. For a
@@ -1014,6 +1122,26 @@ impl Document {
         if let Some(path) = self.path.as_deref() {
             self.stamp = Stamp::of(path);
         }
+        self.seen = self.stamp;
+        self.told = self.stamp;
+        self.settled = true;
+        self.on_disk = OnDisk::Same;
+    }
+
+    /// Take a stamp read at the same moment as some content, for a buffer that
+    /// has just been filled from disk.
+    ///
+    /// Separate from [`Document::accept_disk`], which stats afresh, because
+    /// stamping content from one moment with metadata from another is the way
+    /// a buffer ends up quietly wrong forever: the stamp says it is up to date
+    /// and nothing ever looks again.
+    pub fn took_from_disk(&mut self, stamp: Stamp) {
+        self.close_revision();
+        self.saved_at = Some(self.done.len());
+        self.stamp = Some(stamp);
+        self.seen = Some(stamp);
+        self.told = Some(stamp);
+        self.settled = true;
         self.on_disk = OnDisk::Same;
     }
 
@@ -1117,6 +1245,114 @@ mod tests {
 
     fn sel(at: usize) -> Selections {
         Selections::single(Range::point(at))
+    }
+
+    fn scratch_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("textfold-disk-{}-{name}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).expect("a place to work");
+        dir
+    }
+
+    /// Write a file such that its stamp really does change, on a filesystem
+    /// whose timestamps may only have one-second resolution.
+    fn write(path: &Path, text: &str) {
+        std::fs::write(path, text).expect("written");
+    }
+
+    #[test]
+    fn a_file_read_whole_comes_back_with_the_stamp_it_was_read_under() {
+        // The pairing is the point. Content from one moment stamped with
+        // metadata from another is a buffer that is quietly wrong forever,
+        // because the stamp says it is up to date and nothing looks again.
+        let dir = scratch_dir("whole");
+        let path = dir.join("a.txt");
+        write(&path, "hello");
+        let (bytes, stamp) = read_whole(&path).expect("read").expect("it sat still");
+        assert_eq!(bytes, b"hello");
+        assert_eq!(Some(stamp), Stamp::of(&path));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_file_that_is_not_there_is_an_error_rather_than_an_empty_answer() {
+        let dir = scratch_dir("missing");
+        let err = read_whole(&dir.join("nothing.txt")).expect_err("no file");
+        assert!(err.to_string().contains("nothing.txt"), "{err}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_file_still_being_written_is_not_taken_until_it_stops() {
+        // The bug this is here for: a buffer full of half a file, or of the
+        // replacement characters half a file ends in when the half lands in
+        // the middle of a character.
+        let dir = scratch_dir("settle");
+        let path = dir.join("log.txt");
+        write(&path, "one\n");
+
+        let mut d = Document::open(DocId(0), &path, Indent::Spaces(4)).expect("opened");
+        assert_eq!(d.check_disk(), OnDisk::Same);
+
+        // It changes. The first sighting of a change is never settled, because
+        // one look cannot tell "it has just changed" from "it is changing".
+        write(&path, "one\ntwo\n");
+        assert_eq!(d.check_disk(), OnDisk::Changed);
+        assert!(!d.has_settled(), "one look is not enough to know it has stopped");
+
+        // Still changing, still not settled, however many times we look.
+        for n in 3..8 {
+            write(&path, &format!("{}\n", "x\n".repeat(n)));
+            assert_eq!(d.check_disk(), OnDisk::Changed);
+            assert!(!d.has_settled(), "it moved again between the two looks");
+        }
+
+        // It stops. The next look sees the same thing twice and says so.
+        assert_eq!(d.check_disk(), OnDisk::Changed);
+        assert!(d.has_settled());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_buffer_filled_from_disk_is_stamped_with_what_it_was_filled_from() {
+        let dir = scratch_dir("stamp");
+        let path = dir.join("a.txt");
+        write(&path, "first");
+        let mut d = Document::open(DocId(0), &path, Indent::Spaces(4)).expect("opened");
+
+        // Somebody else writes it, and we take it.
+        write(&path, "second");
+        let (bytes, stamp) = read_whole(&path).expect("read").expect("sat still");
+        let len = d.len_chars();
+        d.apply_atomic(
+            vec![Change::replace(0, len, String::from_utf8(bytes).unwrap())],
+            &sel(0),
+        );
+        d.took_from_disk(stamp);
+
+        assert!(!d.is_modified());
+        assert_eq!(d.check_disk(), OnDisk::Same, "it is up to date, and knows it");
+
+        // And a further change is still noticed, rather than being hidden
+        // behind a stamp taken at the wrong moment.
+        write(&path, "third");
+        assert_eq!(d.check_disk(), OnDisk::Changed);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_file_that_would_not_sit_still_to_be_opened_is_read_again_later() {
+        // It opens either way — you asked for it — but with no stamp, so the
+        // first disk check treats it as changed and reads it properly once it
+        // has stopped moving, rather than believing a snapshot taken mid-write.
+        let dir = scratch_dir("open-moving");
+        let path = dir.join("a.txt");
+        write(&path, "half");
+        let mut d = Document::open(DocId(0), &path, Indent::Spaces(4)).expect("opened");
+        d.stamp = None;
+        d.seen = None;
+        assert_eq!(d.check_disk(), OnDisk::Changed);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// A rust file, coloured.

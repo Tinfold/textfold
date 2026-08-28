@@ -1,7 +1,7 @@
 {
   "id": "markdown",
   "name": "Markdown",
-  "about": "Colours, and marksman for links between notes",
+  "about": "What Markdown is: colours, comments, and what a .md file is",
   "languages": {
     "markdown": {
       "extensions": [
@@ -15,16 +15,7 @@
       ],
       "grammar": {
         "built_in": "markdown"
-      },
-      "servers": [
-        {
-          "name": "marksman",
-          "command": "marksman",
-          "args": [
-            "server"
-          ]
-        }
-      ]
+      }
     }
   }
 }

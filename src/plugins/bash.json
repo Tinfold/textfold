@@ -1,7 +1,7 @@
 {
   "id": "bash",
   "name": "Shell",
-  "about": "Colours, and bash-language-server",
+  "about": "What a shell script is: colours, comments, and which files are one",
   "languages": {
     "bash": {
       "extensions": [
@@ -29,16 +29,7 @@
       "line_comment": "#",
       "grammar": {
         "built_in": "bash"
-      },
-      "servers": [
-        {
-          "name": "bash-language-server",
-          "command": "bash-language-server",
-          "args": [
-            "start"
-          ]
-        }
-      ]
+      }
     }
   }
 }

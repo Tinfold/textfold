@@ -1,0 +1,57 @@
+{
+  "id": "vscode-langservers",
+  "name": "VS Code's servers",
+  "about": "CSS, HTML and schema-aware JSON, from the servers VS Code ships",
+
+  "_about": [
+    "Three servers in one npm package, so they are one plugin: installing",
+    "any of them installs all three, and pretending otherwise would mean",
+    "three rows that all run the same command."
+  ],
+
+  "needs": [
+    "vscode-css-language-server",
+    "vscode-html-language-server",
+    "vscode-json-language-server"
+  ],
+  "install": [
+    {
+      "about": "vscode-langservers-extracted, from npm",
+      "run": ["npm", "install", "--global", "vscode-langservers-extracted"],
+      "unless": "vscode-json-language-server"
+    }
+  ],
+  "uninstall": [
+    { "run": ["npm", "uninstall", "--global", "vscode-langservers-extracted"] }
+  ],
+  "see": "https://github.com/hrsh7th/vscode-langservers-extracted",
+  "languages": {
+    "css": {
+      "servers": [
+        {
+          "name": "css-language-server",
+          "command": "vscode-css-language-server",
+          "args": ["--stdio"]
+        }
+      ]
+    },
+    "html": {
+      "servers": [
+        {
+          "name": "html-language-server",
+          "command": "vscode-html-language-server",
+          "args": ["--stdio"]
+        }
+      ]
+    },
+    "json": {
+      "servers": [
+        {
+          "name": "json-language-server",
+          "command": "vscode-json-language-server",
+          "args": ["--stdio"]
+        }
+      ]
+    }
+  }
+}

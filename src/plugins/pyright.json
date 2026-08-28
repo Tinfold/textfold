@@ -1,0 +1,60 @@
+{
+  "id": "pyright",
+  "name": "Pyright",
+  "about": "Types and completions for Python",
+  "needs": ["pyright-langserver"],
+  "install": [
+    {
+      "about": "pyright, from npm",
+      "run": ["npm", "install", "--global", "pyright"],
+      "unless": "pyright-langserver"
+    },
+    {
+      "about": "pyright, with uv",
+      "run": ["uv", "tool", "install", "pyright"],
+      "unless": "pyright-langserver"
+    },
+    {
+      "about": "pyright, with pipx",
+      "run": ["pipx", "install", "pyright"],
+      "unless": "pyright-langserver"
+    }
+  ],
+  "uninstall": [
+    { "run": ["npm", "uninstall", "--global", "pyright"] }
+  ],
+  "see": "https://microsoft.github.io/pyright/#/installation",
+  "languages": {
+    "python": {
+      "servers": [
+        {
+          "name": "pyright",
+          "command": "pyright-langserver",
+          "args": ["--stdio"],
+          "roots": [
+            "pyproject.toml",
+            "setup.py",
+            "setup.cfg",
+            "requirements.txt",
+            ".git"
+          ],
+          "env": {
+            "VIRTUAL_ENV": "${venv}",
+            "PATH": "${venv_bin}:${env:PATH}"
+          },
+          "settings": {
+            "python": {
+              "pythonPath": "${python}",
+              "defaultInterpreterPath": "${python}",
+              "analysis": {
+                "autoSearchPaths": true,
+                "useLibraryCodeForTypes": true,
+                "diagnosticMode": "openFilesOnly"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

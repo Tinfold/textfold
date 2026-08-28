@@ -1,7 +1,7 @@
 {
   "id": "go",
   "name": "Go",
-  "about": "Colours, and gopls",
+  "about": "What Go is: colours, comments, and what a .go file is",
   "languages": {
     "go": {
       "extensions": [
@@ -14,18 +14,7 @@
       ],
       "grammar": {
         "built_in": "go"
-      },
-      "servers": [
-        {
-          "name": "gopls",
-          "command": "gopls",
-          "roots": [
-            "go.mod",
-            "go.work",
-            ".git"
-          ]
-        }
-      ]
+      }
     }
   }
 }

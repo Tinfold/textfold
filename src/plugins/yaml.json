@@ -1,7 +1,7 @@
 {
   "id": "yaml",
   "name": "YAML",
-  "about": "Colours, and yaml-language-server",
+  "about": "What YAML is: colours, comments, and what a .yaml file is",
   "languages": {
     "yaml": {
       "extensions": [
@@ -11,16 +11,7 @@
       "line_comment": "#",
       "grammar": {
         "built_in": "yaml"
-      },
-      "servers": [
-        {
-          "name": "yaml-language-server",
-          "command": "yaml-language-server",
-          "args": [
-            "--stdio"
-          ]
-        }
-      ]
+      }
     }
   }
 }

@@ -14,7 +14,7 @@
     "",
     "To install it:",
     "  cd examples/copilot && npm install",
-    "  ln -s $PWD ~/.config/textfold/plugins/copilot",
+    "  textfold --install ./examples/copilot",
     "",
     "Then open a Rust or Python file and start typing. Tab takes a",
     "suggestion, Esc waves it away."

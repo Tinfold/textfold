@@ -17,6 +17,7 @@ mod keys;
 mod lang;
 mod lsp;
 mod menu;
+mod pack;
 mod picker;
 mod plugin;
 mod rpc;
@@ -94,6 +95,19 @@ struct Args {
     #[arg(long)]
     list_plugins: bool,
 
+    /// List what could be installed, and where from, and stop
+    #[arg(long)]
+    list_packages: bool,
+
+    /// Install a plugin, by id or by the path of a directory with a
+    /// plugin.json in it, and stop
+    #[arg(long, value_name = "ID-OR-PATH")]
+    install: Option<String>,
+
+    /// Remove a plugin, and undo what installing it did, and stop
+    #[arg(long, value_name = "ID")]
+    uninstall: Option<String>,
+
     /// Say where language servers' complaints are written and stop
     #[arg(long)]
     log_path: bool,
@@ -102,10 +116,15 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
     let mut config = Config::load();
+    // Textfold's own programs go on the PATH before anything is started, so
+    // that language servers, tools, plugins' own programs and install steps
+    // all find them without any of those having to know they exist. Last, so
+    // that what you have installed yourself still wins.
+    pack::put_tools_on_path();
     // What is switched off decides what the languages are, so it is read
     // before anything asks after one — including the `--list-…` answers,
     // which should say what this machine would actually do.
-    plugin::init(&config.plugins);
+    plugin::init(&mut config.plugins);
 
     if args.list_themes {
         let themes = theme::Themes::load();
@@ -122,8 +141,22 @@ fn main() -> Result<()> {
     }
     if args.list_plugins {
         for plugin in plugin::all() {
-            let state = if plugin::is_on(&plugin.id) { "on " } else { "off" };
+            // Three states, not two. A plugin that is on and has nothing to
+            // run is the case people spend an afternoon on, so it says so.
+            let state = match (plugin::is_on(&plugin.id), plugin.is_ready()) {
+                (false, _) => "off",
+                (true, true) => "on ",
+                (true, false) => "get",
+            };
             println!("{state}  {:<22} {}", plugin.id, plugin.detail());
+            if !plugin.is_ready() {
+                println!(
+                    "      {:<20} needs {} — textfold --install {}",
+                    "",
+                    plugin.missing().join(", "),
+                    plugin.id
+                );
+            }
             for server in &plugin.servers {
                 let state = if plugin::is_on(&server.id) { "on " } else { "off" };
                 println!("{state}    {:<20} runs {}", server.id, server.command);
@@ -147,6 +180,30 @@ fn main() -> Result<()> {
             eprintln!("{problem}");
         }
         return Ok(());
+    }
+    if args.list_packages {
+        let here = pack::receipts();
+        for package in pack::available(config.package_paths()) {
+            println!(
+                "{:<7} {:<24} {}",
+                package.tag(),
+                package.id,
+                package.detail()
+            );
+        }
+        if !here.is_empty() {
+            println!("\ninstalled by textfold:");
+            for (id, from) in here {
+                println!("        {id:<24} from {from}");
+            }
+        }
+        return Ok(());
+    }
+    if let Some(what) = &args.install {
+        return do_package(pack::find(what, config.package_paths()).and_then(|p| pack::install(&p)));
+    }
+    if let Some(what) = &args.uninstall {
+        return do_package(pack::uninstall(&what.trim().to_lowercase()));
     }
     if args.list_languages {
         lang::init();
@@ -244,6 +301,63 @@ fn main() -> Result<()> {
     app.hosts.shutdown_all();
     stop(wants_mouse, wants_keys);
     result
+}
+
+/// Carry out an install or an uninstall from the command line.
+///
+/// The same plan the editor runs, run straight through with what it says
+/// printed rather than sent down a channel — which is the whole reason a plan
+/// is a thing you can hold rather than something an install does to itself.
+///
+/// What it is about to do is printed before it does any of it. A plugin's
+/// installer runs programs on your machine, and naming them first is the least
+/// an editor can do.
+fn do_package(plan: std::result::Result<pack::Plan, String>) -> Result<()> {
+    let plan = match plan {
+        Ok(plan) => plan,
+        Err(why) => {
+            eprintln!("{why}");
+            std::process::exit(1);
+        }
+    };
+    if plan.is_empty() {
+        println!("{} has nothing to do — it is already here", plan.name);
+        return Ok(());
+    }
+    println!("{}:", plan.name);
+    for line in plan.lines() {
+        println!("  {line}");
+    }
+    if !plan.removing {
+        match (plan.touches_system(), pack::tools_dir()) {
+            (true, _) => {
+                println!("\nSome of this installs system-wide — the lines that say so above.")
+            }
+            (false, Some(tools)) => println!("\nInto {}", tools.display()),
+            (false, None) => {}
+        }
+    }
+    println!();
+
+    let ok = plan.run(&mut |note| match note {
+        pack::Note::Doing { at, of, about } if of > 0 => println!("[{at}/{of}] {about}"),
+        pack::Note::Doing { about, .. } => println!("{about}"),
+        pack::Note::Skipped { about, why } => println!("  {about} — skipped, {why}"),
+        pack::Note::Did { about, ok, output } => {
+            print!("{output}");
+            if !ok {
+                eprintln!("{about} failed");
+            }
+        }
+        pack::Note::Done { ok, why } => match ok {
+            true => println!("\n{why}"),
+            false => eprintln!("\n{why}"),
+        },
+    });
+    match ok {
+        true => Ok(()),
+        false => std::process::exit(1),
+    }
 }
 
 fn run(

@@ -36,6 +36,7 @@ textfold                         # an empty buffer
 - [Git](#git)
 - [Reading what a language server says](#reading-what-a-language-server-says)
 - [Plugins](#plugins)
+  - [Installing a plugin](#installing-a-plugin)
 - [Where you left off](#where-you-left-off)
 - [When something is wrong](#when-something-is-wrong)
 - [How it is put together](#how-it-is-put-together)
@@ -242,6 +243,8 @@ because the message has already arrived.
 | Alt-N | line numbers on and off |
 | Alt-Z | fold long lines, or let them run off the side |
 | — | `plugins` in the palette: what is on, and what to switch off |
+| — | `install-plugin`: fetch a plugin, or what one needs to work |
+| — | `uninstall-plugin`: take one off this machine again |
 | — | `restore-session`: open again what was open here last time |
 
 Up to four panes. Each pane has its own cursor, its own scroll position and its
@@ -483,6 +486,19 @@ taken at its word, and one saying nothing is read as the language you are
 looking at. A language with no grammar here is left in one colour rather than
 guessed at.
 
+**Each server is told about an edit in the form it asked for.** A server says
+at startup whether it wants the whole document on every change or just the
+ranges that changed, and which one it asked for is not the editor's to choose:
+by the letter of the protocol a full-document change carries a `text` and no
+`range`, so a server that asked for the whole thing and is handed a range gets
+either an error or — worse — a document replaced by the few characters you just
+typed. Its copy stops being your file, and everything it says afterwards is
+about something that does not exist. The symptom is unmistakable once you have
+seen it: hover and completions work when you open a file and never again after
+the first keystroke. taplo is the one that ships here asking for whole
+documents; the big servers all ask for ranges, because re-reading a hundred
+thousand lines on every keystroke is not free.
+
 A rename or a quick fix that touches nine files opens all nine as tabs and
 leaves them modified rather than writing them behind your back. Actions that
 would create, move or delete files are refused; an editor that deletes a file
@@ -490,38 +506,84 @@ because a code action said so is an editor nobody trusts twice.
 
 ### What it will start, if you have it
 
-| Language | Server |
-|---|---|
-| Rust | `rust-analyzer` (with clippy, all features, inlay hints) |
-| Python | `pyright-langserver`, and `ruff server` beside it |
-| TypeScript / JavaScript / TSX | `typescript-language-server` |
-| Go | `gopls` |
-| C / C++ | `clangd` |
-| C# | `OmniSharp -lsp` |
-| Java | `jdtls` |
-| Bash | `bash-language-server` |
-| JSON | `vscode-json-language-server` |
-| TOML | `taplo` |
-| YAML | `yaml-language-server` |
-| Markdown | `marksman` |
-| HTML / CSS | `vscode-html-language-server`, `vscode-css-language-server` |
-| Dockerfile | `docker-langserver` |
+Every one of these is a [plugin](#plugins), with a row in the plugins list, a
+line in your settings file, and an answer to *and how do I get it*. None of
+them is written into the definition of a language: `pyright` is a plugin that
+says it is for Python, in the same way a plugin of yours would.
 
-Install the ones you want the way you normally would — for Rust that is
-`rustup component add rust-analyzer`. OmniSharp is the one whose name is worth
-checking: its own releases and most distributions call the binary `OmniSharp`,
-which is what textfold runs, but some package managers install it lowercase.
-`{ "id": "my-csharp", "languages": { "csharp": { "servers": [{ "name":
-"omnisharp", "command": "omnisharp", "args": ["-lsp"] }] } } }` as a
-[plugin](#plugins) of your own is the whole fix. jdtls wants a
-JDK 21 or newer on `JAVA_HOME` even to edit an older project, and writes its
-index into a workspace directory it picks itself; the first file you open in a
-large project is slow once and quick afterwards. A server that is not installed is
-mentioned once and then left alone; the editor works exactly as well without
-it, minus the intelligence.
+| Plugin | Language | Runs | `--install` fetches it with | Linux |
+|---|---|---|---|---|
+| `rust-analyzer` | Rust | `rust-analyzer` (clippy, all features, inlay hints) | rustup, brew | yes |
+| `pyright` | Python | `pyright-langserver` | npm, uv, pipx | yes |
+| `ruff` | Python | `ruff server` | uv, pipx, pip | yes |
+| `tsserver` | JavaScript, TypeScript, TSX | `typescript-language-server` | npm | yes |
+| `gopls` | Go | `gopls` | go install, brew | yes |
+| `bash-language-server` | Bash | `bash-language-server` | npm | yes |
+| `vscode-langservers` | JSON, HTML, CSS | the three servers VS Code ships | npm | yes |
+| `taplo` | TOML | `taplo` | its own releases, cargo, brew | yes |
+| `yaml-language-server` | YAML | `yaml-language-server` | npm | yes |
+| `docker-langserver` | Dockerfile | `docker-langserver` | npm | yes |
+| `marksman` | Markdown | `marksman` | its own releases, brew | yes |
+| `clangd` | C, C++ | `clangd` | brew | brew only |
+| `omnisharp` | C# | `OmniSharp -lsp` | brew | brew only |
+| `jdtls` | Java | `jdtls` | brew | brew only |
+
+**Linux and macOS both.** Everything above the line goes through a package
+manager that works the same on either — `npm`, `uv`, `pipx`, `pip`, `cargo`,
+`go install`, `rustup` — or, for `marksman`, straight from its own releases
+with the right build picked per platform. All of them install into [textfold's
+own directory](#where-it-all-goes) rather than onto your system.
+
+The last three are the honest exceptions: `clangd`, `OmniSharp` and `jdtls` are
+published as per-platform archives with no stable download address and no
+cross-platform package, so the only installer textfold can offer is `brew` —
+which does run on Linux, if you have it. Without brew you get the plugin, a
+**needs** beside it, and the `see` link, which is where those three were before
+any of this. Installing them by hand still works: textfold finds them on your
+`PATH` like anything else. If you know a reliable no-`sudo` route for one of
+them on Linux, it is a five-line addition to `src/plugins/<name>.json` and
+nothing else.
+
+You can install them the way you normally would, and textfold will find them.
+Or let it do it — `install-plugin` in the palette lists the ones that are not
+working yet and fetches what they need. See [Installing a
+plugin](#installing-a-plugin).
+
+```
+textfold --list-plugins     what is on, and what is on but has nothing to run
+textfold --install ruff
+```
+
+A server that is not installed is mentioned once and then left alone; the
+editor works exactly as well without it, minus the intelligence. In the plugins
+list it says **needs** rather than **on**, because a row that says `on` beside
+a program nobody has installed is a row that lies, and it is the lie people
+spend an afternoon on.
+
+**TOML completions need a schema.** Taplo's completions are entirely
+schema-driven — without one there are no keys to complete, because TOML has
+none of its own. The `taplo` plugin ships schema associations for the TOML
+files people actually edit (`Cargo.toml`, `pyproject.toml`, `rustfmt.toml`,
+`rust-toolchain.toml`, `taplo.toml`, `netlify.toml`, `pdm.toml`), so those work
+out of the box; formatting, diagnostics, symbols and folding never needed one.
+For any other TOML file, put `#:schema <url>` on its first line and taplo will
+use it. Associations rather than taplo's `schema.catalogs` because taplo 0.10
+cannot decode either schemastore's catalog or its own index, and logs an error
+on every start for its trouble.
+
+Two of them are worth a note. OmniSharp's own releases and most distributions
+call the binary `OmniSharp`, which is what textfold runs, but some package
+managers install it lowercase — `{ "id": "my-csharp", "languages": { "csharp":
+{ "servers": [{ "name": "omnisharp", "command": "omnisharp", "args": ["-lsp"]
+}] } } }` as a plugin of your own is the whole fix, and it will take the place
+of the one that ships. jdtls wants a JDK 21 or newer on `JAVA_HOME` even to
+edit an older project, and writes its index into a workspace directory it picks
+itself; the first file you open in a large project is slow once and quick
+afterwards.
 
 Run `server-status` from the palette to see what is running and what it is
-doing, and `restart-servers` after installing one.
+doing, and `restart-servers` after installing one by hand — installing one with
+`install-plugin` does that for you.
 
 ### When a language has two of them
 
@@ -710,6 +772,7 @@ than repeating forty things you did not.
 | `enhanced_keys` | ask for the extended keyboard protocol |
 | `underline_colour` | `auto`, `on`, or `off` — see [When something is wrong](#when-something-is-wrong) |
 | `plugins` | what is switched off — see [Plugins](#plugins) |
+| `package_paths` | where else to look for plugins you could install — see [Installing a plugin](#installing-a-plugin) |
 | `keys` | see [Keys](#keys) |
 
 Most of these are also in the palette under `settings`, where changing one
@@ -829,6 +892,38 @@ same file open in another window.
 
 `"reload_on_change": false` turns the first of those off; the marks stay either
 way.
+
+### A file that is still being written
+
+A file that something else has *finished* writing and one it is halfway through
+writing look identical to a single glance, and reading the second gets you a
+snapshot of a file mid-write: as much of it as had been written when you
+looked. Not an error, and it does not look like one — it looks like the file,
+shorter. Very often the cut lands in the middle of a character, and what you
+get is the file with the tail turned into replacement characters.
+
+Three things stop that, and they are all about the same idea: never take
+content you cannot vouch for.
+
+- **Nothing is read until it has stopped moving.** A file is taken only once it
+  has looked the same twice running, a quarter of a second apart. A log being
+  appended to, a build's output, a download in progress: all of them simply
+  wait, and are read when they stop.
+- **The file is stamped on both sides of the read**, and content that does not
+  come back with the same stamp it went in with is thrown away and tried again.
+  This pairing matters more than the read itself: content from one moment
+  stamped with metadata from another is *worse* than a torn read, because the
+  stamp then says the buffer is up to date and the damage never corrects
+  itself. That was a real bug, and it is why this is spelled out.
+- **A buffer is never rewritten under you with something that is not text.**
+  Bytes that are not valid UTF-8 are refused for an automatic re-read — that is
+  what half a file looks like when the half ends mid-character — and the file
+  is marked as changed instead. `reload` still reads it, because then you
+  asked and you can see the result and undo it.
+
+The cost is that an ordinary `git checkout` takes about a quarter of a second
+longer to show up. The benefit is that a file being written while you watch it
+cannot put rubbish in your buffer.
 
 ### What a tab is telling you
 
@@ -980,20 +1075,32 @@ kinds: nothing textfold ships is reachable by a route your own plugin cannot
 take. A plugin of yours taking an id textfold already uses replaces it, which
 is how you say what Rust means here without editing textfold.
 
-A plugin has an id, and so does each thing inside it. `python` is the Python
-plugin; `python/pyright` and `python/ruff` are the two servers in it. Either
-can be switched off, and switching off the plugin switches off everything in
-it. `plugins` in the command palette is the list, with a switch beside each
-row; `textfold --list-plugins` prints the same thing.
+A plugin has an id, and so does each thing inside it. `python` is what Python
+*is* — the colours, the comment syntax, what a `.py` file is — and `pyright`
+and `ruff` are two more plugins that say they are for it. Either can be
+switched off, and switching off a plugin switches off everything in it.
+`plugins` in the command palette is the list, with a switch beside each row;
+`textfold --list-plugins` prints the same thing.
 
 ```json
-{ "plugins": { "python/ruff": false } }
+{ "plugins": { "ruff": false } }
 ```
+
+A plugin that has several things in it names them `plugin/thing`, so a
+`pytools` plugin with two servers has `pytools/black` and `pytools/ruff`. A
+plugin that *is* one thing is named once: `pyright`, not `pyright/pyright`.
 
 Switching one takes effect where you are standing: the languages, the
 commands, the keys and the colours are all built again, the servers are
 stopped and started, and the buffers you have open work out what language they
 are afresh. A file whose language you set by hand keeps what you told it.
+
+**The language servers are plugins.** Not "configured like plugins" — plugins,
+by the same route yours takes, with no way for textfold to reach them that you
+could not reach yourself. Ten minutes with `--list-plugins` and the JSON in
+`src/plugins/` is the whole of what textfold knows about `clangd`. If you had a
+settings file from before this, the ids in it are brought up to date the first
+time it is read, so `"python/ruff": false` goes on meaning what it meant.
 
 ### What a plugin can contribute
 
@@ -1007,6 +1114,7 @@ are afresh. A file whose language you set by hand keeps what you told it.
 | `host.settings` | whatever the plugin wants to be told about itself |
 | `themes` | sets of colours, in the shape a [theme file](#colours) is in |
 | `keys` | keys it would like bound, by command name |
+| `needs`, `install`, `uninstall`, `see` | what it needs on the machine and how to get it — see [Installing a plugin](#installing-a-plugin) |
 
 ```json
 { "id": "pytools",
@@ -1031,6 +1139,228 @@ off), and the contribution tables above.
 nothing already wants that key, so a plugin cannot quietly take Ctrl-S, and a
 plugin you install cannot break the keys you already know. If you want it
 anyway, bind it yourself — your own `keys` are read last and win.
+
+### Installing a plugin
+
+A plugin is two things, and installing one means dealing with both: the plugin
+itself — a manifest and whatever sits beside it — and the programs it needs in
+order to do anything. A `pyright` plugin on your disk with no
+`pyright-langserver` to run is a switch wired to nothing, which is why the
+plugins list says **needs** rather than **on** for one.
+
+`install-plugin` in the palette is one list of both kinds:
+
+```
+needs    ruff                 Lint and formatting for Python — needs ruff
+needs    gopls                Types, completions and fixes for Go — needs gopls
+new      cargo                Build, check, test and clippy, without leaving the editor
+```
+
+The **needs** rows are plugins that are here and are not going to work until
+something is fetched. The **new** rows are packages sitting in a directory
+nobody has installed from yet. From where you are sitting "install ruff" and
+"install this plugin somebody gave me" are the same sentence, so they are one
+list; which of the two a row happens to be is textfold's business.
+
+`uninstall-plugin` is the other direction: it runs the plugin's `uninstall`
+steps and takes away the files, if the files are ones textfold put there.
+
+Nothing waits. An install runs on a thread, says which step it is on in the
+status line, and leaves everything the programs printed in a buffer called
+`install <name>` — quietly if it worked, in front of you if it did not, because
+that is where the reason is.
+
+From a terminal:
+
+```
+textfold --list-packages                 what could be installed, and from where
+textfold --install ruff                  something textfold already knows of
+textfold --install ./examples/cargo      a directory with a plugin.json in it
+textfold --uninstall cargo
+```
+
+**Where packages come from.** Nothing is fetched from anywhere: there is no
+index, no registry and no network. A package is a directory with a
+`plugin.json` in it, sitting on this machine — in
+`~/.config/textfold/packages`, or anywhere else you have named:
+
+```json
+{ "package_paths": ["~/src/textfold/examples", "~/work/editor-plugins"] }
+```
+
+which is what makes `install-plugin` a list rather than a path you have to
+remember. Point it at a checkout of somebody's plugins and every directory in
+it becomes a row you can choose. When there is somewhere to fetch packages
+*from*, it will be one more kind of row in the same list.
+
+#### Where it all goes
+
+**Nothing textfold fetches is installed system-wide.** An editor that runs
+`npm install -g` on your behalf and drops a package into the same place your
+projects' toolchains live has done something you did not ask for and cannot
+easily see, and the first sign of it is usually a version conflict in something
+unrelated.
+
+So there is one directory and it belongs to textfold:
+
+```
+~/.local/share/textfold/tools/bin     the programs
+~/.local/share/textfold/tools         everything they are unpacked from
+```
+
+(`$XDG_DATA_HOME` if you have set it.) Removing that directory undoes
+everything textfold ever installed. It is deliberately not beside your settings
+— which on macOS is `~/Library/Application Support/…` — because it is full of
+executables, many of them scripts whose first line names an interpreter by
+path, and a space in that path is a well-known way to break them.
+
+That directory's `bin` goes on textfold's own `PATH`, so language servers,
+tools and plugins' own programs all find what is in it without any of them
+having to know it exists. **Last on the `PATH`, not first**: what you have
+installed yourself goes on winning, and textfold's copy is what there is when
+you have not got one. An editor that quietly shadowed the `ruff` in your
+virtual environment with a copy of its own would be a very difficult afternoon.
+
+A manifest does not have to know any of this. It says `npm install --global` —
+the obvious thing to write — and textfold runs it with the variable that
+package manager already documents for the purpose, so "global" means global to
+textfold:
+
+| Written in a manifest | Set for it | Lands in |
+|---|---|---|
+| `npm install --global` | `npm_config_prefix` | `tools/bin` |
+| `pip install --user` | `PYTHONUSERBASE` | `tools/bin` |
+| `pipx install` | `PIPX_HOME`, `PIPX_BIN_DIR` | `tools/bin` |
+| `uv tool install` | `UV_TOOL_DIR`, `UV_TOOL_BIN_DIR` | `tools/bin` |
+| `cargo install` | `CARGO_INSTALL_ROOT` | `tools/bin` |
+| `go install` | `GOBIN` | `tools/bin` |
+
+Two things cannot be contained, because the program that fetches them has no
+notion of installing anywhere but the system: `brew` and `rustup component
+add`. A step that uses one says `"system": true`, and textfold says so before
+it runs rather than after:
+
+```
+$ textfold --install rust-analyzer
+rust-analyzer:
+  rustup component add rust-analyzer (installs system-wide)
+  brew install rust-analyzer (installs system-wide)
+
+Some of this installs system-wide — the lines that say so above.
+```
+
+Installing copies the package into `~/.config/textfold/plugins/<id>/` and
+leaves a receipt in it. The receipt is the whole of uninstall's safety:
+removing a directory is not a thing to do on a guess, and it is what tells a
+directory textfold copied in — which it may take away again — from one you
+wrote by hand in the same place, which it may not. A plugin you symlinked in
+for development is a third case: uninstalling removes *the link*, and what it
+points at is your working copy and none of textfold's business.
+
+#### Saying what a plugin needs
+
+| | |
+|---|---|
+| `needs` | the programs it has to have on the `PATH`. This is what decides whether it says **on** or **needs** |
+| `install` | how to get them: a list of steps, run in order |
+| `uninstall` | how to put them back. Absent means removing the plugin leaves what it fetched alone |
+| `see` | where to get it by hand, for when none of the steps could |
+
+A step is:
+
+| | |
+|---|---|
+| `run` | the program and its arguments, as a list |
+| `about` | the line the status bar shows while it runs |
+| `unless` | a program that, if it is already there, means this step has nothing to do |
+| `when` | a file that has to exist for this step to be worth running |
+| `os` | `"linux"`, `"macos"`, `"windows"`, or a list. Absent means any |
+| `arch` | `"x86_64"`, `"aarch64"`, or a list. Absent means any |
+| `system` | say `true` for a step that installs outside textfold's own directory |
+
+`${bin}` and `${tools}` in the arguments name [textfold's own
+directories](#where-it-all-goes), for a plugin whose program is published as a
+build per platform rather than through a package manager. That is the whole of
+what `marksman` does, and it works the same on Linux and macOS:
+
+```json
+"install": [
+  { "about": "marksman, from its releases", "os": "linux", "arch": "x86_64", "unless": "marksman",
+    "run": ["curl", "-fsSL", "-o", "${bin}/marksman",
+            "https://github.com/artempyanykh/marksman/releases/latest/download/marksman-linux-x64"] },
+  { "about": "marksman, from its releases", "os": "macos", "unless": "marksman",
+    "run": ["curl", "-fsSL", "-o", "${bin}/marksman",
+            "https://github.com/artempyanykh/marksman/releases/latest/download/marksman-macos"] },
+  { "about": "letting it be run", "os": ["linux", "macos"], "unless": "marksman",
+    "run": ["chmod", "+x", "${bin}/marksman"] }
+]
+```
+
+A step for another machine is not skipped at the last moment — it is not in the
+plan at all, so what textfold says it is about to do is what it is about to do.
+
+`when` is the mirror of `unless`, and it is what makes a download safe to write
+as more than one step. Fetching a program is three of them — download, unpack,
+make it runnable — and the second two are only meaningful if the first
+happened. Without `when`, a machine with no `curl` would skip the download (a
+step whose program is missing is skipped) and then *fail* on the unpack,
+stopping the install before it reached the ways of getting it that do work
+there. `taplo` is the worked example: it downloads a binary if it can, and
+otherwise falls through to `cargo install` and then to `brew`.
+
+```
+$ textfold --install taplo          # on a machine with no curl and no cargo
+  taplo, from its releases — skipped, no curl
+  unpacking it — skipped, there is no …/tools/bin/taplo.gz
+  letting it be run — skipped, there is no …/tools/bin/taplo
+  taplo, built from source — skipped, no cargo
+  taplo, with brew — skipped, no brew
+
+still no taplo — see https://taplo.tamasfe.dev/cli/installation/binary.html
+```
+
+```json
+{ "id": "ruff", "name": "Ruff", "needs": ["ruff"],
+  "install": [
+    { "about": "ruff, with uv",   "run": ["uv", "tool", "install", "ruff"],   "unless": "ruff" },
+    { "about": "ruff, with pipx", "run": ["pipx", "install", "ruff"],         "unless": "ruff" },
+    { "about": "ruff, with pip",  "run": ["pip", "install", "--user", "ruff"], "unless": "ruff" }
+  ],
+  "uninstall": [{ "run": ["uv", "tool", "uninstall", "ruff"] }],
+  "see": "https://docs.astral.sh/ruff/installation/" }
+```
+
+An installer is a list of programs to run rather than a script, which means you
+can read what a plugin is about to do to your machine before you let it — and
+textfold prints exactly that before it does any of it. There is no shell, so
+there is nothing to quote wrongly and nothing a `$` can do to you. The rules
+for reading one are three sentences:
+
+- A step whose `unless` program is already there is **skipped**. There is
+  nothing to do.
+- A step whose *own* program is not installed is **skipped too**, and this is
+  the load-bearing one: it is what lets the three steps above be three ways to
+  get the same thing, with the first one that exists being the one that runs.
+  A step you cannot run is not a step that failed.
+- A step that runs and comes back unhappy **stops the install there**. That is
+  a real failure, and carrying on past it would only make a worse mess.
+
+Which leaves the question of whether it worked, and that is not answered by the
+exit codes:
+
+```
+$ textfold --install marksman
+Marksman:
+  brew install marksman
+
+  marksman, with brew — skipped, no brew
+
+still no marksman — see https://github.com/artempyanykh/marksman/releases
+```
+
+`needs` is checked when the last step has run. Every step was cheerful, and the
+program is not there, so the install failed — and it says where to go instead
+of failing without a suggestion.
 
 ### Tools
 
@@ -1129,8 +1459,19 @@ That one is real and it is in the repository: `examples/cargo`, about a hundred
 and fifty lines of Python with nothing installed to run it. To try it:
 
 ```sh
+textfold --install ./examples/cargo
+```
+
+Or, if you are going to be editing it, link it in instead so that your changes
+are the ones that run — `uninstall-plugin` knows the difference and will remove
+the link rather than your working copy:
+
+```sh
 ln -s $PWD/examples/cargo ~/.config/textfold/plugins/cargo
 ```
+
+Or put `{ "package_paths": ["~/src/textfold/examples"] }` in your settings and
+both examples turn up in `install-plugin`.
 
 Its real interface, though, is `cargo/report`: a panel it drives itself.
 `c`, `b`, `t` and `l` run check, build, test and clippy; `x` stops one; `o`
@@ -1412,13 +1753,28 @@ Per language: `extensions`, `filenames` (for the many files with no extension),
 `init_options`, `env`.
 
 A language named by more than one plugin **merges** field by field, in the
-order the plugins load, so swapping rust-analyzer for something else is three
-lines and does not mean restating the grammar and the comment syntax:
+order the plugins load, so adding a server to Rust is three lines and does not
+mean restating the grammar and the comment syntax:
 
 ```json
 { "id": "my-rust",
   "languages": { "rust": { "servers": [{ "command": "ra-multiplex" }] } } }
 ```
+
+This is how the language servers work: `python` says what Python is, and
+`pyright` and `ruff` are two more plugins that add a server each to it.
+**Servers are added to rather than written over**, or the second plugin to be
+read would take the first one's place and you would get whichever of the two
+sorted last. A server of the same *name* does still take an earlier one's
+place, which is what lets you swap one out rather than end up with both:
+
+```json
+{ "id": "my-rust", "languages": {
+  "rust": { "servers": [{ "name": "rust-analyzer", "command": "ra-multiplex" }] } } }
+```
+
+The other way to say the same thing is `{ "plugins": { "rust-analyzer": false } }`,
+which switches the shipped one off and leaves yours the only one there.
 
 Turning a server's settings up:
 
@@ -1505,7 +1861,8 @@ nothing is a bad afternoon.
 **No completions.** `server-status` in the palette says whether a server is
 running and what it is doing. rust-analyzer is often still indexing; the top
 right says so while it is. If it is not running at all, it is probably not
-installed.
+installed: `plugins` says **needs** rather than **on** beside a server whose
+program is missing, and `install-plugin` will fetch it.
 
 **A server said something and I missed it.** Servers' complaints go to a file,
 not the screen. `textfold --log-path` says where.
@@ -1627,7 +1984,17 @@ write, loaded through the same code, and listed in the same place with the
 same switch beside them. Turning one off rebuilds the languages, the commands,
 the keys and the colours rather than asking you to restart the editor, and an
 id survives that, so a buffer that was Python is still Python when Python
-comes back.
+comes back. Installing one is the same rebuild, which is why a plugin you have
+just fetched works where you are standing.
+
+**Installing is data too.** A plugin says what programs it needs and gives a
+list of ways to get them, and that list is a table rather than a script: you
+can read what it will do to your machine before you let it, and textfold prints
+exactly that first. Whether it worked is decided by looking for the programs
+afterwards rather than by believing the exit codes — an installer that was
+cheerful about every step and fetched nothing has failed. An install and an
+uninstall are the same `Plan`, run on a thread with what it says arriving as
+events, or run straight through by `--install` with what it says printed.
 
 **Everything textfold talks to that is not a person talks the same way.** A
 language server and a plugin's own program are both a child process, a thread
@@ -1657,8 +2024,9 @@ The modules: `text` (positions and selections), `doc` (the rope, undo, files),
 map), `syntax` (tree-sitter), `lang` (the language table), `rpc` (JSON-RPC on a
 pipe), `lsp` and `host` (the two things that speak it), `git` (branch and diff),
 `picker` (the fuzzy list), `menu` (the context menus), `keys` and `cmd` (the
-vocabulary), `app` (state and dispatch), `ui` (drawing), `theme`, `config`,
-`term` (the clipboard, and what else the terminal is asked for).
+vocabulary), `plugin` (the manifests) and `pack` (getting one onto the machine
+and off it again), `app` (state and dispatch), `ui` (drawing), `theme`,
+`config`, `term` (the clipboard, and what else the terminal is asked for).
 
 ---
 

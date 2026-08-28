@@ -1,0 +1,28 @@
+{
+  "id": "bash-language-server",
+  "name": "bash-language-server",
+  "about": "Completions and shellcheck for shell scripts",
+  "needs": ["bash-language-server"],
+  "install": [
+    {
+      "about": "bash-language-server, from npm",
+      "run": ["npm", "install", "--global", "bash-language-server"],
+      "unless": "bash-language-server"
+    }
+  ],
+  "uninstall": [
+    { "run": ["npm", "uninstall", "--global", "bash-language-server"] }
+  ],
+  "see": "https://github.com/bash-lsp/bash-language-server",
+  "languages": {
+    "bash": {
+      "servers": [
+        {
+          "name": "bash-language-server",
+          "command": "bash-language-server",
+          "args": ["start"]
+        }
+      ]
+    }
+  }
+}

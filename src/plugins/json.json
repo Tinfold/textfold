@@ -1,7 +1,7 @@
 {
   "id": "json",
   "name": "JSON",
-  "about": "Colours, and the schema-aware server VS Code ships",
+  "about": "What JSON is: colours, comments, and what a .json file is",
   "languages": {
     "json": {
       "extensions": [
@@ -12,16 +12,7 @@
       "line_comment": "//",
       "grammar": {
         "built_in": "json"
-      },
-      "servers": [
-        {
-          "name": "json-language-server",
-          "command": "vscode-json-language-server",
-          "args": [
-            "--stdio"
-          ]
-        }
-      ]
+      }
     }
   }
 }

@@ -158,6 +158,19 @@ pub enum State {
     Dead(String),
 }
 
+/// How a server wants to hear about an edit, as it said at startup.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Sync {
+    /// Not at all.
+    None,
+    /// The whole document, every time. What the simpler servers ask for, and
+    /// what taplo asks for.
+    Full,
+    /// Just what changed, as ranges. What the big ones ask for, because
+    /// re-reading a hundred thousand lines on every keystroke is not free.
+    Incremental,
+}
+
 /// One running server.
 pub struct Server {
     pub id: ServerId,
@@ -205,36 +218,72 @@ impl Server {
         )
     }
 
+    /// How this server wants to be told about an edit.
+    ///
+    /// Not a detail to skip. A server that asked for the whole document and is
+    /// handed a range is being handed something it has no way to read: by the
+    /// letter of the protocol a full-sync change has a `text` and no `range`,
+    /// so what arrives is either an error or — worse — a document replaced by
+    /// the four characters you just typed. Either way the server's copy stops
+    /// being your file, and everything it says afterwards is about something
+    /// that does not exist. It looks exactly like features working until the
+    /// first keystroke and never again.
+    fn sync(&self) -> Sync {
+        sync_of(&self.capabilities)
+    }
+
     /// The characters that should make completions appear on their own.
     pub fn completion_triggers(&self) -> Vec<char> {
-        self.capabilities
-            .get("completionProvider")
-            .and_then(|c| c.get("triggerCharacters"))
-            .and_then(Value::as_array)
-            .map(|list| {
-                list.iter()
-                    .filter_map(Value::as_str)
-                    .filter_map(|s| s.chars().next())
-                    .collect()
-            })
-            .unwrap_or_default()
+        triggers_of(&self.capabilities, "completionProvider")
     }
 
     /// The characters that should make a signature hint appear.
     pub fn signature_triggers(&self) -> Vec<char> {
-        self.capabilities
-            .get("signatureHelpProvider")
-            .and_then(|c| c.get("triggerCharacters"))
-            .and_then(Value::as_array)
-            .map(|list| {
-                list.iter()
-                    .filter_map(Value::as_str)
-                    .filter_map(|s| s.chars().next())
-                    .collect()
-            })
-            .unwrap_or_default()
+        triggers_of(&self.capabilities, "signatureHelpProvider")
     }
+}
 
+/// What a server's announced capabilities say about being told of an edit.
+///
+/// A free function rather than a method because it is a fact about what the
+/// server said, and reading it out of a blob of JSON is a thing worth testing
+/// without a process on the other end of a pipe.
+fn sync_of(capabilities: &Value) -> Sync {
+    // Two shapes: a bare number, or an object with `change` in it. Both are in
+    // the specification and servers use both.
+    let said = match capabilities.get("textDocumentSync") {
+        Some(Value::Object(it)) => it.get("change").and_then(Value::as_i64),
+        Some(other) => other.as_i64(),
+        None => None,
+    };
+    match said {
+        Some(0) => Sync::None,
+        Some(1) => Sync::Full,
+        Some(2) => Sync::Incremental,
+        // Nothing said, or something nobody understands. The specification's
+        // default is none at all, but a server that says nothing and means it
+        // is rarer by far than one that forgot — and of the two ways to be
+        // wrong, sending the whole document is merely wasteful.
+        _ => Sync::Full,
+    }
+}
+
+/// The trigger characters under one of the capabilities that has them.
+fn triggers_of(capabilities: &Value, capability: &str) -> Vec<char> {
+    capabilities
+        .get(capability)
+        .and_then(|c| c.get("triggerCharacters"))
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter_map(Value::as_str)
+                .filter_map(|s| s.chars().next())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+impl Server {
     /// Everything that writes goes through here, so that a pipe that has
     /// closed under us is noticed in one place rather than four.
     fn note_failure(&mut self) {
@@ -572,12 +621,22 @@ impl Servers {
     /// The edits go over as they happened, in order, because that is the only
     /// order in which each one's positions describe the document the one
     /// before it left behind.
+    /// Tell the servers about an edit, each in the form it asked for.
+    ///
+    /// Not one message sent to everybody. Which form a server wants is a thing
+    /// it told us at startup and is not ours to choose — see
+    /// [`Server::sync`] for what goes wrong when it is chosen for them.
     pub fn did_change(&mut self, doc: &Document, edits: &[AppliedEdit]) {
         if edits.is_empty() {
             return;
         }
         let Some(path) = doc.path.clone() else { return };
-        let changes: Vec<Value> = edits
+        let uri = uri_of(&path);
+
+        // Worked out once each, and only if somebody wants that form: the
+        // whole text of a large file is not a thing to build for a server
+        // that did not ask for it.
+        let ranged: Vec<Value> = edits
             .iter()
             .map(|edit| {
                 json!({
@@ -589,12 +648,25 @@ impl Servers {
                 })
             })
             .collect();
-        let params = json!({
-            "textDocument": { "uri": uri_of(&path), "version": doc.version },
-            "contentChanges": changes,
-        });
+        let mut whole: Option<Vec<Value>> = None;
+
         for server in self.servers.iter_mut().filter(|s| s.open.contains(&path)) {
-            server.notify("textDocument/didChange", params.clone());
+            let changes = match server.sync() {
+                // It asked not to be told. Telling it anyway is a protocol
+                // error, not a kindness.
+                Sync::None => continue,
+                Sync::Incremental => ranged.clone(),
+                Sync::Full => whole
+                    .get_or_insert_with(|| vec![json!({ "text": doc.text() })])
+                    .clone(),
+            };
+            server.notify(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": { "uri": uri, "version": doc.version },
+                    "contentChanges": changes,
+                }),
+            );
         }
     }
 
@@ -1401,6 +1473,59 @@ pub use crate::rpc::log_path;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_server_is_told_about_an_edit_the_way_it_asked_to_be() {
+        // The difference between a server that works and one that works until
+        // the first keystroke. A full-sync server handed a range gets a
+        // document replaced by the few characters you just typed, and
+        // everything it says afterwards is about a file that does not exist.
+        assert_eq!(sync_of(&json!({ "textDocumentSync": 1 })), Sync::Full);
+        assert_eq!(sync_of(&json!({ "textDocumentSync": 2 })), Sync::Incremental);
+        assert_eq!(sync_of(&json!({ "textDocumentSync": 0 })), Sync::None);
+
+        // The other shape it comes in. Both are in the specification and
+        // servers use both — taplo says `1`, and plenty say the object.
+        assert_eq!(
+            sync_of(&json!({ "textDocumentSync": { "openClose": true, "change": 2 } })),
+            Sync::Incremental
+        );
+        assert_eq!(
+            sync_of(&json!({ "textDocumentSync": { "openClose": true, "change": 1 } })),
+            Sync::Full
+        );
+
+        // Said nothing, or said something nobody understands. Of the two ways
+        // to be wrong, the whole document is merely wasteful.
+        assert_eq!(sync_of(&json!({})), Sync::Full);
+        assert_eq!(
+            sync_of(&json!({ "textDocumentSync": { "openClose": true } })),
+            Sync::Full
+        );
+    }
+
+    #[test]
+    fn the_server_that_taplo_is_asks_for_the_whole_document() {
+        // Taken from what taplo 0.10 actually answers `initialize` with, so
+        // that this stays a fact about taplo rather than about our reading of
+        // the specification.
+        let taplo = json!({
+            "textDocumentSync": 1,
+            "completionProvider": {
+                "resolveProvider": false,
+                "triggerCharacters": [".", "=", "[", "{", ",", "\""]
+            },
+            "hoverProvider": true,
+            "documentFormattingProvider": true
+        });
+        assert_eq!(sync_of(&taplo), Sync::Full);
+        // And the characters that make its completions appear as you type,
+        // which for TOML is where a key or a value begins.
+        let triggers = triggers_of(&taplo, "completionProvider");
+        for c in ['.', '=', '[', '{', ',', '"'] {
+            assert!(triggers.contains(&c), "{c} should open the list");
+        }
+    }
 
     /// The Python textfold ships with reaches the server as a real path.
     ///

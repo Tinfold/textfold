@@ -1,7 +1,7 @@
 {
   "id": "cpp",
   "name": "C++",
-  "about": "Colours, and clangd",
+  "about": "What C++ is: colours, comments, and what a .cpp file is",
   "languages": {
     "cpp": {
       "extensions": [
@@ -19,18 +19,7 @@
       ],
       "grammar": {
         "built_in": "c"
-      },
-      "servers": [
-        {
-          "name": "clangd",
-          "command": "clangd",
-          "roots": [
-            "compile_commands.json",
-            "compile_flags.txt",
-            ".git"
-          ]
-        }
-      ]
+      }
     }
   }
 }

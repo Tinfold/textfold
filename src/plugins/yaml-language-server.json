@@ -1,0 +1,28 @@
+{
+  "id": "yaml-language-server",
+  "name": "yaml-language-server",
+  "about": "Schema-aware completions for YAML",
+  "needs": ["yaml-language-server"],
+  "install": [
+    {
+      "about": "yaml-language-server, from npm",
+      "run": ["npm", "install", "--global", "yaml-language-server"],
+      "unless": "yaml-language-server"
+    }
+  ],
+  "uninstall": [
+    { "run": ["npm", "uninstall", "--global", "yaml-language-server"] }
+  ],
+  "see": "https://github.com/redhat-developer/yaml-language-server",
+  "languages": {
+    "yaml": {
+      "servers": [
+        {
+          "name": "yaml-language-server",
+          "command": "yaml-language-server",
+          "args": ["--stdio"]
+        }
+      ]
+    }
+  }
+}

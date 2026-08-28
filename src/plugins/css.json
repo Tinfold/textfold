@@ -1,7 +1,7 @@
 {
   "id": "css",
   "name": "CSS",
-  "about": "Colours, and the server VS Code ships",
+  "about": "What CSS is: colours, comments, and what a .css file is",
   "languages": {
     "css": {
       "extensions": [
@@ -15,16 +15,7 @@
       ],
       "grammar": {
         "built_in": "css"
-      },
-      "servers": [
-        {
-          "name": "css-language-server",
-          "command": "vscode-css-language-server",
-          "args": [
-            "--stdio"
-          ]
-        }
-      ]
+      }
     }
   }
 }

@@ -60,6 +60,10 @@ pub enum Choice {
     Environment(PathBuf),
     /// A plugin or one of its language servers, switched on or off in place.
     Plugin(String),
+    /// A plugin to fetch, or a plugin whose programs to fetch.
+    Install(String),
+    /// A plugin to take off this machine.
+    Uninstall(String),
 }
 
 /// One row.
@@ -135,6 +139,11 @@ pub enum Kind {
     Environments,
     /// The languages and language servers there are, and which are on.
     Plugins,
+    /// What could be installed: plugins that need a program fetching, and
+    /// packages sitting in a directory nobody has installed from yet.
+    Install,
+    /// What could be taken off this machine again.
+    Uninstall,
     /// A list a plugin put up, waiting for somebody to pick from it.
     PluginPick,
 }
@@ -157,6 +166,8 @@ impl Kind {
             Kind::Settings => "Settings",
             Kind::Environments => "Python environment",
             Kind::Plugins => "Plugins",
+            Kind::Install => "Install a plugin",
+            Kind::Uninstall => "Remove a plugin",
             // A plugin says what its own list is called. This is only the
             // fallback for one that did not.
             Kind::PluginPick => "Pick one",
@@ -172,6 +183,8 @@ impl Kind {
             Kind::Settings => "Enter changes the setting and keeps it",
             Kind::Environments => "Enter points the language servers at it and keeps it",
             Kind::Plugins => "Enter turns it on or off and keeps it",
+            Kind::Install => "Enter installs it, and whatever it needs",
+            Kind::Uninstall => "Enter removes it, and undoes what it installed",
             _ => "",
         }
     }

@@ -1,7 +1,7 @@
 {
   "id": "javascript",
   "name": "JavaScript",
-  "about": "Colours, and the TypeScript server, which also knows JavaScript",
+  "about": "What JavaScript is: colours, comments, and what a .js file is",
   "languages": {
     "javascript": {
       "extensions": [
@@ -20,22 +20,7 @@
       ],
       "grammar": {
         "built_in": "javascript"
-      },
-      "servers": [
-        {
-          "name": "tsserver",
-          "command": "typescript-language-server",
-          "args": [
-            "--stdio"
-          ],
-          "roots": [
-            "package.json",
-            "tsconfig.json",
-            "jsconfig.json",
-            ".git"
-          ]
-        }
-      ]
+      }
     }
   }
 }

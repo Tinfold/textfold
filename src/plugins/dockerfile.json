@@ -1,7 +1,7 @@
 {
   "id": "dockerfile",
   "name": "Dockerfile",
-  "about": "docker-langserver",
+  "about": "What a Dockerfile is, and how to comment one out",
   "languages": {
     "dockerfile": {
       "filenames": [
@@ -11,16 +11,7 @@
       "extensions": [
         "dockerfile"
       ],
-      "line_comment": "#",
-      "servers": [
-        {
-          "name": "docker-langserver",
-          "command": "docker-langserver",
-          "args": [
-            "--stdio"
-          ]
-        }
-      ]
+      "line_comment": "#"
     }
   }
 }

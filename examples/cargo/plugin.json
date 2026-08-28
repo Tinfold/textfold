@@ -9,7 +9,7 @@
     "while you keep typing, and be told to stop.",
     "",
     "To install it:",
-    "  ln -s $PWD/examples/cargo ~/.config/textfold/plugins/cargo",
+    "  textfold --install ./examples/cargo",
     "",
     "Then open a Rust file and press F6, or find `cargo/` in the palette."
   ],

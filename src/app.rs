@@ -16,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
-use anyhow::Context;
 use ratatui::crossterm::event::{
     Event as TermEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
@@ -59,6 +58,9 @@ pub enum Event {
     /// the program printed, and an event that is occasionally a megabyte
     /// should not make every keystroke a megabyte to move about.
     Tool(Box<crate::tool::Finished>),
+    /// An install or an uninstall has got somewhere. Boxed for the same
+    /// reason: `npm install` has a great deal to say for itself.
+    Package(Box<crate::pack::Progress>),
 }
 
 /// A plugin waiting on an answer from the person at the keyboard.
@@ -70,6 +72,32 @@ pub enum Event {
 pub struct Asked {
     host: HostId,
     request: Value,
+}
+
+/// Who wanted a file read again.
+///
+/// The difference is what may be guessed at. Reading a file somebody asked for
+/// can do the best it can with whatever is there; rewriting a buffer under
+/// them on a timer has to be sure, because they were not watching for it and
+/// have no reason to suspect it happened.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Reread {
+    /// Somebody ran `reload`.
+    Asked,
+    /// The timer noticed the file had changed.
+    OnATimer,
+}
+
+/// An install or an uninstall that is running.
+///
+/// The log is kept here rather than written straight into a buffer because
+/// what an installer prints arrives in pieces and a buffer being rewritten
+/// under you eleven times is worse than one that appears when it is finished.
+pub struct Installing {
+    id: String,
+    /// Whether this is taking something away, for the words used about it.
+    removing: bool,
+    log: String,
 }
 
 /// What came of a plugin asking the editor for something.
@@ -137,6 +165,15 @@ const GIT_CHECK_EVERY: Duration = Duration::from_millis(150);
 /// checkout` in the next window is noticed while you are still thinking about
 /// it, rarely enough that a hundred open files cost nothing.
 const DISK_CHECK_EVERY: Duration = Duration::from_millis(1200);
+
+/// How soon to look again when a file was in the middle of changing.
+///
+/// A file is only read once it has looked the same twice running, so this is
+/// what that costs: the wait between the two looks. Short, because it is the
+/// delay on noticing an ordinary `git checkout` as well as the patience shown
+/// to a file being written — and cheap, because it only happens while
+/// something is actually moving.
+const SETTLE_CHECK_EVERY: Duration = Duration::from_millis(250);
 
 /// How long the cursor has to sit still before the plugins are told where it
 /// is. Cursor motion is the highest-frequency event there is, and a plugin
@@ -1064,13 +1101,26 @@ pub struct App {
     session_dirty: bool,
     session_written: Instant,
 
+    /// Whether a file was in the middle of changing at the last look, which is
+    /// what makes the next one come sooner.
+    unsettled: bool,
+
+    /// The install or uninstall that is running, and everything it has said.
+    ///
+    /// One at a time. Two installs at once would be two `npm install`s
+    /// fighting over the same directory, and the second one is nearly always
+    /// somebody pressing Enter twice.
+    installing: Option<Installing>,
 }
 
 impl App {
     pub fn new(config: Config, tx: Sender<Event>) -> Self {
+        let mut config = config;
         // The plugins decide what the languages are, so what is switched off
-        // has to be known before the language table is built.
-        crate::plugin::init(&config.plugins);
+        // has to be known before the language table is built. The settings go
+        // in by reference because ids that have been renamed are brought up to
+        // date here rather than being half-obeyed forever.
+        crate::plugin::init(&mut config.plugins);
         lang::init();
         // The commands have to be settled before the keys are read: a plugin
         // can bring one, and a binding for it has to find something to bind to.
@@ -1104,6 +1154,8 @@ impl App {
             lsp,
             hosts,
             plugin_waiting: None,
+            unsettled: false,
+            installing: None,
             caret: None,
             tx,
             clipboard: String::new(),
@@ -1602,7 +1654,13 @@ impl App {
         self.check_colours();
         self.check_diff();
         self.check_dragged_tab();
-        if self.disk_checked.elapsed() >= DISK_CHECK_EVERY {
+        // Sooner while something is moving, so that the extra look a settling
+        // file costs is a quarter of a second rather than another whole cycle.
+        let due = match self.unsettled {
+            true => SETTLE_CHECK_EVERY,
+            false => DISK_CHECK_EVERY,
+        };
+        if self.disk_checked.elapsed() >= due {
             self.disk_checked = Instant::now();
             self.check_disk();
             self.git.poll_head();
@@ -1828,6 +1886,7 @@ impl App {
             .map(|d| d.id)
             .collect();
         let auto = self.config.reload_on_change();
+        self.unsettled = false;
         let mut reloaded: Vec<String> = Vec::new();
         let mut clashed: Vec<String> = Vec::new();
         let mut waiting: Vec<String> = Vec::new();
@@ -1837,22 +1896,45 @@ impl App {
             let Some(doc) = self.doc_mut(id) else {
                 continue;
             };
-            let was = doc.on_disk;
             let now = doc.check_disk();
-            if now == was || now == OnDisk::Same {
+            if now == OnDisk::Same {
                 continue;
             }
+            // A file that is *still* changing has no settled contents to read.
+            // Something is part way through writing it, and what a read gets
+            // is a snapshot of a file mid-write — very often cut in the middle
+            // of a character, which is how a buffer fills up with rubbish that
+            // then never goes away. So it is left alone and looked at again
+            // shortly, which is also what keeps a log being appended to from
+            // replacing your buffer several times a second.
+            if now == OnDisk::Changed && !doc.has_settled() {
+                self.unsettled = true;
+                continue;
+            }
+            // Whether this is the same state we have already dealt with.
+            // Compared by what is actually on disk rather than by "is it
+            // changed", which cannot tell a change we mentioned a second ago
+            // from a second change since.
+            if !doc.is_news() {
+                continue;
+            }
+            doc.noted();
             let name = doc.name.clone();
             let modified = doc.is_modified();
             match now {
                 OnDisk::Gone => gone.push(name),
+                // Only the person editing it can say which side wins, so it is
+                // marked and left. Nothing is read.
                 OnDisk::Changed if modified => clashed.push(name),
                 OnDisk::Changed if !auto => waiting.push(name),
-                OnDisk::Changed => {
-                    if self.take_from_disk(id).is_ok() {
-                        reloaded.push(name);
-                    }
-                }
+                // Nobody asked for this one, so it is only taken where it can
+                // be taken without guessing — see `take_from_disk`. What it
+                // would not take is left marked as changed and mentioned, so
+                // `reload` is still there to do it deliberately.
+                OnDisk::Changed => match self.take_from_disk(id, Reread::OnATimer) {
+                    Ok(_) => reloaded.push(name),
+                    Err(_) => waiting.push(name),
+                },
                 OnDisk::Same => {}
             }
         }
@@ -1897,6 +1979,7 @@ impl App {
             Event::Term(_) => {}
             Event::Lsp(id, message) => self.on_lsp(id, message),
             Event::Plugin(id, message) => self.on_plugin(id, message),
+            Event::Package(progress) => self.on_package(*progress),
             Event::PluginRan(ran) => {
                 let ran = *ran;
                 if let Some(host) = self.hosts.get_mut(ran.host) {
@@ -3343,7 +3426,7 @@ impl App {
     }
 
     fn do_reload(&mut self, id: DocId) {
-        match self.take_from_disk(id) {
+        match self.take_from_disk(id, Reread::Asked) {
             Ok(true) => self.say_good("read again from disk"),
             Ok(false) => self.say("already what is on disk"),
             Err(e) => self.say_bad(format!("{e}")),
@@ -3360,11 +3443,29 @@ impl App {
     /// being left holding the old text, and the whole thing can be undone.
     ///
     /// Answers whether anything actually differed.
-    fn take_from_disk(&mut self, id: DocId) -> anyhow::Result<bool> {
+    fn take_from_disk(&mut self, id: DocId, why: Reread) -> anyhow::Result<bool> {
         let Some(path) = self.doc(id).and_then(|d| d.path.clone()) else {
             anyhow::bail!("this buffer has no file to read");
         };
-        let bytes = std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
+        // Content and stamp from the same moment, or nothing. Taking the text
+        // as it was at one instant and the stamp as it was at another is how a
+        // buffer ends up holding half a file forever: the stamp says it is up
+        // to date, so nothing ever looks again.
+        let Some((bytes, stamp)) = crate::doc::read_whole(&path)? else {
+            anyhow::bail!(
+                "{} is being written to — nothing was read",
+                path.display()
+            );
+        };
+        // Text that is not valid UTF-8 comes in as replacement characters,
+        // which is the right answer for a file you asked to open and the wrong
+        // one for a buffer being rewritten under you on a timer. It is also
+        // what half a file looks like when the half ends in the middle of a
+        // character, so refusing it here is the last of the three guards
+        // against a torn read.
+        if why == Reread::OnATimer && std::str::from_utf8(&bytes).is_err() {
+            anyhow::bail!("{} is not text — reload to read it anyway", path.display());
+        }
         let text = String::from_utf8_lossy(&bytes).into_owned();
         let text = if text.contains("\r\n") {
             text.replace("\r\n", "\n")
@@ -3376,13 +3477,13 @@ impl App {
             anyhow::bail!("that buffer has gone");
         };
         if doc.rope == text.as_str() {
-            doc.mark_saved();
+            doc.took_from_disk(stamp);
             return Ok(false);
         }
         let len = doc.len_chars();
         let sel = crate::text::Selections::single(Range::point(0));
         let edits = doc.apply_atomic(vec![crate::doc::Change::replace(0, len, text)], &sel);
-        doc.mark_saved();
+        doc.took_from_disk(stamp);
         self.after_edit_to(id, edits, None);
         Ok(true)
     }
@@ -4835,10 +4936,26 @@ impl App {
         let mut rows = Vec::new();
         for plugin in crate::plugin::all() {
             let on = crate::plugin::is_on(&plugin.id);
+            let missing = plugin.missing();
             rows.push(
                 Row::new(plugin.name.clone(), Choice::Plugin(plugin.id.clone()))
-                    .detail(format!("{} — {}", plugin.id, plugin.detail()))
-                    .tag(if on { "on" } else { "off" }),
+                    .detail(match missing.is_empty() {
+                        true => format!("{} — {}", plugin.id, plugin.detail()),
+                        // A row that says `on` beside a language server nobody
+                        // has installed is a row that lies, and the lie is the
+                        // one people spend an afternoon on.
+                        false => format!(
+                            "{} — {} — needs {}",
+                            plugin.id,
+                            plugin.detail(),
+                            missing.join(", ")
+                        ),
+                    })
+                    .tag(match (on, missing.is_empty()) {
+                        (false, _) => "off",
+                        (true, true) => "on",
+                        (true, false) => "needs",
+                    }),
             );
             // A plugin that brings a program of its own says so before it is
             // switched on, not after. "This adds a language" and "this runs a
@@ -4879,6 +4996,11 @@ impl App {
                 );
             }
             for server in &plugin.servers {
+                // A plugin that *is* one server is one row, not a row and an
+                // indented copy of itself with the same switch on it.
+                if server.id == plugin.id {
+                    continue;
+                }
                 // Off with its plugin, and said so, rather than shown as on
                 // and quietly doing nothing.
                 let running = on && crate::plugin::is_on(&server.id);
@@ -4892,7 +5014,9 @@ impl App {
                         // that is a question at all.
                         true => format!(
                             "{} — runs {} for {}",
-                            server.id, server.command, server.language
+                            server.id,
+                            server.command,
+                            server.for_what()
                         ),
                         false => format!("{} — runs {}", server.id, server.command),
                     })
@@ -4920,10 +5044,34 @@ impl App {
         crate::plugin::set(id, on, &mut self.config.plugins);
         self.remember_settings();
 
+        // A plugin switched off stops its own program too, and one switched
+        // on again gets its crash count cleared — which is what makes
+        // "switch it off and on again" the way to give a plugin you have just
+        // fixed another go.
+        let plugin = id.split_once('/').map(|(p, _)| p).unwrap_or(id);
+        self.hosts.stop_plugin(plugin);
+        self.plugins_changed();
+
+        let name = crate::plugin::find(id)
+            .map(|p| p.name.clone())
+            .unwrap_or_else(|| id.to_string());
+        self.say(format!("{name}: {}", if on { "on" } else { "off" }));
+    }
+
+    /// Build everything the plugins decide, again.
+    ///
+    /// Everything downstream is built from the plugins rather than checking
+    /// them as it goes, so the way to change one's mind is to build it all
+    /// again: the language table, the commands, the keys and the colours, and
+    /// then the servers, which are stopped and started so that a linter that
+    /// has just gone stops sending diagnostics rather than leaving its last
+    /// ones on the screen.
+    ///
+    /// The same work whether a switch was thrown or a plugin was installed,
+    /// which is the point of it having a name.
+    fn plugins_changed(&mut self) {
         crate::lang::rebuild();
         crate::cmd::rebuild();
-        // Which changes what there is to bind a key to, and what colours there
-        // are to pick from.
         self.keys = Keys::new(&self.config.keys);
         self.themes = Themes::load();
         let wanted = self.config.theme_name().to_string();
@@ -4931,23 +5079,192 @@ impl App {
         for doc in &mut self.docs {
             doc.redetect_language();
         }
-        // A plugin switched off stops its own program too, and one switched
-        // on again gets its crash count cleared — which is what makes
-        // "switch it off and on again" the way to give a plugin you have just
-        // fixed another go.
-        let plugin = id.split_once('/').map(|(p, _)| p).unwrap_or(id);
-        self.hosts.stop_plugin(plugin);
-
         self.lsp.restart();
         let docs: Vec<DocId> = self.docs.iter().map(|d| d.id).collect();
         for doc in docs {
             self.lsp_open(doc);
         }
+    }
 
-        let name = crate::plugin::find(id)
-            .map(|p| p.name.clone())
-            .unwrap_or_else(|| id.to_string());
-        self.say(format!("{name}: {}", if on { "on" } else { "off" }));
+    // ---- Installing one ----
+
+    /// Everything textfold could fetch: a plugin that is here and needs a
+    /// program, and a package sitting somewhere nobody has installed from yet.
+    ///
+    /// One list, because from where you are sitting "install pyright" and
+    /// "install this plugin somebody gave me" are the same sentence. Which of
+    /// the two a row happens to be is textfold's business.
+    fn open_install_picker(&mut self) {
+        let found = crate::pack::available(self.config.package_paths());
+        if found.is_empty() {
+            return self.say(format!(
+                "nothing to install — every plugin has what it needs, and there are no packages in {}",
+                crate::pack::package_dirs(self.config.package_paths())
+                    .iter()
+                    .map(|d| d.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" or ")
+            ));
+        }
+        let rows: Vec<Row> = found
+            .iter()
+            .map(|p| {
+                Row::new(p.name.clone(), Choice::Install(p.id.clone()))
+                    .detail(format!("{} — {}", p.id, p.detail()))
+                    .tag(p.tag())
+            })
+            .collect();
+        self.overlay = Overlay::Picker(Picker::new(Kind::Install, rows));
+    }
+
+    /// Everything that could be taken off this machine again.
+    ///
+    /// Not the same as the plugins list. A language definition built into the
+    /// binary has nothing removing it could mean — switching it off is what
+    /// you want, and that is the other list.
+    fn open_uninstall_picker(&mut self) {
+        let found = crate::pack::removable_plugins();
+        if found.is_empty() {
+            return self.say(
+                "nothing to remove — no plugin here was installed by textfold, or knows how to undo one",
+            );
+        }
+        let rows: Vec<Row> = found
+            .iter()
+            .map(|p| {
+                Row::new(p.name.clone(), Choice::Uninstall(p.id.clone()))
+                    .detail(format!("{} — {}", p.id, p.origin.label()))
+                    .tag(p.tag())
+            })
+            .collect();
+        self.overlay = Overlay::Picker(Picker::new(Kind::Uninstall, rows));
+    }
+
+    fn start_install(&mut self, id: &str) {
+        let found = crate::pack::find(id, self.config.package_paths());
+        let plan = found.and_then(|package| crate::pack::install(&package));
+        self.start_plan(plan);
+    }
+
+    fn start_uninstall(&mut self, id: &str) {
+        self.start_plan(crate::pack::uninstall(id));
+    }
+
+    /// Set a plan going on a thread, and say what it is about to do.
+    ///
+    /// What it will do is said out loud before it does it. A plugin's
+    /// installer runs programs on your machine, and the least an editor can do
+    /// is name them on the way past rather than after the fact.
+    fn start_plan(&mut self, plan: Result<crate::pack::Plan, String>) {
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(why) => return self.say_bad(why),
+        };
+        if let Some(already) = &self.installing {
+            return self.say(format!("{} is still going", already.id));
+        }
+        if plan.is_empty() {
+            return self.say(format!("{} has nothing to do — it is already here", plan.name));
+        }
+        let mut log = format!("{}\n\n", plan.name);
+        for line in plan.lines() {
+            log.push_str(&format!("  {line}\n"));
+        }
+        // Where it is going, in the log, because "what did this put on my
+        // machine and where" is the question you ask afterwards.
+        if !plan.removing {
+            match (plan.touches_system(), crate::pack::tools_dir()) {
+                (true, _) => log.push_str("\nSome of this installs system-wide.\n"),
+                (false, Some(tools)) => {
+                    log.push_str(&format!("\nInto {}\n", tools.display()))
+                }
+                (false, None) => {}
+            }
+        }
+        log.push('\n');
+        self.installing = Some(Installing {
+            id: plan.id.clone(),
+            removing: plan.removing,
+            log,
+        });
+        let doing = match plan.removing {
+            true => "removing",
+            false => "installing",
+        };
+        self.say(format!("{doing} {}…", plan.name));
+        if let Err(why) = plan.spawn(self.tx.clone()) {
+            self.installing = None;
+            self.say_bad(why);
+        }
+    }
+
+    /// Something an install had to say.
+    fn on_package(&mut self, progress: crate::pack::Progress) {
+        use crate::pack::Note;
+        let Some(installing) = &mut self.installing else {
+            return;
+        };
+        if installing.id != progress.id {
+            return;
+        }
+        match progress.note {
+            Note::Doing { at, of, about } => {
+                installing.log.push_str(&format!("--- {about}\n"));
+                let where_in = match of {
+                    0 => String::new(),
+                    _ => format!("{at} of {of}: "),
+                };
+                let id = installing.id.clone();
+                self.say(format!("{id}: {where_in}{about}"));
+            }
+            Note::Skipped { about, why } => {
+                installing
+                    .log
+                    .push_str(&format!("--- {about}\n    skipped: {why}\n"));
+            }
+            Note::Did { about, ok, output } => {
+                installing.log.push_str(&output);
+                if !output.ends_with('\n') {
+                    installing.log.push('\n');
+                }
+                if !ok {
+                    installing.log.push_str(&format!("    {about} failed\n"));
+                }
+            }
+            Note::Done { ok, why } => {
+                let Some(done) = self.installing.take() else {
+                    return;
+                };
+                let name = format!(
+                    "{} {}",
+                    if done.removing { "remove" } else { "install" },
+                    done.id
+                );
+                // The plugin files have changed under us, so everything built
+                // out of them is built again — which is what makes a plugin
+                // you have just installed work where you are standing rather
+                // than the next time you start the editor.
+                crate::plugin::reload();
+                self.plugins_changed();
+                // A plugin that has just been removed should stop, and one
+                // that has just arrived should get its chance to start.
+                self.hosts.stop_plugin(&done.id);
+                match ok {
+                    // Put where it can be read, without taking the cursor: you
+                    // asked for a plugin, not for a wall of npm output.
+                    true => {
+                        self.put_in_a_buffer(&name, &done.log, false);
+                        self.say_good(why);
+                    }
+                    // A failure is the one case worth showing you, because the
+                    // reason is in there and nowhere else.
+                    false => {
+                        self.put_in_a_buffer(&name, &done.log, true);
+                        self.say_bad(format!("{}: {why}", done.id));
+                    }
+                }
+            }
+        }
     }
 
     /// The Python environments this project could be using.
@@ -5229,6 +5546,8 @@ impl App {
                 self.toggle_plugin(&id);
                 self.redraw_list(Self::open_plugins_picker);
             }
+            Choice::Install(id) => self.start_install(&id),
+            Choice::Uninstall(id) => self.start_uninstall(&id),
         }
     }
 
@@ -9459,6 +9778,10 @@ commands! {
         |app| app.bring_back_session();
     PLUGINS => "plugins", View, Passive, "Turn languages and language servers on or off",
         |app| app.open_plugins_picker();
+    INSTALL_PLUGIN => "install-plugin", View, Passive, "Install a plugin, or what one needs to work",
+        |app| app.open_install_picker();
+    UNINSTALL_PLUGIN => "uninstall-plugin", View, Passive, "Take a plugin off this machine",
+        |app| app.open_uninstall_picker();
     CONTEXT_MENU => "context-menu", Edit, Passive, "What can be done where the cursor is",
         |app| app.open_context_menu();
     ESCAPE => "escape", Help, Passive, "Close what is open, or drop back to one cursor",
@@ -10584,8 +10907,16 @@ mod tests {
 
         // A formatter, a `git checkout`, the same file open next door.
         std::fs::write(&path, "after\n").expect("written");
+        // Twice: one look cannot tell a file that has just changed from one
+        // that is halfway through being written, so nothing is read until it
+        // has looked the same twice. The second look comes a quarter of a
+        // second later rather than a whole cycle — see `SETTLE_CHECK_EVERY`.
+        app.check_disk();
+        assert!(app.unsettled, "the first sighting is not enough");
+        assert_eq!(app.here().rope.to_string(), "before\n");
         app.check_disk();
 
+        assert!(!app.unsettled);
         assert_eq!(app.here().rope.to_string(), "after\n");
         assert!(
             !app.here().is_modified(),
@@ -11383,6 +11714,191 @@ mod tests {
         // The other pane's cursor moved along with the text it was pointing at.
         assert_eq!(app.panes[0].cursor(), app.here().len_chars());
         assert_eq!(app.here().rope.to_string(), "XYalpha\nbeta\ngamma");
+    }
+
+    #[test]
+    fn a_buffer_is_not_rewritten_under_you_with_something_that_is_not_text() {
+        // Half a file very often ends in the middle of a character, and a
+        // lossy conversion turns the remains into replacement characters. Done
+        // on a timer, to a buffer somebody is looking at, that is rubbish
+        // appearing in their file from nowhere.
+        let (mut app, _rx) = editor();
+        let path = scratch("torn.txt");
+        std::fs::write(&path, "hello\n").expect("written");
+        app.open_path(&path);
+        let id = app.view().doc;
+
+        std::fs::write(&path, b"good \xff\xfe bad").expect("written");
+        assert!(
+            app.take_from_disk(id, Reread::OnATimer).is_err(),
+            "it should refuse"
+        );
+        assert_eq!(app.here().rope.to_string(), "hello\n", "and leave the buffer alone");
+
+        // Asked for outright, it still does its best — you can see the result
+        // and undo it.
+        assert!(app.take_from_disk(id, Reread::Asked).is_ok());
+        assert!(app.here().rope.to_string().starts_with("good "));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_file_being_written_to_is_left_alone_until_it_stops() {
+        let (mut app, _rx) = editor();
+        let path = scratch("busy.txt");
+        std::fs::write(&path, "one\n").expect("written");
+        app.open_path(&path);
+        let id = app.view().doc;
+
+        // Changing every time we look. Nothing is taken, and the editor says
+        // it wants to look again sooner.
+        for n in 1..5 {
+            std::fs::write(&path, format!("{}\n", "line\n".repeat(n))).expect("written");
+            app.check_disk();
+            assert!(app.unsettled, "it was still moving");
+            assert_eq!(app.here().rope.to_string(), "one\n", "and was not taken");
+        }
+
+        // It stops. The next look sees it twice the same and takes it.
+        app.check_disk();
+        assert!(!app.unsettled);
+        assert_eq!(app.doc(id).map(|d| d.rope.to_string()).as_deref(), Some("line\nline\nline\nline\n\n"));
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn a_plugin_that_is_one_server_gets_one_row_in_the_list() {
+        // It used to be a row for the plugin and an indented copy of itself
+        // underneath with the same switch on it, which is one switch shown
+        // twice and a list twice as long as it needs to be.
+        let (mut app, _rx) = editor();
+        app.open_plugins_picker();
+        let Overlay::Picker(picker) = &app.overlay else {
+            panic!("the list did not open");
+        };
+        let rows: Vec<(&str, &str)> = picker
+            .visible()
+            .map(|(row, _)| {
+                (
+                    row.label.as_str(),
+                    row.detail.as_deref().unwrap_or_default(),
+                )
+            })
+            .collect();
+        let pyright: Vec<&(&str, &str)> = rows
+            .iter()
+            .filter(|(_, detail)| detail.starts_with("pyright "))
+            .collect();
+        assert_eq!(pyright.len(), 1, "{pyright:?}");
+        assert_eq!(pyright[0].0, "Pyright");
+
+        // And one that has several things in it still shows them, indented.
+        assert!(
+            rows.iter()
+                .any(|(label, _)| *label == "  css-language-server"),
+            "a plugin with three servers should list all three"
+        );
+    }
+
+    #[test]
+    fn installing_something_nobody_has_heard_of_says_so() {
+        // A command that quietly does nothing is the failure worth testing
+        // for here: an install has no result you can see until it finishes,
+        // so one that never started has to say it never started.
+        let (mut app, _rx) = editor();
+        app.start_install("a-plugin-nobody-wrote");
+        assert_eq!(app.status.tone, Tone::Bad);
+        assert!(
+            app.status.text.contains("a-plugin-nobody-wrote"),
+            "{}",
+            app.status.text
+        );
+        assert!(app.installing.is_none(), "and nothing is left running");
+    }
+
+    #[test]
+    fn a_language_built_into_the_binary_cannot_be_uninstalled() {
+        // There would be nothing for it to mean. Switching it off is the
+        // thing you want, and the message says so rather than leaving you to
+        // work out why nothing happened.
+        let (mut app, _rx) = editor();
+        app.start_uninstall("rust");
+        assert_eq!(app.status.tone, Tone::Bad);
+        assert!(app.status.text.contains("switch it off"), "{}", app.status.text);
+    }
+
+    #[test]
+    fn one_install_at_a_time() {
+        // Two `npm install`s at once is two of them fighting over the same
+        // directory, and the second one is nearly always Enter pressed twice.
+        let (mut app, _rx) = editor();
+        app.installing = Some(Installing {
+            id: "busy".into(),
+            removing: false,
+            log: String::new(),
+        });
+        app.start_plan(Ok(crate::pack::Plan {
+            id: "other".into(),
+            name: "Other".into(),
+            removing: false,
+            files: crate::pack::Files::Leave,
+            steps: vec![crate::plugin::Step {
+                about: "something".into(),
+                run: vec!["true".into()],
+                unless: None,
+                when: None,
+                os: Vec::new(),
+                arch: Vec::new(),
+                system: false,
+            }],
+            needs: Vec::new(),
+            see: None,
+        }));
+        assert!(app.status.text.contains("busy"), "{}", app.status.text);
+        assert_eq!(
+            app.installing.as_ref().map(|i| i.id.clone()),
+            Some("busy".to_string()),
+            "the one that was already going is the one still going"
+        );
+    }
+
+    #[test]
+    fn what_an_install_says_lands_in_a_buffer_you_can_read() {
+        let (mut app, _rx) = editor();
+        app.installing = Some(Installing {
+            id: "zls".into(),
+            removing: false,
+            log: String::new(),
+        });
+        let note = |note| {
+            Box::new(crate::pack::Progress {
+                id: "zls".into(),
+                note,
+            })
+        };
+        app.on_package(*note(crate::pack::Note::Doing {
+            at: 1,
+            of: 1,
+            about: "zls, with brew".into(),
+        }));
+        app.on_package(*note(crate::pack::Note::Did {
+            about: "brew install zls".into(),
+            ok: true,
+            output: "poured from bottle\n".into(),
+        }));
+        app.on_package(*note(crate::pack::Note::Done {
+            ok: true,
+            why: "zls installed".into(),
+        }));
+
+        assert!(app.installing.is_none());
+        assert_eq!(app.status.tone, Tone::Good);
+        let log = app
+            .docs
+            .iter()
+            .find(|d| d.name == "install zls")
+            .expect("what it said is somewhere you can read it");
+        assert!(log.rope.to_string().contains("poured from bottle"));
     }
 
     #[test]

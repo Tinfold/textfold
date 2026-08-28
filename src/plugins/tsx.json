@@ -15,21 +15,7 @@
       ],
       "grammar": {
         "built_in": "tsx"
-      },
-      "servers": [
-        {
-          "name": "tsserver",
-          "command": "typescript-language-server",
-          "args": [
-            "--stdio"
-          ],
-          "roots": [
-            "package.json",
-            "tsconfig.json",
-            ".git"
-          ]
-        }
-      ]
+      }
     }
   }
 }

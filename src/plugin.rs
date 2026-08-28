@@ -18,16 +18,26 @@
 //!   } } }
 //! ```
 //!
-//! A plugin has an id, and so does each server inside it: `python` is the
-//! Python plugin, and `python/ruff` is the one server. Either can be turned
-//! off, from the settings file or from `plugins` in the command palette, and
-//! turning off a plugin turns off the servers inside it. That is the whole of
-//! "the language servers are plugins": `ruff` is not a Python special case
-//! written into the editor, it is a row in a list with a switch beside it.
+//! A plugin has an id, and so does each server inside it: `pytools` is the
+//! plugin, and `pytools/ruff` is the one server. Either can be turned off,
+//! from the settings file or from `plugins` in the command palette, and
+//! turning off a plugin turns off the servers inside it. A plugin that *is*
+//! one server — which is what every language server textfold ships now is —
+//! is named once rather than twice: `pyright`, not `pyright/pyright`.
 //!
 //! What is on is remembered in `config.json` under `plugins`, and only what
 //! you have changed is written there — a plugin nobody has said anything about
 //! is on.
+//!
+//! A plugin can also say what it needs on the machine and how to get it, which
+//! is what [`crate::pack`] carries out:
+//!
+//! ```json
+//! { "id": "zls", "needs": ["zls"],
+//!   "install": [{ "about": "zls, from brew", "run": ["brew", "install", "zls"] }],
+//!   "uninstall": [{ "run": ["brew", "uninstall", "zls"] }],
+//!   "see": "https://github.com/zigtools/zls" }
+//! ```
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -55,18 +65,105 @@ impl Source {
     }
 }
 
+/// What a server inside a plugin is called, in the settings file and in the
+/// list of things with a switch beside them.
+///
+/// `pytools/ruff` where the plugin has several things in it — and just
+/// `pyright` where the plugin *is* the one server, because `pyright/pyright`
+/// is a name nobody would choose to write. Every language server textfold
+/// ships is now a plugin of its own, so the short form is the common one.
+pub fn server_id(plugin: &str, name: &str) -> String {
+    match plugin == name {
+        true => plugin.to_string(),
+        false => format!("{plugin}/{name}"),
+    }
+}
+
+/// One step of getting a plugin working: a program to run, and when running it
+/// would be a waste of everybody's time.
+///
+/// The declarative half of installing. A great deal of what an installer does
+/// is *run this, unless the thing it fetches is already here*, and that is a
+/// table rather than a script — with the same benefit the rest of textfold's
+/// plugin manifests have, which is that you can read what a plugin is about to
+/// do to your machine before you let it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Step {
+    /// The line the status bar shows while it runs.
+    pub about: String,
+    /// The program and its arguments. There is no shell here, so there is
+    /// nothing to quote wrongly and nothing a `$` can do to you.
+    pub run: Vec<String>,
+    /// A program that, if it is already on the `PATH`, means this step has
+    /// nothing left to do. How a plugin offers three ways to get the same
+    /// thing without installing it three times.
+    pub unless: Option<String>,
+    /// A file that has to be there for this step to be worth running. The
+    /// mirror of `unless`, and what makes a download safe to write as more
+    /// than one step.
+    ///
+    /// Fetching a program is three steps — download, unpack, make it runnable
+    /// — and the second two are only meaningful if the first one happened.
+    /// Without this, a machine with no `curl` would skip the download (a step
+    /// whose program is missing is skipped) and then *fail* on the unpack,
+    /// stopping the install before it reached the ways of getting it that do
+    /// work here.
+    pub when: Option<String>,
+    /// Which systems it is for: `"macos"`, `"linux"`, `"windows"`. Empty means
+    /// any of them.
+    ///
+    /// Most steps need none of this — `npm` and `pip` are the same everywhere.
+    /// It is for the ones where the answer really does differ, which is
+    /// usually a program that is only distributed as a build per platform.
+    pub os: Vec<String>,
+    /// Which processors it is for: `"x86_64"`, `"aarch64"`. Empty means any.
+    /// Needed alongside `os` because a program distributed as a build per
+    /// platform is distributed as a build per *processor* too.
+    pub arch: Vec<String>,
+    /// Whether it installs outside textfold's own directory.
+    ///
+    /// Said out loud rather than discovered afterwards. Almost everything
+    /// textfold fetches goes into a directory of its own — see
+    /// [`crate::pack::tools_dir`] — and the handful of things that cannot,
+    /// because the program that fetches them has no notion of installing
+    /// anywhere but the system, are named before they run.
+    pub system: bool,
+}
+
+impl Step {
+    /// What is actually run, for the log and for the line that says what
+    /// failed.
+    pub fn line(&self) -> String {
+        self.run.join(" ")
+    }
+
+    /// Whether this step is for the machine textfold is on.
+    pub fn here(&self) -> bool {
+        let ok = |said: &[String], is: &str| said.is_empty() || said.iter().any(|w| w == is);
+        ok(&self.os, std::env::consts::OS) && ok(&self.arch, std::env::consts::ARCH)
+    }
+}
+
 /// One server a plugin contributes, as the list of things you can switch off
 /// needs to know about it.
 #[derive(Clone, Debug)]
 pub struct ServerEntry {
-    /// `python/ruff`.
+    /// `pyright`, or `pytools/ruff`.
     pub id: String,
     /// `ruff`.
     pub name: String,
     /// What is actually run.
     pub command: String,
-    /// Which of the plugin's languages it is for.
-    pub language: String,
+    /// Which of the plugin's languages it is for. More than one is normal:
+    /// `clangd` is C and C++, and `tsserver` is three.
+    pub languages: Vec<String>,
+}
+
+impl ServerEntry {
+    /// The languages it is for, for the line under its name in a list.
+    pub fn for_what(&self) -> String {
+        self.languages.join(", ")
+    }
 }
 
 /// A program a plugin can run for you: a formatter, a linter, a test run.
@@ -312,6 +409,20 @@ pub struct Plugin {
     /// Keys it would like bound, by command name. What you have set in your
     /// own settings wins; this is the plugin saying what it would suggest.
     pub keys: BTreeMap<String, Vec<String>>,
+    /// The programs it needs on the `PATH` before it can do anything. A
+    /// plugin with none of these needs nothing fetched and is ready the
+    /// moment it is read.
+    pub needs: Vec<String>,
+    /// How to get them. Run in order by [`crate::pack`].
+    pub install: Vec<Step>,
+    /// How to put them back, for when the plugin is removed. Absent means
+    /// removing the plugin leaves what it installed alone, which is the safe
+    /// answer for anything a plugin did not fetch itself.
+    pub uninstall: Vec<Step>,
+    /// Where to get it by hand, for when none of the steps could. Not every
+    /// program on earth has an installer that works on every machine, and
+    /// saying where to go is better than failing without a suggestion.
+    pub see: Option<String>,
 }
 
 impl Plugin {
@@ -322,6 +433,29 @@ impl Plugin {
             None => self.source.label(),
         }
     }
+
+    /// The programs it needs that are not on this machine.
+    ///
+    /// What the plugins list shows instead of "on" for a plugin that is
+    /// switched on and cannot work: a row that says `on` beside a language
+    /// server nobody has installed is a row that lies.
+    pub fn missing(&self) -> Vec<&str> {
+        self.needs
+            .iter()
+            .map(String::as_str)
+            .filter(|command| !crate::pack::on_path(command))
+            .collect()
+    }
+
+    /// Whether everything it needs is here.
+    pub fn is_ready(&self) -> bool {
+        self.missing().is_empty()
+    }
+
+    /// Whether there is anything to fetch for it at all.
+    pub fn can_install(&self) -> bool {
+        !self.install.is_empty()
+    }
 }
 
 /// Every plugin found, on or off, in the order they are merged.
@@ -330,7 +464,11 @@ struct Registry {
     problems: Vec<String>,
 }
 
-static REGISTRY: OnceLock<Registry> = OnceLock::new();
+/// Swapped whole when a plugin is installed or removed. The old one is leaked
+/// rather than dropped, because a `&'static Plugin` handed out before the swap
+/// may still be sitting in a command table or a picker that is on the screen.
+/// This happens a handful of times in a session at most.
+static REGISTRY: OnceLock<RwLock<&'static Registry>> = OnceLock::new();
 
 /// What is switched off, and what has been switched back on. Separate from the
 /// registry because this changes while the editor runs and the registry does
@@ -341,17 +479,74 @@ fn chosen() -> &'static RwLock<BTreeMap<String, bool>> {
     CHOSEN.get_or_init(|| RwLock::new(BTreeMap::new()))
 }
 
+/// Ids that used to mean something and now mean something else.
+///
+/// The language servers moved out into plugins of their own, so a settings
+/// file that says `"python/ruff": false` is talking about a name that is no
+/// longer anybody's. Renaming what it said is the difference between a
+/// setting that survives an upgrade and a linter that quietly comes back on.
+const RENAMED: &[(&str, &str)] = &[
+    ("bash/bash-language-server", "bash-language-server"),
+    ("c/clangd", "clangd"),
+    ("cpp/clangd", "clangd"),
+    ("csharp/omnisharp", "omnisharp"),
+    ("css/css-language-server", "vscode-langservers/css-language-server"),
+    ("dockerfile/docker-langserver", "docker-langserver"),
+    ("go/gopls", "gopls"),
+    ("html/html-language-server", "vscode-langservers/html-language-server"),
+    ("java/jdtls", "jdtls"),
+    ("javascript/tsserver", "tsserver"),
+    ("json/json-language-server", "vscode-langservers/json-language-server"),
+    ("markdown/marksman", "marksman"),
+    ("python/pyright", "pyright"),
+    ("python/ruff", "ruff"),
+    ("rust/rust-analyzer", "rust-analyzer"),
+    ("toml/taplo", "taplo"),
+    ("tsx/tsserver", "tsserver"),
+    ("typescript/tsserver", "tsserver"),
+    ("yaml/yaml-language-server", "yaml-language-server"),
+];
+
 /// Read the plugins, and take note of what the settings say is off.
 ///
 /// Called before anything asks for a language. Calling it twice is harmless
 /// and the second call only updates what is on — the files are read once.
-pub fn init(settings: &BTreeMap<String, bool>) {
-    REGISTRY.get_or_init(load);
+///
+/// The settings go in by reference and come out renamed, so that a file
+/// written by an older textfold is brought up to date the first time it is
+/// read rather than being half-obeyed forever.
+pub fn init(settings: &mut BTreeMap<String, bool>) {
+    cell();
+    rename(settings);
     *chosen().write().unwrap_or_else(|e| e.into_inner()) = settings.clone();
 }
 
+/// Bring the ids in a settings file up to date. An id that has been renamed
+/// keeps what you said about it; one that was already the new name is left
+/// alone, so this is safe to run over the same file forever.
+fn rename(settings: &mut BTreeMap<String, bool>) {
+    for (was, now) in RENAMED {
+        if let Some(said) = settings.remove(*was) {
+            settings.entry(now.to_string()).or_insert(said);
+        }
+    }
+}
+
+fn cell() -> &'static RwLock<&'static Registry> {
+    REGISTRY.get_or_init(|| RwLock::new(Box::leak(Box::new(load()))))
+}
+
 fn registry() -> &'static Registry {
-    REGISTRY.get_or_init(load)
+    *cell().read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Read the plugin files again, for after one has been installed or removed.
+///
+/// What is switched off is left alone: it is about ids, not about files, and a
+/// plugin you switched off before installing another one should stay off.
+pub fn reload() {
+    let fresh: &'static Registry = Box::leak(Box::new(load()));
+    *cell().write().unwrap_or_else(|e| e.into_inner()) = fresh;
 }
 
 /// Every plugin there is, on or off.
@@ -420,14 +615,17 @@ pub fn active() -> impl Iterator<Item = &'static Plugin> {
 // ---- Reading them ----
 
 /// The plugins that ship, in the order they are merged. A language is defined
-/// once, so the order matters only for a plugin of yours that adds to one.
+/// once, so the order matters only for a plugin that adds to one — which is
+/// exactly what the language servers below do, and why they come second.
 macro_rules! built_in {
     ($($name:literal),* $(,)?) => {
         &[$(($name, include_str!(concat!("plugins/", $name, ".json")))),*]
     };
 }
 
-const BUILT_IN: &[(&str, &str)] = built_in![
+/// What a language *is*: how to colour it, how to comment it out, what its
+/// files are called. Nothing here runs a program.
+const LANGUAGES: &[(&str, &str)] = built_in![
     "rust",
     "python",
     "javascript",
@@ -450,13 +648,43 @@ const BUILT_IN: &[(&str, &str)] = built_in![
     "git",
 ];
 
+/// The language servers, one plugin each, every one of them with an id, a
+/// switch, and instructions for getting it.
+///
+/// This is what "the language servers are plugins" finally means. `pyright` is
+/// not a line in the Python plugin that happens to name a program; it is a
+/// plugin, with its own row in the list, its own entry in the settings file,
+/// and its own answer to *and how do I get it*. Removing it is removing a
+/// plugin, not editing the definition of Python.
+///
+/// One plugin can serve several languages, which is the other thing the split
+/// buys: `clangd` was written out twice, once in C and once in C++, and
+/// `tsserver` three times. Now each is written once and says which languages
+/// it is for.
+const SERVERS: &[(&str, &str)] = built_in![
+    "rust-analyzer",
+    "pyright",
+    "ruff",
+    "tsserver",
+    "gopls",
+    "clangd",
+    "omnisharp",
+    "jdtls",
+    "bash-language-server",
+    "vscode-langservers",
+    "taplo",
+    "yaml-language-server",
+    "marksman",
+    "docker-langserver",
+];
+
 fn load() -> Registry {
     let mut it = Registry {
         plugins: Vec::new(),
         problems: Vec::new(),
     };
 
-    for (id, text) in BUILT_IN {
+    for (id, text) in LANGUAGES.iter().chain(SERVERS) {
         let file: FilePlugin = serde_json::from_str(text)
             .expect("the plugins textfold ships are checked by a test");
         let (plugin, problems) = file.into_plugin(id, Source::BuiltIn);
@@ -501,6 +729,24 @@ fn load() -> Registry {
         }
     }
     it
+}
+
+/// Read a manifest that has not been installed yet, as the plugin it would be.
+///
+/// `at` is where its manifest is going to live rather than where it is being
+/// read from, because a `${plugin}` in it names the installed copy — an
+/// install step pointing at the directory somebody happened to be installing
+/// out of would work once and never again.
+pub fn read(
+    manifest: &std::path::Path,
+    id: &str,
+    at: PathBuf,
+) -> Result<(Plugin, Vec<String>), String> {
+    let text =
+        std::fs::read_to_string(manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
+    let file: FilePlugin = serde_json::from_str(&text)
+        .map_err(|e| format!("{}: {}", manifest.display(), said(&e)))?;
+    Ok(file.into_plugin(id, Source::File(at)))
 }
 
 /// Just the message, without the "at line 4 column 9" that a person reading a
@@ -582,6 +828,59 @@ struct FilePlugin {
     themes: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     keys: BTreeMap<String, Vec<String>>,
+    /// Programs it needs on the `PATH`.
+    #[serde(default)]
+    needs: Vec<String>,
+    #[serde(default)]
+    install: Vec<FileStep>,
+    #[serde(default)]
+    uninstall: Vec<FileStep>,
+    /// Where to get it by hand, when nothing here can.
+    #[serde(default)]
+    see: Option<String>,
+}
+
+/// A step of an installer, as its file writes it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileStep {
+    #[serde(default)]
+    about: Option<String>,
+    /// The program and its arguments, as a list. A string would need a shell
+    /// to take it apart again, and a shell is a thing that can be surprised.
+    run: Vec<String>,
+    #[serde(default)]
+    unless: Option<String>,
+    /// A file that has to exist for this step to be worth running.
+    #[serde(default)]
+    when: Option<String>,
+    /// `"macos"`, `"linux"`, `"windows"`, or a list of them. Absent means any.
+    #[serde(default)]
+    os: Option<OneOrMore>,
+    /// `"x86_64"`, `"aarch64"`, or a list. Absent means any.
+    #[serde(default)]
+    arch: Option<OneOrMore>,
+    /// Whether it installs outside textfold's own directory.
+    #[serde(default)]
+    system: Option<bool>,
+}
+
+/// A field that is usually one thing and occasionally several. `"linux"` and
+/// `["linux", "macos"]` both mean what they look like they mean.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum OneOrMore {
+    One(String),
+    Several(Vec<String>),
+}
+
+impl OneOrMore {
+    fn into_vec(self) -> Vec<String> {
+        match self {
+            OneOrMore::One(one) => vec![one],
+            OneOrMore::Several(several) => several,
+        }
+    }
 }
 
 /// A host, as its file writes it.
@@ -661,11 +960,19 @@ impl FilePlugin {
         for (language, def) in &self.languages {
             for server in def.servers.iter().flatten() {
                 let name = server.plugin_name();
+                // The same server written out for three languages is one
+                // switch, not three: `tsserver` is on or off, and which of
+                // JavaScript, TypeScript and TSX you happen to be looking at
+                // is not a thing anybody wants to decide separately.
+                if let Some(seen) = servers.iter_mut().find(|s: &&mut ServerEntry| s.name == name) {
+                    seen.languages.push(language.clone());
+                    continue;
+                }
                 servers.push(ServerEntry {
-                    id: format!("{id}/{name}"),
+                    id: server_id(&id, &name),
                     name,
                     command: server.command.clone(),
-                    language: language.clone(),
+                    languages: vec![language.clone()],
                 });
             }
         }
@@ -775,6 +1082,48 @@ impl FilePlugin {
             });
         }
 
+        // A step that names no program is a step that cannot be run, and one
+        // left in the list would stop an install halfway through for no
+        // reason anybody could see.
+        let mut steps = |from: Vec<FileStep>, what: &str| -> Vec<Step> {
+            from.into_iter()
+                .filter_map(|s| {
+                    let run: Vec<String> = s
+                        .run
+                        .into_iter()
+                        .filter(|word| !word.trim().is_empty())
+                        .collect();
+                    if run.is_empty() {
+                        problems.push(format!("{id}: a {what} step says nothing to run"));
+                        return None;
+                    }
+                    Some(Step {
+                        about: s.about.unwrap_or_else(|| run.join(" ")),
+                        unless: s.unless.filter(|u| !u.trim().is_empty()),
+                        when: s.when.filter(|w| !w.trim().is_empty()),
+                        os: s
+                            .os
+                            .map(OneOrMore::into_vec)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|o| o.trim().to_lowercase())
+                            .collect(),
+                        arch: s
+                            .arch
+                            .map(OneOrMore::into_vec)
+                            .unwrap_or_default()
+                            .iter()
+                            .map(|a| a.trim().to_lowercase())
+                            .collect(),
+                        system: s.system.unwrap_or(false),
+                        run,
+                    })
+                })
+                .collect()
+        };
+        let install = steps(self.install, "install");
+        let uninstall = steps(self.uninstall, "uninstall");
+
         let plugin = Plugin {
             name: self.name.unwrap_or_else(|| id.clone()),
             about: self.about,
@@ -782,6 +1131,14 @@ impl FilePlugin {
             languages: self.languages,
             themes: self.themes,
             keys: self.keys,
+            needs: self
+                .needs
+                .into_iter()
+                .filter(|n| !n.trim().is_empty())
+                .collect(),
+            see: self.see.filter(|s| !s.trim().is_empty()),
+            install,
+            uninstall,
             servers,
             tools,
             host,
@@ -800,7 +1157,7 @@ mod tests {
     #[test]
     fn the_plugins_textfold_ships_all_read() {
         let registry = load();
-        for (id, _) in BUILT_IN {
+        for (id, _) in LANGUAGES.iter().chain(SERVERS) {
             let plugin = registry
                 .plugins
                 .iter()
@@ -813,10 +1170,143 @@ mod tests {
                 "{id} contributes no languages"
             );
         }
-        // And the server ids are the ones the settings file will hold.
-        let python = registry.plugins.iter().find(|p| p.id == "python").unwrap();
-        let ids: Vec<&str> = python.servers.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, ["python/pyright", "python/ruff"]);
+    }
+
+    #[test]
+    fn a_language_that_ships_says_what_the_language_is_and_runs_nothing() {
+        // The split the language servers moved out under. A language plugin
+        // that named a program again would be the thing this went to the
+        // trouble of undoing.
+        let registry = load();
+        for (id, _) in LANGUAGES {
+            let plugin = registry.plugins.iter().find(|p| &p.id == id).unwrap();
+            assert!(
+                plugin.servers.is_empty(),
+                "{id} still has a language server written into it"
+            );
+            assert!(plugin.needs.is_empty(), "{id} needs a program to be a language");
+        }
+    }
+
+    #[test]
+    fn every_language_server_that_ships_says_how_to_get_it() {
+        // A row in a list that says "you have not got this" and does not say
+        // what to do about it is a row that wastes an afternoon.
+        let registry = load();
+        for (id, _) in SERVERS {
+            let plugin = registry.plugins.iter().find(|p| &p.id == id).unwrap();
+            assert!(!plugin.servers.is_empty(), "{id} runs no server");
+            assert!(!plugin.needs.is_empty(), "{id} does not say what it needs");
+            assert!(plugin.can_install(), "{id} does not say how to get it");
+            assert!(
+                plugin.see.is_some(),
+                "{id} does not say where to get it by hand"
+            );
+            // What it needs is what it runs. A `needs` naming something other
+            // than the command would report a server as ready that cannot
+            // start, which is worse than saying nothing.
+            for server in &plugin.servers {
+                assert!(
+                    plugin.needs.contains(&server.command),
+                    "{id} runs {} and does not say it needs it",
+                    server.command
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_plugin_that_is_one_server_is_named_once() {
+        // `pyright/pyright` is a name nobody would write, and it would be the
+        // name in everybody's settings file.
+        let registry = load();
+        let pyright = registry.plugins.iter().find(|p| p.id == "pyright").unwrap();
+        let ids: Vec<&str> = pyright.servers.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, ["pyright"]);
+
+        // And one server for three languages is one switch, not three.
+        let ts = registry.plugins.iter().find(|p| p.id == "tsserver").unwrap();
+        assert_eq!(ts.servers.len(), 1);
+        assert_eq!(ts.servers[0].id, "tsserver");
+        assert_eq!(ts.servers[0].for_what(), "javascript, tsx, typescript");
+    }
+
+    #[test]
+    fn a_settings_file_from_before_the_servers_moved_still_says_what_it_said() {
+        let mut settings = BTreeMap::from([
+            ("python/ruff".to_string(), false),
+            ("rust".to_string(), false),
+        ]);
+        rename(&mut settings);
+        assert_eq!(settings.get("ruff"), Some(&false));
+        assert_eq!(settings.get("python/ruff"), None);
+        // And an id that was never renamed is left exactly as it was.
+        assert_eq!(settings.get("rust"), Some(&false));
+
+        // Running it over a file that has already been brought up to date
+        // changes nothing, which is what makes it safe to do every time.
+        let again = settings.clone();
+        rename(&mut settings);
+        assert_eq!(settings, again);
+    }
+
+    #[test]
+    fn what_a_new_id_already_says_beats_what_an_old_one_said() {
+        // Three old ids point at `tsserver`. Whatever the file says about the
+        // new name is what it meant most recently, so that wins.
+        let mut settings = BTreeMap::from([
+            ("typescript/tsserver".to_string(), false),
+            ("tsserver".to_string(), true),
+        ]);
+        rename(&mut settings);
+        assert_eq!(settings.get("tsserver"), Some(&true));
+    }
+
+    #[test]
+    fn an_installer_is_read_as_a_list_of_things_to_run() {
+        let file: FilePlugin = serde_json::from_str(
+            r#"{"id":"zls","needs":["zls"],"see":"https://example.invalid",
+                "install":[{"about":"zls, with brew","run":["brew","install","zls"],
+                            "unless":"zls"},
+                           {"run":["cargo","install","zls"]}],
+                "uninstall":[{"run":["brew","uninstall","zls"]}]}"#,
+        )
+        .unwrap();
+        let (plugin, problems) = file.into_plugin("zls", Source::BuiltIn);
+        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(plugin.needs, ["zls"]);
+        assert_eq!(plugin.install.len(), 2);
+        assert_eq!(plugin.install[0].about, "zls, with brew");
+        assert_eq!(plugin.install[0].unless.as_deref(), Some("zls"));
+        // A step that did not say what it is for is described by what it runs,
+        // which is the honest answer and the one a person can act on.
+        assert_eq!(plugin.install[1].about, "cargo install zls");
+        assert_eq!(plugin.install[1].unless, None);
+        assert_eq!(plugin.uninstall.len(), 1);
+        assert_eq!(plugin.see.as_deref(), Some("https://example.invalid"));
+    }
+
+    #[test]
+    fn a_step_with_nothing_to_run_is_dropped_and_said_so() {
+        // It would otherwise stop an install halfway through for a reason
+        // nobody watching could see.
+        let file: FilePlugin =
+            serde_json::from_str(r#"{"id":"p","install":[{"run":["  "]}]}"#).unwrap();
+        let (plugin, problems) = file.into_plugin("p", Source::BuiltIn);
+        assert!(plugin.install.is_empty());
+        assert_eq!(problems, ["p: a install step says nothing to run"]);
+    }
+
+    #[test]
+    fn a_plugin_that_needs_nothing_is_ready_and_one_that_needs_the_impossible_is_not() {
+        let file: FilePlugin = serde_json::from_str(r#"{"id":"p"}"#).unwrap();
+        assert!(file.into_plugin("p", Source::BuiltIn).0.is_ready());
+
+        let file: FilePlugin =
+            serde_json::from_str(r#"{"id":"p","needs":["a-program-nobody-wrote"]}"#).unwrap();
+        let (plugin, _) = file.into_plugin("p", Source::BuiltIn);
+        assert!(!plugin.is_ready());
+        assert_eq!(plugin.missing(), ["a-program-nobody-wrote"]);
     }
 
     #[test]
