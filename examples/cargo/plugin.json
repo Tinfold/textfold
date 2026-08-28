@@ -2,7 +2,6 @@
   "id": "cargo",
   "name": "Cargo",
   "about": "Build, check, test and clippy, without leaving the editor",
-
   "_about": [
     "A plugin that is a program rather than a table. It stays up, so it can",
     "hold a running build, stream where it has got to into the status line",
@@ -11,32 +10,73 @@
     "To install it:",
     "  textfold --install ./examples/cargo",
     "",
+    "It says what it needs and nothing about how to get it, because there is",
+    "no sensible way to fetch a Rust toolchain on somebody's behalf. The",
+    "plugins list says `needs cargo` rather than `on`, and `see` says where",
+    "to go.",
+    "",
     "Then open a Rust file and press F6, or find `cargo/` in the palette."
   ],
-
+  "needs": [
+    "python3",
+    "cargo"
+  ],
+  "see": "https://rustup.rs",
   "host": {
     "command": "python3",
-    "args": ["${plugin}/textfold_cargo.py"],
-    "roots": ["Cargo.toml"],
-    "activate": ["language:Rust", "command"]
+    "args": [
+      "${plugin}/textfold_cargo.py"
+    ],
+    "roots": [
+      "Cargo.toml"
+    ],
+    "activate": [
+      "language:Rust",
+      "command"
+    ]
   },
-
   "panels": [
-    { "name": "report", "about": "What cargo found, as a list you can click" }
+    {
+      "name": "report",
+      "about": "What cargo found, as a list you can click"
+    }
   ],
-
   "commands": [
-    { "name": "check", "about": "Check this project, without building it" },
-    { "name": "build", "about": "Build this project" },
-    { "name": "test", "about": "Run this project's tests" },
-    { "name": "clippy", "about": "Check this project with clippy" },
-    { "name": "stop", "about": "Stop whatever cargo is doing" },
-    { "name": "problems", "about": "Go to one of the problems cargo found" },
-    { "name": "clean", "about": "Throw away the build and start again" }
+    {
+      "name": "check",
+      "about": "Check this project, without building it"
+    },
+    {
+      "name": "build",
+      "about": "Build this project"
+    },
+    {
+      "name": "test",
+      "about": "Run this project's tests"
+    },
+    {
+      "name": "clippy",
+      "about": "Check this project with clippy"
+    },
+    {
+      "name": "stop",
+      "about": "Stop whatever cargo is doing"
+    },
+    {
+      "name": "problems",
+      "about": "Go to one of the problems cargo found"
+    },
+    {
+      "name": "clean",
+      "about": "Throw away the build and start again"
+    }
   ],
-
   "keys": {
-    "cargo/check": ["f6"],
-    "cargo/test": ["shift-f6"]
+    "cargo/check": [
+      "f6"
+    ],
+    "cargo/test": [
+      "shift-f6"
+    ]
   }
 }

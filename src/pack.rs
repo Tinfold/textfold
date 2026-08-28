@@ -145,8 +145,16 @@ pub fn on_path(command: &str) -> bool {
     }
     let named = Path::new(command);
     if named.components().count() > 1 {
-        return runnable(named);
+        // A path is a file somebody named exactly, and whether it carries an
+        // executable bit is their business — a plugin may well be pointing at
+        // something it hands to an interpreter, as a `.js` file handed to
+        // node. Being there is the question that was asked.
+        return named.exists();
     }
+    // A bare name is looked up the way a shell would, and there it does have
+    // to be runnable: a file on the `PATH` with no executable bit is not a
+    // program, and treating it as one is how a download gets mistaken for a
+    // finished install.
     let Some(path) = std::env::var_os("PATH") else {
         return false;
     };
@@ -789,10 +797,11 @@ impl Plan {
             // something that this machine does not have, not a failure. This
             // is what lets a plugin list uv, pipx and pip and have the first
             // one that exists be the one that runs.
-            if !on_path(&step.run[0]) {
+            let program = fill(&step.run[0]);
+            if !on_path(&program) {
                 say(Note::Skipped {
                     about: step.about.clone(),
-                    why: format!("no {}", step.run[0]),
+                    why: format!("no {program}"),
                 });
                 continue;
             }
@@ -922,6 +931,10 @@ impl Plan {
 /// arguments filled in, for a step that fetches something itself rather than
 /// asking a package manager to.
 fn run_step(step: &Step) -> (bool, String) {
+    // The program as well as its arguments, so that a step can run something
+    // out of textfold's own directory — the `pip` inside a virtual environment
+    // an earlier step made, say.
+    let program = fill(&step.run[0]);
     let args: Vec<String> = step.run[1..].iter().map(|a| fill(a)).collect();
     // The programs that install here expect somewhere to install to, and the
     // first one to run would otherwise fail on a machine where nothing has
@@ -931,7 +944,7 @@ fn run_step(step: &Step) -> (bool, String) {
     {
         return (false, format!("{}: {e}", bin.display()));
     }
-    let done = std::process::Command::new(&step.run[0])
+    let done = std::process::Command::new(&program)
         .args(&args)
         .envs(install_env())
         .stdin(std::process::Stdio::null())
@@ -944,7 +957,7 @@ fn run_step(step: &Step) -> (bool, String) {
             said.push_str(&String::from_utf8_lossy(&out.stderr));
             (out.status.success(), said)
         }
-        Err(e) => (false, format!("{}: {e}", step.run[0])),
+        Err(e) => (false, format!("{program}: {e}")),
     }
 }
 
@@ -1161,6 +1174,67 @@ mod tests {
     }
 
     #[test]
+    fn a_step_can_run_a_program_an_earlier_step_put_there() {
+        // The `pip` inside a virtual environment a previous step made. Without
+        // filling the program as well as its arguments, a plugin could fetch
+        // something into textfold's own directory and then have no way to run
+        // it — which is the whole of how a Python tool gets its own
+        // environment rather than being dropped into yours.
+        let dir = scratch("own-program");
+        let bin = dir.join("prog");
+        std::fs::write(&bin, "#!/bin/sh\nexit 0\n").expect("written");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+        // `fill` only knows `${tools}` and `${bin}`, so this is checked by
+        // running an absolute path through the same door a filled one uses.
+        let step = Step {
+            about: "run it".into(),
+            run: vec![bin.display().to_string()],
+            unless: None,
+            when: None,
+            os: Vec::new(),
+            arch: Vec::new(),
+            system: false,
+        };
+        let (ok, _) = run_step(&step);
+        assert!(ok, "a program named by its full path should run");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_step_waits_for_what_an_earlier_step_was_meant_to_make() {
+        // Three steps that are one operation: make an environment, install
+        // into it, put the result on the path. If the first cannot run, the
+        // other two have nothing to work on and must stand aside rather than
+        // fail — that is what lets the next way of getting it be tried.
+        let dir = scratch("waiting");
+        let missing = dir.join("not-made-yet").display().to_string();
+        let plan = Plan {
+            id: "p".into(),
+            name: "P".into(),
+            removing: false,
+            files: Files::Leave,
+            steps: vec![
+                Step {
+                    when: Some(missing.clone()),
+                    ..step(&["true"], None)
+                },
+                step(&["true"], None),
+            ],
+            needs: Vec::new(),
+            see: None,
+        };
+        let (ok, said) = notes(&plan);
+        assert!(ok, "{said:?}");
+        assert_eq!(said[0], format!("skipped: there is no {missing}"));
+        assert_eq!(said[1], "doing true", "and the one after it still ran");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn a_step_can_name_the_directory_it_is_installing_into() {
         // For a program published as a build per platform rather than through
         // a package manager. Without this a manifest could not say where to
@@ -1178,6 +1252,26 @@ mod tests {
         assert!(on_path("/bin/sh"), "a path is checked as a path");
         assert!(!on_path("a-program-nobody-has-written"));
         assert!(!on_path(""));
+    }
+
+    #[test]
+    fn a_path_asks_whether_the_file_is_there_and_a_bare_name_whether_it_can_be_run() {
+        // The two questions are different and a plugin asks both. `needs:
+        // ["ruff"]` means a program you could run; `needs:
+        // ["${plugin}/node_modules/…/language-server.js"]` means a file that
+        // has to have been fetched, which nothing will ever run directly —
+        // node runs it. Demanding an executable bit of the second would say a
+        // perfectly good install had failed.
+        let dir = scratch("named");
+        let plain = dir.join("data.js");
+        std::fs::write(&plain, "// not executable\n").expect("written");
+        assert!(
+            on_path(plain.to_str().unwrap()),
+            "a file named by its path is there, whatever its mode"
+        );
+        assert!(!runnable(&plain), "and it is still not a program");
+        assert!(!on_path(&dir.join("absent.js").display().to_string()));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

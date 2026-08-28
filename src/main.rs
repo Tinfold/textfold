@@ -150,11 +150,19 @@ fn main() -> Result<()> {
             };
             println!("{state}  {:<22} {}", plugin.id, plugin.detail());
             if !plugin.is_ready() {
+                // What to do about it, which is not the same sentence for a
+                // plugin that knows how to fetch what it needs and one that
+                // only knows where it lives. Saying `--install` for the second
+                // kind sends somebody to a command that will do nothing.
+                let what = match (plugin.can_install(), &plugin.see) {
+                    (true, _) => format!("textfold --install {}", plugin.id),
+                    (false, Some(see)) => format!("see {see}"),
+                    (false, None) => "install it yourself and textfold will find it".into(),
+                };
                 println!(
-                    "      {:<20} needs {} — textfold --install {}",
+                    "      {:<20} needs {} — {what}",
                     "",
-                    plugin.missing().join(", "),
-                    plugin.id
+                    plugin.missing().join(", ")
                 );
             }
             for server in &plugin.servers {

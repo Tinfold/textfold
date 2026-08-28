@@ -1229,11 +1229,32 @@ textfold:
 | Written in a manifest | Set for it | Lands in |
 |---|---|---|
 | `npm install --global` | `npm_config_prefix` | `tools/bin` |
-| `pip install --user` | `PYTHONUSERBASE` | `tools/bin` |
 | `pipx install` | `PIPX_HOME`, `PIPX_BIN_DIR` | `tools/bin` |
 | `uv tool install` | `UV_TOOL_DIR`, `UV_TOOL_BIN_DIR` | `tools/bin` |
+| `pip install --user` | `PYTHONUSERBASE` | `tools/bin` |
 | `cargo install` | `CARGO_INSTALL_ROOT` | `tools/bin` |
 | `go install` | `GOBIN` | `tools/bin` |
+
+**Python tools get a virtual environment of their own.** `uv tool install` and
+`pipx install` each make one per tool, which is the point of using them: ruff's
+dependencies never meet your project's, and never meet each other's. Where
+neither is available the manifest makes the environment by hand — `python3 -m
+venv`, `pip install` into it, and a link from `tools/bin` — because plain `pip
+install --user` is not an option any more. Every current distribution marks its
+Python as externally managed ([PEP 668](https://peps.python.org/pep-0668/)) and
+refuses outright, and on the machines where it would still work it drops
+packages into one shared user-site directory rather than an environment of
+their own.
+
+```
+tools/uv/ruff/           a virtual environment, include-system-site-packages = false
+tools/venv/ruff/         the same thing, made by hand where there is no uv or pipx
+tools/bin/ruff           a link to whichever of those exists
+```
+
+None of this is the environment your *code* is checked against — that is your
+project's own `.venv`, which textfold finds and points the servers at
+separately. See [Python, and which Python](#python-and-which-python).
 
 Two things cannot be contained, because the program that fetches them has no
 notion of installing anywhere but the system: `brew` and `rustup component
@@ -1461,6 +1482,34 @@ and fifty lines of Python with nothing installed to run it. To try it:
 ```sh
 textfold --install ./examples/cargo
 ```
+
+**Both examples use the installer system**, and they show the two shapes it
+takes. `cargo` says `"needs": ["python3", "cargo"]` and gives no `install` — no
+editor should be fetching somebody a Rust toolchain — so the plugins list says
+`needs cargo` and points at `see`:
+
+```
+get  cargo    Build, check, test and clippy, without leaving the editor
+              needs cargo — see https://rustup.rs
+```
+
+`copilot` does the opposite. It needs an npm package beside its own script, and
+that used to be a line in its README telling you to run `npm install` yourself.
+Now it is a step:
+
+```json
+"needs": ["python3", "npm",
+          "${plugin}/node_modules/@github/copilot-language-server/dist/language-server.js"],
+"install":   [{ "run": ["npm", "install", "--prefix", "${plugin}", "--silent"] }],
+"uninstall": [{ "run": ["rm", "-rf", "${plugin}/node_modules"] }]
+```
+
+`${plugin}` is the directory it has been installed *to*, so the packages land
+beside the copy that will actually run rather than in whatever directory you
+were standing in — and `uninstall-plugin` takes them away again with it. Note
+the third `needs`: a path rather than a program name. A bare name is looked up
+on the `PATH` and has to be runnable; a path only has to be there, because
+`language-server.js` is handed to node and will never be executed directly.
 
 Or, if you are going to be editing it, link it in instead so that your changes
 are the ones that run — `uninstall-plugin` knows the difference and will remove

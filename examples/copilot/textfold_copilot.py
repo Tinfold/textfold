@@ -173,7 +173,7 @@ class Copilot:
         if not os.path.exists(SERVER):
             self.status = "not installed"
             return self.editor.say(
-                "copilot: run `npm install` in the plugin's directory first", kind="bad"
+                "copilot: its language server is missing — textfold --install copilot", kind="bad"
             )
         try:
             self.server = subprocess.Popen(

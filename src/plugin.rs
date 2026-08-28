@@ -1092,6 +1092,7 @@ impl FilePlugin {
                         .run
                         .into_iter()
                         .filter(|word| !word.trim().is_empty())
+                        .map(|word| fill(&word))
                         .collect();
                     if run.is_empty() {
                         problems.push(format!("{id}: a {what} step says nothing to run"));
@@ -1099,8 +1100,8 @@ impl FilePlugin {
                     }
                     Some(Step {
                         about: s.about.unwrap_or_else(|| run.join(" ")),
-                        unless: s.unless.filter(|u| !u.trim().is_empty()),
-                        when: s.when.filter(|w| !w.trim().is_empty()),
+                        unless: s.unless.filter(|u| !u.trim().is_empty()).map(|u| fill(&u)),
+                        when: s.when.filter(|w| !w.trim().is_empty()).map(|w| fill(&w)),
                         os: s
                             .os
                             .map(OneOrMore::into_vec)
@@ -1135,6 +1136,7 @@ impl FilePlugin {
                 .needs
                 .into_iter()
                 .filter(|n| !n.trim().is_empty())
+                .map(|n| fill(&n))
                 .collect(),
             see: self.see.filter(|s| !s.trim().is_empty()),
             install,
