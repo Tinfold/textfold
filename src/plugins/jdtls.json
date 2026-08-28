@@ -35,11 +35,11 @@
           "name": "jdtls",
           "command": "jdtls",
           "roots": [
+            "settings.gradle",
+            "settings.gradle.kts",
             "pom.xml",
             "build.gradle",
             "build.gradle.kts",
-            "settings.gradle",
-            "settings.gradle.kts",
             ".git"
           ],
           "settings": {
@@ -54,7 +54,8 @@
                   "com",
                   "org"
                 ],
-                "guessMethodArguments": true
+                "guessMethodArguments": true,
+                "maxResults": 0
               },
               "signatureHelp": {
                 "enabled": true,
@@ -98,6 +99,14 @@
               },
               "contentProvider": {
                 "preferred": "fernflower"
+              },
+              "project": {
+                "referencedLibraries": {
+                  "include": [
+                    "lib/**/*.jar"
+                  ],
+                  "sources": {}
+                }
               }
             }
           },

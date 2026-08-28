@@ -524,7 +524,7 @@ impl Servers {
                 "workspaceFolders": [{ "uri": uri, "name": root.file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_else(|| "workspace".into()) }],
-                "initializationOptions": filled.init_options.clone().unwrap_or(Value::Null),
+                "initializationOptions": initialization_options(&filled),
                 "capabilities": capabilities(),
             }),
             Ask::Initialize,
@@ -1330,6 +1330,32 @@ fn capabilities() -> Value {
     })
 }
 
+/// What a server is handed in `initializationOptions`.
+///
+/// Its own `init_options`, plus — for a server that asks for anything at all —
+/// its settings under `settings`. That second half is jdtls's doing. Most
+/// servers take their configuration from the `workspace/didChangeConfiguration`
+/// that follows `initialized`, and jdtls accepts that too, but by then it has
+/// already begun importing the project against the defaults, which do not
+/// download sources: the classpath comes out right and every library in it
+/// hovers as a bare signature with no documentation behind it. Handing the
+/// settings over at `initialize` is what every other Java client does.
+///
+/// A server that named no `init_options` is left alone rather than being given
+/// a `settings` it never asked for, because for several of them
+/// `initializationOptions` *is* the configuration — rust-analyzer takes its
+/// own settings there, unwrapped — and a stray key is at best a warning in
+/// their log.
+fn initialization_options(config: &lang::Server) -> Value {
+    let (Some(Value::Object(mut options)), Some(settings)) =
+        (config.init_options.clone(), config.settings.clone())
+    else {
+        return config.init_options.clone().unwrap_or(Value::Null);
+    };
+    options.entry("settings").or_insert(settings);
+    Value::Object(options)
+}
+
 /// Whether a server's configuration mentions a placeholder at all.
 ///
 /// Asked before anything is looked up, because the looking up is a directory
@@ -1643,6 +1669,42 @@ mod tests {
     fn a_uri_that_is_not_a_file_is_not_a_path() {
         assert_eq!(path_of("untitled:Untitled-1"), None);
         assert_eq!(path_of("jdt://contents/rt.jar"), None);
+    }
+
+    #[test]
+    fn jdtls_is_told_its_settings_at_initialize_as_well() {
+        // Not decoration: jdtls imports the project off the back of
+        // `initialize`, and a `downloadSources` that arrives afterwards
+        // arrives too late to put documentation on a library.
+        lang::init();
+        let java = lang::by_name("java").expect("shipped");
+        let config = lang::get(java)
+            .servers
+            .iter()
+            .find(|s| s.command == "jdtls")
+            .expect("shipped")
+            .clone();
+        let options = initialization_options(&config);
+        assert_eq!(
+            options.pointer("/settings/java/maven/downloadSources"),
+            Some(&json!(true)),
+            "jdtls was left to import the project blind: {options}"
+        );
+        assert!(
+            options.pointer("/extendedClientCapabilities").is_some(),
+            "what it already asked for went missing: {options}"
+        );
+    }
+
+    #[test]
+    fn a_server_that_asked_for_no_options_is_given_none() {
+        // rust-analyzer reads `initializationOptions` as its configuration
+        // directly, so a `settings` key posted into it is a stray.
+        lang::init();
+        let rust = lang::by_name("rust").expect("shipped");
+        let config = lang::get(rust).servers[0].clone();
+        assert!(config.settings.is_some());
+        assert_eq!(initialization_options(&config), Value::Null);
     }
 
     #[test]

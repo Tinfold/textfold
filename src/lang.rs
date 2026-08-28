@@ -111,9 +111,10 @@ pub struct Server {
     pub name: String,
     pub command: String,
     pub args: Vec<String>,
-    /// Files that mark the top of a project. The first one found walking up
-    /// from the file being edited is the root the server is told about; a
-    /// server given the wrong root indexes either far too much or nothing.
+    /// Files that mark the top of a project, strongest first — see
+    /// [`project_root`], which is what turns them into the root a server is
+    /// told about. A server given the wrong root indexes either far too much
+    /// or nothing.
     pub roots: Vec<String>,
     /// Handed over in `initializationOptions`.
     pub init_options: Option<serde_json::Value>,
@@ -335,28 +336,56 @@ pub fn names() -> Vec<(LangId, &'static str)> {
         .collect()
 }
 
-/// The directory a language server should be told is the top of the project:
-/// the nearest ancestor of `from` holding one of `markers`.
+/// The marker that means "a project is somewhere at or below here", rather
+/// than "the project is here".
+const REPOSITORY: &str = ".git";
+
+/// The directory a language server should be told is the top of the project.
 ///
 /// A marker is usually a file name, but `"*.sln"` is allowed and means any
 /// file with that extension — which is the only way to say what marks the top
 /// of a C# project, where the file is named after the solution rather than
 /// after the language.
 ///
-/// Falling back to the file's own directory is deliberate. A server pointed at
-/// your home directory will try to index all of it.
+/// The nearest marker above the file is usually the answer, but not when a
+/// stronger one sits higher up. A Maven module's `pom.xml` is a project, and
+/// the aggregator `pom.xml` above it is *the* project: a server handed only
+/// the module gets none of the dependency versions the parent manages, and so
+/// none of the dependencies either — which looks from the inside like a
+/// language server that only knows the standard library. So the walk carries
+/// on past the first hit and takes the topmost directory whose marker ranks
+/// as high as the nearest one's, ranked by the order `markers` are written in.
+/// Gradle is why that is an order and not a sameness: a subproject is marked
+/// by `build.gradle` and the build it belongs to by `settings.gradle`, so the
+/// two have to be comparable.
+///
+/// Two things bound the walk. `.git` only ever stops it, never pulls the root
+/// upwards — one repository can hold many projects, and someone's home
+/// directory can be a repository. And falling back to the file's own directory
+/// is deliberate: a server pointed at your home directory will try to index
+/// all of it.
 pub fn project_root(from: &Path, markers: &[String]) -> PathBuf {
     let start = if from.is_dir() {
         from
     } else {
         from.parent().unwrap_or(Path::new("."))
     };
+    let mut best: Option<(PathBuf, usize)> = None;
     for dir in start.ancestors() {
-        if markers.iter().any(|m| marker_is_in(dir, m)) {
-            return dir.to_path_buf();
+        if let Some(rank) = markers.iter().position(|m| marker_is_in(dir, m)) {
+            let outranks = match &best {
+                None => true,
+                Some((_, nearest)) => rank <= *nearest && markers[rank] != REPOSITORY,
+            };
+            if outranks {
+                best = Some((dir.to_path_buf(), rank));
+            }
+        }
+        if dir.join(REPOSITORY).exists() {
+            break;
         }
     }
-    start.to_path_buf()
+    best.map_or_else(|| start.to_path_buf(), |(dir, _)| dir)
 }
 
 /// Whether `dir` holds `marker`, which is a file name or a `*.ext` pattern.
@@ -904,6 +933,61 @@ mod tests {
         // And an extension nothing has still falls back rather than matching.
         let root = project_root(&deep.join("Widget.cs"), &["*.nope".into()]);
         assert_eq!(root, deep);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_module_of_a_multi_module_build_is_rooted_at_the_build() {
+        // The module has a pom of its own, and it is not the project: the
+        // dependency versions are managed in the aggregator above it.
+        let dir = std::env::temp_dir().join(format!("textfold-maven-{}", std::process::id()));
+        let module = dir.join("services/api");
+        std::fs::create_dir_all(module.join("src/main/java")).unwrap();
+        std::fs::write(dir.join("pom.xml"), "").unwrap();
+        std::fs::write(dir.join("services/pom.xml"), "").unwrap();
+        std::fs::write(module.join("pom.xml"), "").unwrap();
+        let markers = ["pom.xml".to_string(), ".git".to_string()];
+        let root = project_root(&module.join("src/main/java/Api.java"), &markers);
+        assert_eq!(root, dir);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_gradle_subproject_is_rooted_at_the_build_that_owns_it() {
+        // Which needs the markers compared by rank rather than by name: what
+        // marks the subproject and what marks the build are different files.
+        let dir = std::env::temp_dir().join(format!("textfold-gradle-{}", std::process::id()));
+        let module = dir.join("api");
+        std::fs::create_dir_all(&module).unwrap();
+        std::fs::write(dir.join("settings.gradle"), "").unwrap();
+        std::fs::write(dir.join("build.gradle"), "").unwrap();
+        std::fs::write(module.join("build.gradle"), "").unwrap();
+        let markers = ["settings.gradle".to_string(), "build.gradle".to_string()];
+        assert_eq!(project_root(&module.join("Api.java"), &markers), dir);
+        // And a subproject belonging to no build stays where it is.
+        std::fs::remove_file(dir.join("settings.gradle")).unwrap();
+        std::fs::remove_file(dir.join("build.gradle")).unwrap();
+        assert_eq!(project_root(&module.join("Api.java"), &markers), module);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_repository_holding_several_projects_does_not_collapse_into_one() {
+        // `.git` marks where to stop looking, not a project. A crate inside a
+        // monorepo is its own root, and so is one inside a home directory that
+        // someone has run `git init` in.
+        let dir = std::env::temp_dir().join(format!("textfold-mono-{}", std::process::id()));
+        let crate_dir = dir.join("crates/thing");
+        std::fs::create_dir_all(crate_dir.join("src")).unwrap();
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        std::fs::write(crate_dir.join("Cargo.toml"), "").unwrap();
+        let markers = ["Cargo.toml".to_string(), ".git".to_string()];
+        let root = project_root(&crate_dir.join("src/lib.rs"), &markers);
+        assert_eq!(root, crate_dir);
+        // With nothing else to go on, the repository is still the answer.
+        let plain = dir.join("notes");
+        std::fs::create_dir_all(&plain).unwrap();
+        assert_eq!(project_root(&plain.join("README.md"), &markers), dir);
         std::fs::remove_dir_all(&dir).ok();
     }
 
