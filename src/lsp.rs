@@ -15,13 +15,13 @@
 //! that arrives after you have moved on is discarded by whoever asked rather
 //! than by guessing here.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::Sender;
 
 use serde_json::{Value, json};
+
+use crate::rpc::{self, Peer};
 
 use crate::doc::{AppliedEdit, Diagnostic, DocId, Document, Severity, Told};
 use crate::venv;
@@ -32,27 +32,10 @@ use crate::text::Range;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
 pub struct ServerId(pub usize);
 
-/// What came back from a server, on its way to the editor's event loop.
-#[derive(Debug)]
-pub enum Incoming {
-    /// An answer to something we asked.
-    Response {
-        id: i64,
-        result: Result<Value, String>,
-    },
-    /// Something the server volunteered: diagnostics, progress, a log line.
-    Notification { method: String, params: Value },
-    /// Something the server wants from us. Every one of these must be
-    /// answered, including the ones we do not understand, or a server that
-    /// waits for the reply will sit there forever.
-    Request {
-        id: Value,
-        method: String,
-        params: Value,
-    },
-    /// It stopped. The words are for the status line.
-    Exited(String),
-}
+/// What came back from a server. The framing and the three kinds of message
+/// are the same for everything textfold talks to, so they live in `rpc`; this
+/// is here so that the rest of the editor can go on saying `lsp::Incoming`.
+pub use crate::rpc::Incoming;
 
 /// What we asked for, so the answer knows what it is an answer to.
 #[derive(Clone, Debug)]
@@ -187,8 +170,8 @@ pub struct Server {
     /// error message nobody can act on.
     capabilities: Value,
     settings: Option<Value>,
-    child: Option<Child>,
-    stdin: Option<ChildStdin>,
+    /// The process, the pipe to it, and the questions it has not answered yet.
+    rpc: Peer<Ask>,
     /// Files this server has been told about.
     open: HashSet<PathBuf>,
     /// Files opened before it was ready, waiting to be sent.
@@ -199,8 +182,6 @@ pub struct Server {
     pub progress: BTreeMap<String, String>,
     /// The last thing it said about itself, worth a line in the status bar.
     pub message: Option<String>,
-    pending: HashMap<i64, Ask>,
-    next_id: i64,
 }
 
 impl Server {
@@ -254,64 +235,41 @@ impl Server {
             .unwrap_or_default()
     }
 
-    fn send(&mut self, message: &Value) {
-        let Some(stdin) = &mut self.stdin else {
-            return;
-        };
-        let body = message.to_string();
-        // The header is the whole framing: a byte count, a blank line, then
-        // that many bytes. Getting it wrong desynchronises the stream for
-        // good, which is why it is written in exactly one place.
-        let framed = format!("Content-Length: {}\r\n\r\n{body}", body.len());
-        if stdin.write_all(framed.as_bytes()).is_err() || stdin.flush().is_err() {
-            self.state = State::Dead("stopped listening".into());
-            self.stdin = None;
+    /// Everything that writes goes through here, so that a pipe that has
+    /// closed under us is noticed in one place rather than four.
+    fn note_failure(&mut self) {
+        if let Some(why) = self.rpc.take_failure() {
+            self.state = State::Dead(why);
         }
     }
 
     fn notify(&mut self, method: &str, params: Value) {
-        self.send(&json!({"jsonrpc": "2.0", "method": method, "params": params}));
+        self.rpc.notify(method, params);
+        self.note_failure();
     }
 
     /// Ask something, and write down what the answer will mean.
     fn request(&mut self, method: &str, params: Value, ask: Ask) -> i64 {
-        self.next_id += 1;
-        let id = self.next_id;
-        self.pending.insert(id, ask);
-        self.send(&json!({
-            "jsonrpc": "2.0", "id": id, "method": method, "params": params
-        }));
+        let id = self.rpc.request(method, params, ask);
+        self.note_failure();
         id
     }
 
     fn answer(&mut self, id: Value, result: Value) {
-        self.send(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
+        self.rpc.answer(id, result);
+        self.note_failure();
     }
 
     /// Take back what an answer was for. Called once per reply, so a
     /// duplicate answer from a confused server is ignored rather than acted
     /// on twice.
     pub fn claim(&mut self, id: i64) -> Option<Ask> {
-        self.pending.remove(&id)
+        self.rpc.claim(id)
     }
 
     /// Stop it, politely and then not.
     fn shutdown(&mut self) {
-        self.send(&json!({"jsonrpc": "2.0", "id": 0, "method": "shutdown"}));
-        self.notify("exit", json!(null));
-        self.stdin = None;
-        if let Some(child) = &mut self.child {
-            // A server that will not go is a server that gets killed. Waiting
-            // on a wedged process is how editors hang on quit.
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            match child.try_wait() {
-                Ok(Some(_)) => {}
-                _ => {
-                    child.kill().ok();
-                    child.wait().ok();
-                }
-            }
-        }
+        self.rpc.stop();
     }
 }
 
@@ -472,56 +430,26 @@ impl Servers {
     fn start(&mut self, config: &lang::Server, root: &Path) -> Result<Server, String> {
         let id = ServerId(self.servers.len());
         let filled = self.fill(config, root);
-        let mut command = Command::new(&config.command);
-        command
-            .args(&filled.args)
-            .current_dir(root)
-            .envs(&filled.env)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-
-        let mut child = command.spawn().map_err(|e| {
+        let rpc = Peer::start(
+            rpc::Spawn {
+                command: &config.command,
+                args: &filled.args,
+                root,
+                env: &filled.env,
+                label: &config.command,
+            },
+            self.tx.clone(),
+            move |incoming| crate::app::Event::Lsp(id, incoming),
+        )
+        .map_err(|e| match e {
             // The common case by far is that it is not installed, and saying
             // so is more use than an errno.
-            if e.kind() == std::io::ErrorKind::NotFound {
-                format!("{} is not installed — code intelligence is off for now", config.command)
-            } else {
-                format!("{}: {e}", config.command)
-            }
+            rpc::NotStarted::Missing => format!(
+                "{} is not installed — code intelligence is off for now",
+                config.command
+            ),
+            rpc::NotStarted::Failed(why) => why,
         })?;
-
-        let taken = child.stdin.take().zip(child.stdout.take());
-        let Some((stdin, stdout)) = taken else {
-            child.kill().ok();
-            return Err(format!("{} would not talk", config.command));
-        };
-        let stderr = child.stderr.take();
-
-        let tx = self.tx.clone();
-        if std::thread::Builder::new()
-            .name(format!("lsp-{}", config.command))
-            .spawn(move || read_messages(id, stdout, tx))
-            .is_err()
-        {
-            child.kill().ok();
-            return Err(format!("could not listen to {}", config.command));
-        }
-
-        // A server's complaints go somewhere a person can find them rather
-        // than into the terminal underneath the editor, which would scribble
-        // over the screen.
-        if let Some(stderr) = stderr {
-            let name = config.command.clone();
-            std::thread::Builder::new()
-                .name(format!("lsp-err-{name}"))
-                .spawn(move || {
-                    for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                        log(&name, &line);
-                    }
-                })
-                .ok();
-        }
 
         let mut server = Server {
             id,
@@ -530,14 +458,11 @@ impl Servers {
             state: State::Starting,
             capabilities: Value::Null,
             settings: filled.settings.clone(),
-            child: Some(child),
-            stdin: Some(stdin),
+            rpc,
             open: HashSet::new(),
             queued: Vec::new(),
             progress: BTreeMap::new(),
             message: None,
-            pending: HashMap::new(),
-            next_id: 0,
         };
 
         let uri = uri_of(root);
@@ -1217,7 +1142,7 @@ impl Servers {
     /// Stop everything, on the way out.
     pub fn shutdown_all(&mut self) {
         for server in &mut self.servers {
-            if server.stdin.is_some() {
+            if server.rpc.is_writable() {
                 server.shutdown();
             }
         }
@@ -1240,110 +1165,11 @@ impl Servers {
     pub fn died(&mut self, id: ServerId, why: String) {
         if let Some(server) = self.get_mut(id) {
             server.state = State::Dead(why);
-            server.stdin = None;
+            server.rpc.close();
             server.open.clear();
             server.progress.clear();
             let key = (server.name.clone(), server.root.clone());
             self.failed.insert(key);
-        }
-    }
-}
-
-/// Read framed messages off a server's output until it stops.
-///
-/// The only thing this thread does. It never touches editor state and never
-/// waits for it, which is what keeps a wedged server from being a wedged
-/// editor.
-fn read_messages(id: ServerId, stdout: std::process::ChildStdout, tx: Sender<crate::app::Event>) {
-    let mut reader = BufReader::new(stdout);
-    loop {
-        // Headers, until a blank line. `Content-Length` is the only one that
-        // matters; the rest are read and dropped.
-        let mut length: Option<usize> = None;
-        loop {
-            let mut line = String::new();
-            match reader.read_line(&mut line) {
-                Ok(0) => {
-                    tx.send(crate::app::Event::Lsp(id, Incoming::Exited("stopped".into())))
-                        .ok();
-                    return;
-                }
-                Ok(_) => {}
-                Err(e) => {
-                    tx.send(crate::app::Event::Lsp(
-                        id,
-                        Incoming::Exited(format!("stopped: {e}")),
-                    ))
-                    .ok();
-                    return;
-                }
-            }
-            let line = line.trim_end();
-            if line.is_empty() {
-                break;
-            }
-            if let Some(rest) = line
-                .strip_prefix("Content-Length:")
-                .or_else(|| line.strip_prefix("content-length:"))
-            {
-                length = rest.trim().parse().ok();
-            }
-        }
-        let Some(length) = length else {
-            // No length is not a message we can find the end of, and guessing
-            // would corrupt everything after it.
-            tx.send(crate::app::Event::Lsp(
-                id,
-                Incoming::Exited("sent something that was not a message".into()),
-            ))
-            .ok();
-            return;
-        };
-
-        let mut body = vec![0u8; length];
-        if reader.read_exact(&mut body).is_err() {
-            tx.send(crate::app::Event::Lsp(id, Incoming::Exited("stopped".into())))
-                .ok();
-            return;
-        }
-        let Ok(message) = serde_json::from_slice::<Value>(&body) else {
-            // One unreadable message is not a reason to stop listening.
-            continue;
-        };
-
-        let incoming = if let Some(method) = message.get("method").and_then(Value::as_str) {
-            let params = message.get("params").cloned().unwrap_or(Value::Null);
-            match message.get("id") {
-                Some(request_id) => Incoming::Request {
-                    id: request_id.clone(),
-                    method: method.to_string(),
-                    params,
-                },
-                None => Incoming::Notification {
-                    method: method.to_string(),
-                    params,
-                },
-            }
-        } else if let Some(response_id) = message.get("id").and_then(Value::as_i64) {
-            let result = match message.get("error") {
-                Some(error) => Err(error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("something went wrong")
-                    .to_string()),
-                None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
-            };
-            Incoming::Response {
-                id: response_id,
-                result,
-            }
-        } else {
-            continue;
-        };
-
-        if tx.send(crate::app::Event::Lsp(id, incoming)).is_err() {
-            // The editor has gone. So should we.
-            return;
         }
     }
 }
@@ -1568,37 +1394,9 @@ pub fn point_of(value: &Value) -> Option<(usize, usize)> {
     ))
 }
 
-/// Where a server's complaints go. A file, because the screen belongs to the
-/// editor and the terminal underneath it belongs to whoever started us.
-fn log(name: &str, line: &str) {
-    use std::sync::Mutex;
-    static FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
-    let Ok(mut file) = FILE.lock() else { return };
-    if file.is_none() {
-        let Some(path) = log_path() else { return };
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).ok();
-        }
-        *file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok();
-    }
-    if let Some(file) = file.as_mut() {
-        writeln!(file, "[{name}] {line}").ok();
-    }
-}
-
-/// Where the log is, so that the status line can tell you.
-pub fn log_path() -> Option<PathBuf> {
-    Some(
-        dirs::state_dir()
-            .or_else(dirs::cache_dir)?
-            .join("textfold")
-            .join("lsp.log"),
-    )
-}
+/// Where a server's complaints go, so that the status line can tell you.
+/// Shared with everything else textfold starts — see [`crate::rpc::log_path`].
+pub use crate::rpc::log_path;
 
 #[cfg(test)]
 mod tests {

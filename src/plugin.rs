@@ -130,6 +130,159 @@ impl Tool {
     }
 }
 
+/// A long-running program a plugin brings with it.
+///
+/// The difference between this and a [`Tool`] is memory. A tool is started,
+/// prints, and dies, which covers a formatter and a linter and nothing that
+/// has to hold anything between one keystroke and the next. A host stays up:
+/// it can keep a parsed board description, a connection to a debug probe, or
+/// a build that is still running, and it can volunteer something without
+/// being asked first.
+///
+/// It talks JSON-RPC over its own standard input and output, which is why a
+/// plugin can be written in any language — see [`crate::host`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Host {
+    pub command: String,
+    pub args: Vec<String>,
+    /// Files that mark the top of the project it should be started in. One
+    /// process per root, as with a language server.
+    pub roots: Vec<String>,
+    /// What has to happen before it is worth starting. Empty means "when one
+    /// of its commands is run", which is the least surprising default: a
+    /// plugin nobody has asked anything of is a plugin that need not run.
+    pub activate: Vec<Activate>,
+    /// Which languages it wants to be told about the text of. Empty means
+    /// none at all — a plugin that never asked receives no buffer traffic.
+    pub wants_buffers: Vec<String>,
+    pub env: BTreeMap<String, String>,
+    /// Whatever the plugin wants to be told about itself, handed over at
+    /// `initialize` and never looked inside. A plugin's own settings are the
+    /// plugin's business; the editor's job is to carry them.
+    pub settings: Option<serde_json::Value>,
+}
+
+/// What makes a host worth starting.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Activate {
+    /// A file of this language was opened.
+    Language(String),
+    /// A file whose name matches this was opened. `*` stands for anything
+    /// within a path segment and `**` for anything at all, so `**/*.ioc`
+    /// finds one anywhere in the tree and `Cargo.toml` only at the root.
+    File(String),
+    /// One of the plugin's own commands was run. Always allowed, whether or
+    /// not it is written down: a command in the palette that quietly does
+    /// nothing would be a bug, not a configuration.
+    Command,
+}
+
+impl Activate {
+    fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if let Some(name) = text.strip_prefix("language:") {
+            return Some(Activate::Language(name.trim().to_lowercase()));
+        }
+        if let Some(glob) = text.strip_prefix("file:") {
+            return Some(Activate::File(glob.trim().to_string()));
+        }
+        match text {
+            "command" => Some(Activate::Command),
+            _ => None,
+        }
+    }
+}
+
+/// One command a plugin contributes.
+///
+/// Declared in the manifest rather than announced by the running program, so
+/// that it is in the palette and bindable before the program has ever been
+/// started. That is what makes starting on demand possible at all: running a
+/// command is one of the things that starts a host, and you cannot run a
+/// command nobody can see.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Command {
+    /// `cargo/test`, which is also the command name a key binds to.
+    pub id: String,
+    /// `test`.
+    pub name: String,
+    pub about: String,
+    /// Which plugin to send it to.
+    pub plugin: String,
+    pub behaviour: crate::cmd::Behaviour,
+    /// Which languages it is offered for. Empty means any file.
+    pub languages: Vec<String>,
+    /// Whether running it opens a panel rather than telling the plugin to do
+    /// something. A panel is declared in the manifest like a command because
+    /// that is what it is from the outside: a row in the palette, a key you
+    /// can bind, a switch in the plugins list.
+    pub opens_panel: bool,
+}
+
+impl Command {
+    /// Whether it is for this language.
+    pub fn wants(&self, language: &str) -> bool {
+        self.languages.is_empty() || self.languages.iter().any(|l| l == language)
+    }
+}
+
+/// Whether a path matches one of the patterns a host activates on.
+///
+/// Small on purpose: `*` within a segment, `**` across them, and everything
+/// else literal. A pattern with no `/` in it is matched against the file name
+/// alone, because `"Cargo.toml"` plainly means that file and not only one in
+/// the directory the editor happens to have been started in.
+pub fn matches_glob(pattern: &str, path: &std::path::Path) -> bool {
+    let text = match pattern.contains('/') {
+        true => path.to_string_lossy().into_owned(),
+        false => path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+    };
+    glob_here(pattern.as_bytes(), text.as_bytes())
+}
+
+fn glob_here(pattern: &[u8], text: &[u8]) -> bool {
+    match pattern.first() {
+        None => text.is_empty(),
+        Some(b'*') => {
+            // `**` crosses directory separators; a single `*` stops at one.
+            // The trailing `/` of `**/` is optional so that `**/*.rs` also
+            // finds a file sitting at the top.
+            let (rest, crosses) = match pattern.get(1) {
+                Some(b'*') => {
+                    let after = &pattern[2..];
+                    // The `/` of `**/` is eaten with it, so that `**/*.rs`
+                    // finds a file at the top of the tree as well as one
+                    // further down.
+                    match after.first() {
+                        Some(b'/') => (&after[1..], true),
+                        _ => (after, true),
+                    }
+                }
+                _ => (&pattern[1..], false),
+            };
+            if glob_here(rest, text) {
+                return true;
+            }
+            for at in 0..text.len() {
+                if !crosses && text[at] == b'/' {
+                    return false;
+                }
+                if glob_here(rest, &text[at + 1..]) {
+                    return true;
+                }
+            }
+            false
+        }
+        Some(&c) => match text.first() {
+            Some(&t) if t == c => glob_here(&pattern[1..], &text[1..]),
+            _ => false,
+        },
+    }
+}
+
 /// One plugin.
 pub struct Plugin {
     /// What the settings file and the list call it. Unique: a plugin of yours
@@ -147,6 +300,13 @@ pub struct Plugin {
     pub servers: Vec<ServerEntry>,
     /// Programs it can run for you, each a command of its own.
     pub tools: Vec<Tool>,
+    /// The program it brings with it, if it brings one.
+    pub host: Option<Host>,
+    /// Commands that program answers to. Only meaningful with a `host`: a
+    /// command with nothing to send it to is dropped when the manifest is
+    /// read, with a complaint, rather than sitting in the palette doing
+    /// nothing.
+    pub commands: Vec<Command>,
     /// Sets of colours it brings, by name, in the shape a theme file is in.
     pub themes: BTreeMap<String, serde_json::Value>,
     /// Keys it would like bound, by command name. What you have set in your
@@ -299,7 +459,9 @@ fn load() -> Registry {
     for (id, text) in BUILT_IN {
         let file: FilePlugin = serde_json::from_str(text)
             .expect("the plugins textfold ships are checked by a test");
-        it.add(file.into_plugin(id, Source::BuiltIn));
+        let (plugin, problems) = file.into_plugin(id, Source::BuiltIn);
+        debug_assert!(problems.is_empty(), "{id}: {problems:?}");
+        it.add(plugin);
     }
 
     let Some(dir) = crate::config::config_dir() else {
@@ -308,7 +470,11 @@ fn load() -> Registry {
     for (id, path) in manifests(&dir.join("plugins")) {
         match std::fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str::<FilePlugin>(&text) {
-                Ok(file) => it.add(file.into_plugin(&id, Source::File(path))),
+                Ok(file) => {
+                    let (plugin, problems) = file.into_plugin(&id, Source::File(path));
+                    it.problems.extend(problems);
+                    it.add(plugin);
+                }
                 Err(e) => it.problems.push(format!("{id}: {}", said(&e))),
             },
             Err(e) => it.problems.push(format!("{}: {e}", path.display())),
@@ -323,7 +489,8 @@ fn load() -> Registry {
     if let Ok(text) = std::fs::read_to_string(&path) {
         match serde_json::from_str::<FilePlugin>(&text) {
             Ok(file) => {
-                let mut plugin = file.into_plugin("local", Source::File(path));
+                let (mut plugin, problems) = file.into_plugin("local", Source::File(path));
+                it.problems.extend(problems);
                 plugin.name = "Your languages.json".into();
                 plugin.about.get_or_insert_with(|| {
                     "What your own languages.json says, on top of the rest".into()
@@ -406,9 +573,51 @@ struct FilePlugin {
     #[serde(default)]
     tools: Vec<FileTool>,
     #[serde(default)]
+    host: Option<FileHost>,
+    #[serde(default)]
+    commands: Vec<FileCommand>,
+    #[serde(default)]
+    panels: Vec<FileCommand>,
+    #[serde(default)]
     themes: BTreeMap<String, serde_json::Value>,
     #[serde(default)]
     keys: BTreeMap<String, Vec<String>>,
+}
+
+/// A host, as its file writes it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileHost {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    roots: Vec<String>,
+    #[serde(default)]
+    activate: Vec<String>,
+    #[serde(default)]
+    wants_buffers: Vec<String>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    #[serde(default)]
+    settings: Option<serde_json::Value>,
+}
+
+/// A contributed command, as its file writes it.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FileCommand {
+    name: String,
+    #[serde(default)]
+    about: Option<String>,
+    /// `"passive"`, `"edits"` or `"types"`. Absent means passive, since a
+    /// command that changes the text is the rarer kind and saying so should
+    /// be deliberate — the answer decides whether it may run on a read-only
+    /// file, and guessing wrong the other way would let one through.
+    #[serde(default)]
+    behaviour: Option<String>,
+    #[serde(default)]
+    languages: Vec<String>,
 }
 
 /// A tool, as its file writes it.
@@ -438,7 +647,11 @@ struct FileTool {
 }
 
 impl FilePlugin {
-    fn into_plugin(self, fallback_id: &str, source: Source) -> Plugin {
+    /// Turn a manifest into a plugin, along with anything wrong with it worth
+    /// telling somebody about. A manifest is written by hand, so a mistake in
+    /// one is a thing to say out loud rather than a thing to swallow.
+    fn into_plugin(self, fallback_id: &str, source: Source) -> (Plugin, Vec<String>) {
+        let mut problems = Vec::new();
         let id = self
             .id
             .map(|id| id.trim().to_lowercase())
@@ -491,7 +704,78 @@ impl FilePlugin {
                 }
             })
             .collect();
-        Plugin {
+        // A plugin's program lives beside its manifest, but it is *run* in
+        // the root of the project it is being asked about — so a plugin has no
+        // way to name its own script without this. `${plugin}` is that: the
+        // directory the manifest was read from.
+        let beside = match &source {
+            Source::File(path) => path.parent().map(|d| d.display().to_string()),
+            Source::BuiltIn => None,
+        };
+        let fill = |text: &str| match &beside {
+            Some(dir) => text.replace("${plugin}", dir),
+            None => text.to_string(),
+        };
+
+        let host = self.host.map(|h| Host {
+            activate: h
+                .activate
+                .iter()
+                .filter_map(|text| match Activate::parse(text) {
+                    Some(one) => Some(one),
+                    None => {
+                        problems.push(format!("{id}: {text:?} is not something to start on"));
+                        None
+                    }
+                })
+                .collect(),
+            roots: if h.roots.is_empty() {
+                vec![".git".into()]
+            } else {
+                h.roots
+            },
+            wants_buffers: h.wants_buffers.iter().map(|l| l.to_lowercase()).collect(),
+            command: fill(&h.command),
+            args: h.args.iter().map(|a| fill(a)).collect(),
+            env: h.env.iter().map(|(k, v)| (k.clone(), fill(v))).collect(),
+            settings: h.settings,
+        });
+
+        let mut commands = Vec::new();
+        // Panels first, so that a plugin declaring both keeps them apart in
+        // the palette by name rather than by which list it wrote them in.
+        let declared = self
+            .commands
+            .into_iter()
+            .map(|c| (c, false))
+            .chain(self.panels.into_iter().map(|c| (c, true)));
+        for (c, opens_panel) in declared {
+            let name = c.name.trim().to_lowercase();
+            if name.is_empty() {
+                continue;
+            }
+            // A command with nothing to send it to would sit in the palette
+            // and do nothing, which is worse than not being there.
+            if host.is_none() {
+                problems.push(format!("{id}: {name} has no host to run it"));
+                continue;
+            }
+            commands.push(Command {
+                opens_panel,
+                behaviour: match c.behaviour.as_deref().map(str::trim) {
+                    Some("edits") => crate::cmd::Behaviour::Edits,
+                    Some("types") => crate::cmd::Behaviour::Types,
+                    _ => crate::cmd::Behaviour::Passive,
+                },
+                about: c.about.unwrap_or_else(|| format!("Run {name}")),
+                languages: c.languages.iter().map(|l| l.to_lowercase()).collect(),
+                id: format!("{id}/{name}"),
+                plugin: id.clone(),
+                name,
+            });
+        }
+
+        let plugin = Plugin {
             name: self.name.unwrap_or_else(|| id.clone()),
             about: self.about,
             on_by_default: self.enabled.unwrap_or(true),
@@ -500,9 +784,12 @@ impl FilePlugin {
             keys: self.keys,
             servers,
             tools,
+            host,
+            commands,
             source,
             id,
-        }
+        };
+        (plugin, problems)
     }
 }
 
@@ -540,10 +827,10 @@ mod tests {
         };
         let ship: FilePlugin =
             serde_json::from_str(r#"{"id":"zig","name":"Zig","languages":{}}"#).unwrap();
-        registry.add(ship.into_plugin("zig", Source::BuiltIn));
+        registry.add(ship.into_plugin("zig", Source::BuiltIn).0);
         let mine: FilePlugin =
             serde_json::from_str(r#"{"id":"zig","name":"My Zig","languages":{}}"#).unwrap();
-        registry.add(mine.into_plugin("zig", Source::File(PathBuf::from("/tmp/zig.json"))));
+        registry.add(mine.into_plugin("zig", Source::File(PathBuf::from("/tmp/zig.json"))).0);
         assert_eq!(registry.plugins.len(), 1);
         assert_eq!(registry.plugins[0].name, "My Zig");
     }
@@ -589,7 +876,8 @@ mod tests {
                  {"name":"tests","command":"pytest","output":"show"}]}"#,
         )
         .unwrap();
-        let plugin = file.into_plugin("pytools", Source::BuiltIn);
+        let (plugin, problems) = file.into_plugin("pytools", Source::BuiltIn);
+        assert!(problems.is_empty(), "{problems:?}");
 
         let ids: Vec<&str> = plugin.tools.iter().map(|t| t.id.as_str()).collect();
         assert_eq!(ids, ["pytools/fmt", "pytools/lint", "pytools/tests"]);
@@ -618,15 +906,113 @@ mod tests {
             r#"{"id":"p","tools":[{"name":"t","command":"c","languages":["Python"]}]}"#,
         )
         .unwrap();
-        let plugin = file.into_plugin("p", Source::BuiltIn);
+        let (plugin, _) = file.into_plugin("p", Source::BuiltIn);
         assert!(plugin.tools[0].wants("python"), "the case should not matter");
         assert!(!plugin.tools[0].wants("rust"));
     }
 
     #[test]
+    fn a_plugin_with_a_program_of_its_own_says_what_starts_it() {
+        let file: FilePlugin = serde_json::from_str(
+            r#"{"id":"stm32",
+                "host":{"command":"python3","args":["-m","stm"],
+                        "activate":["file:**/*.ioc","language:C","command"],
+                        "wants_buffers":["C"]},
+                "commands":[{"name":"Build","about":"Build it","languages":["C"]}]}"#,
+        )
+        .unwrap();
+        let (plugin, problems) = file.into_plugin("stm32", Source::BuiltIn);
+        assert!(problems.is_empty(), "{problems:?}");
+
+        let host = plugin.host.expect("it brought a program");
+        assert_eq!(
+            host.activate,
+            [
+                Activate::File("**/*.ioc".into()),
+                // Written however you like and read the one way, as
+                // everywhere else a language is named.
+                Activate::Language("c".into()),
+                Activate::Command,
+            ]
+        );
+        assert_eq!(host.wants_buffers, ["c"]);
+        // Nothing said about roots means the top of the repository, which is
+        // the answer for a plugin that has not thought about it.
+        assert_eq!(host.roots, [".git"]);
+
+        assert_eq!(plugin.commands.len(), 1);
+        assert_eq!(plugin.commands[0].id, "stm32/build");
+        assert_eq!(plugin.commands[0].plugin, "stm32");
+        // Passive unless it says otherwise: the answer decides whether it may
+        // run on a read-only file, and guessing the other way lets one
+        // through.
+        assert_eq!(plugin.commands[0].behaviour, crate::cmd::Behaviour::Passive);
+        assert!(plugin.commands[0].wants("c"));
+        assert!(!plugin.commands[0].wants("rust"));
+    }
+
+    #[test]
+    fn a_plugin_can_name_its_own_script_without_knowing_where_it_is_installed() {
+        // It runs in the project root, not beside its manifest, so without
+        // this a plugin could not point at the program it ships with.
+        let file: FilePlugin = serde_json::from_str(
+            r#"{"id":"p","host":{"command":"python3","args":["${plugin}/run.py"]}}"#,
+        )
+        .unwrap();
+        let (plugin, _) = file.into_plugin(
+            "p",
+            Source::File(PathBuf::from("/home/me/.config/textfold/plugins/p/plugin.json")),
+        );
+        let host = plugin.host.expect("it brought a program");
+        assert_eq!(
+            host.args,
+            ["/home/me/.config/textfold/plugins/p/run.py".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_command_with_nothing_to_run_it_is_dropped_and_said_so() {
+        // It would otherwise sit in the palette looking like a command and do
+        // nothing at all, which is worse than not being there.
+        let file: FilePlugin =
+            serde_json::from_str(r#"{"id":"p","commands":[{"name":"go"}]}"#).unwrap();
+        let (plugin, problems) = file.into_plugin("p", Source::BuiltIn);
+        assert!(plugin.commands.is_empty());
+        assert_eq!(problems, ["p: go has no host to run it"]);
+    }
+
+    #[test]
+    fn something_to_start_on_that_nobody_understands_is_a_complaint() {
+        let file: FilePlugin = serde_json::from_str(
+            r#"{"id":"p","host":{"command":"x","activate":["whenever"]}}"#,
+        )
+        .unwrap();
+        let (plugin, problems) = file.into_plugin("p", Source::BuiltIn);
+        assert!(plugin.host.expect("still a host").activate.is_empty());
+        assert_eq!(problems, [r#"p: "whenever" is not something to start on"#]);
+    }
+
+    #[test]
+    fn a_glob_matches_the_way_a_person_writing_one_would_expect() {
+        let path = std::path::Path::new("/home/me/board/Core/Src/main.c");
+        // A pattern with no slash is about the file's name, wherever it is.
+        assert!(matches_glob("*.c", path));
+        assert!(matches_glob("main.c", path));
+        assert!(!matches_glob("*.h", path));
+        // `**` crosses directories; a single `*` does not.
+        assert!(matches_glob("**/Src/*.c", path));
+        assert!(!matches_glob("/home/*/main.c", path));
+        assert!(matches_glob("/home/**/main.c", path));
+        // And `**/` finds one sitting at the top as well as one further down.
+        assert!(matches_glob("**/*.c", std::path::Path::new("main.c")));
+        assert!(matches_glob("Cargo.toml", std::path::Path::new("/p/Cargo.toml")));
+        assert!(!matches_glob("/p/Cargo.toml", std::path::Path::new("/q/Cargo.toml")));
+    }
+
+    #[test]
     fn an_id_that_is_not_written_down_is_the_file_it_came_from() {
         let file: FilePlugin = serde_json::from_str(r#"{"languages":{}}"#).unwrap();
-        let plugin = file.into_plugin("Zig", Source::BuiltIn);
+        let (plugin, _) = file.into_plugin("Zig", Source::BuiltIn);
         assert_eq!(plugin.id, "zig");
     }
 }

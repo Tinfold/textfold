@@ -176,6 +176,48 @@ impl Key {
         out
     }
 
+    /// How this keystroke is written in a settings file: `ctrl-s`, `f6`, `r`.
+    ///
+    /// The inverse of [`Key::parse`], and not the same as [`Key::show`] —
+    /// `show` is for a person reading a menu and has arrows in it, this is for
+    /// a plugin matching on what was pressed, and a plugin author matching on
+    /// the spelling they would have used in their own manifest is one thing
+    /// fewer to look up.
+    pub fn spelled(&self) -> String {
+        let mut out = String::new();
+        if self.mods.contains(KeyModifiers::CONTROL) {
+            out.push_str("ctrl-");
+        }
+        if self.mods.contains(KeyModifiers::ALT) {
+            out.push_str("alt-");
+        }
+        let shifted_letter = matches!(self.code, KeyCode::Char(c) if c.is_uppercase());
+        if self.mods.contains(KeyModifiers::SHIFT) || shifted_letter {
+            out.push_str("shift-");
+        }
+        match self.code {
+            KeyCode::Char(' ') => out.push_str("space"),
+            KeyCode::Char(c) => out.extend(c.to_lowercase()),
+            KeyCode::Enter => out.push_str("enter"),
+            KeyCode::Tab => out.push_str("tab"),
+            KeyCode::Esc => out.push_str("esc"),
+            KeyCode::Backspace => out.push_str("backspace"),
+            KeyCode::Delete => out.push_str("delete"),
+            KeyCode::Insert => out.push_str("insert"),
+            KeyCode::Left => out.push_str("left"),
+            KeyCode::Right => out.push_str("right"),
+            KeyCode::Up => out.push_str("up"),
+            KeyCode::Down => out.push_str("down"),
+            KeyCode::Home => out.push_str("home"),
+            KeyCode::End => out.push_str("end"),
+            KeyCode::PageUp => out.push_str("pageup"),
+            KeyCode::PageDown => out.push_str("pagedown"),
+            KeyCode::F(n) => out.push_str(&format!("f{n}")),
+            other => out.push_str(&format!("{other:?}").to_lowercase()),
+        }
+        out
+    }
+
     /// The character this keystroke would type, if it would type one. A key
     /// with Ctrl or Alt on it is a command, not a character; Shift is already
     /// in the character itself.
@@ -370,8 +412,13 @@ impl Default for Keys {
 }
 
 impl Keys {
-    /// The scheme, with `overrides` — command name to list of keys — on top.
-    pub fn new(overrides: &BTreeMap<String, Vec<String>>) -> Self {
+    /// Just the scheme textfold ships, with nothing on top of it.
+    ///
+    /// Split out from [`Keys::new`] because "what the editor itself binds" is
+    /// a different question from "what is bound on this machine", and a test
+    /// asking the first one should not get a different answer depending on
+    /// which plugins the person running it happens to have installed.
+    fn built_in() -> Self {
         let mut keys = Self {
             map: HashMap::new(),
             shown: BTreeMap::new(),
@@ -389,6 +436,12 @@ impl Keys {
                 }
             }
         }
+        keys
+    }
+
+    /// The scheme, with `overrides` — command name to list of keys — on top.
+    pub fn new(overrides: &BTreeMap<String, Vec<String>>) -> Self {
+        let mut keys = Self::built_in();
         // What the plugins would like bound. Only where the key is going
         // spare: a plugin gets to suggest a key, not to take one. A plugin
         // that quietly rebound Ctrl-S would be a plugin nobody could install
@@ -662,8 +715,23 @@ mod tests {
     }
 
     #[test]
+    fn a_key_is_spelled_the_way_a_settings_file_spells_it() {
+        // Which means it reads back: whatever a plugin is told was pressed,
+        // it could have written in its own manifest to ask for.
+        for text in ["ctrl-s", "alt-shift-up", "f12", "enter", "r", "space", "ctrl-."] {
+            let key = Key::parse(text).unwrap_or_else(|| panic!("{text} should parse"));
+            assert_eq!(key.spelled(), text);
+            assert_eq!(Key::parse(&key.spelled()), Some(key), "{text} did not read back");
+        }
+        // A capital letter is shift, said the one way rather than two.
+        assert_eq!(Key::parse("K").map(|k| k.spelled()), Some("shift-k".into()));
+    }
+
+    #[test]
     fn a_plugin_may_have_the_keys_nobody_else_wanted() {
-        let mut keys = Keys::default();
+        // The built-ins alone: whether F6 is spare must not depend on which
+        // plugins the person running the tests has installed.
+        let mut keys = Keys::built_in();
         let taken = Key::parse("ctrl-s").expect("a key");
         let spare = Key::parse("f6").expect("a key");
         let was = keys.lookup(taken);
@@ -682,7 +750,7 @@ mod tests {
 
     #[test]
     fn what_you_bind_yourself_beats_what_a_plugin_suggested() {
-        let mut keys = Keys::default();
+        let mut keys = Keys::built_in();
         let spare = Key::parse("f6").expect("a key");
         keys.suggest(spare, Cmd::ABOUT);
         // Which is what an override does: `bind`, not `suggest`.

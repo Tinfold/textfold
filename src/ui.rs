@@ -65,6 +65,11 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(at) = cursor {
         frame.set_cursor_position(at);
     }
+    // Where the caret ended up, written down for whatever needs to open
+    // beside it — filled in by the drawing every frame, the way a menu's own
+    // area and the tab positions are, so that what opens next to the cursor
+    // opens next to where the cursor actually is.
+    app.caret = cursor.map(|at| (at.x, at.y));
 }
 
 /// Work out where each pane goes, and how wide its line numbers are.
@@ -145,6 +150,35 @@ fn rule_width(panes: u16) -> u16 {
 
 /// Draw one pane, and say where the terminal's own cursor should go if this is
 /// the pane with the focus.
+/// The colours tree-sitter worked out for the lines on screen.
+fn syntax_spans(
+    doc: &crate::doc::Document,
+    from_char: usize,
+    to_char: usize,
+) -> Vec<(Range, crate::theme::Role)> {
+    doc.syntax
+        .as_ref()
+        .map(|syntax| {
+            syntax
+                .highlights(
+                    &doc.rope,
+                    doc.rope.char_to_byte(from_char)..doc.rope.char_to_byte(to_char),
+                )
+                .into_iter()
+                .map(|(bytes, role)| {
+                    (
+                        Range::new(
+                            doc.rope.byte_to_char(bytes.start),
+                            doc.rope.byte_to_char(bytes.end),
+                        ),
+                        role,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn draw_pane(frame: &mut Frame, app: &App, index: usize, ground: Color) -> Option<Position> {
     let view = &app.panes[index];
     let doc = app.doc(view.doc)?;
@@ -173,28 +207,18 @@ fn draw_pane(frame: &mut Frame, app: &App, index: usize, ground: Color) -> Optio
     } else {
         doc.len_chars()
     };
-    let spans: Vec<(Range, crate::theme::Role)> = doc
-        .syntax
-        .as_ref()
-        .map(|syntax| {
-            syntax
-                .highlights(
-                    &doc.rope,
-                    doc.rope.char_to_byte(from_char)..doc.rope.char_to_byte(to_char),
-                )
-                .into_iter()
-                .map(|(bytes, role)| {
-                    (
-                        Range::new(
-                            doc.rope.byte_to_char(bytes.start),
-                            doc.rope.byte_to_char(bytes.end),
-                        ),
-                        role,
-                    )
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    // A panel's colours come from the plugin that filled it, and stand in for
+    // the tree-sitter highlights a panel has none of. Same shape, so nothing
+    // below this line knows the difference.
+    let spans: Vec<(Range, crate::theme::Role)> = match &doc.panel {
+        Some(panel) => panel
+            .spans
+            .iter()
+            .filter(|(range, _)| range.end() > from_char && range.start() < to_char)
+            .cloned()
+            .collect(),
+        None => syntax_spans(doc, from_char, to_char),
+    };
 
     let selections = view.sel.ranges();
     let cursors: Vec<usize> = selections.iter().map(|r| r.head).collect();
@@ -447,6 +471,48 @@ fn draw_row(
         }
     }
     let _ = layout;
+
+    // What a plugin is offering, drawn where it would go and in the colour of
+    // something that is not there yet. Only the primary cursor's row, only
+    // where the cursor actually is, and only to the right of it — so nothing
+    // that is really in the file is covered up, and the map from screen to
+    // text is untouched. Taking it is what puts it in the file; until then
+    // this is the only place it exists.
+    if let Some(hint) = &doc.hint
+        && hint.at == view.sel.primary().head
+        && hint.at >= start
+        && hint.at <= end
+    {
+        let mut x = area.x as usize + column - skip;
+        let stop = (area.x + area.width) as usize;
+        let ghost = Style::new().bg(line_bg).fg(theme.faint).add_modifier(Modifier::ITALIC);
+        // The first line of it. A suggestion is often several, and the rest
+        // are counted rather than drawn: rows below this one belong to the
+        // file, and borrowing them would move the text under somebody's mouse.
+        let mut first = hint.text.lines();
+        for c in first.next().unwrap_or_default().chars() {
+            if x >= stop {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut(Position::new(x as u16, it.screen)) {
+                cell.set_style(ghost).set_char(c);
+            }
+            x += 1;
+        }
+        let more = hint.text.lines().count().saturating_sub(1);
+        if more > 0 {
+            let note = format!("  +{more} line{}", if more == 1 { "" } else { "s" });
+            for c in note.chars() {
+                if x >= stop {
+                    break;
+                }
+                if let Some(cell) = buf.cell_mut(Position::new(x as u16, it.screen)) {
+                    cell.set_style(ghost).set_char(c);
+                }
+                x += 1;
+            }
+        }
+    }
     cursor_at
 }
 
@@ -1681,7 +1747,7 @@ fn draw_picker(frame: &mut Frame, app: &mut App, ground: Color) -> Option<Positi
         height,
     );
 
-    let title = format!(" {} ", picker.kind.title());
+    let title = format!(" {} ", picker.title());
     let count = if picker.total() > 0 {
         format!(" {} of {} ", picker.len(), picker.total())
     } else {
@@ -1866,7 +1932,7 @@ fn draw_prompt(frame: &mut Frame, app: &mut App) -> Option<Position> {
     let screen = app.screen;
     let area = Rect::new(screen.x, screen.y + screen.height - 1, screen.width, 1);
 
-    let label = format!(" {} ", prompt.kind.label());
+    let label = format!(" {} ", prompt.label());
     // The prompt takes the whole row. Setting a style over what the status bar
     // drew would leave its words showing through underneath.
     frame.render_widget(Clear, area);

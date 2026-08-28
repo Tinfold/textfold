@@ -97,7 +97,7 @@ impl Grammar {
 /// `@function.method.static` falls back along the dots until it finds
 /// something known — here, `function`. Grammars invent names constantly and
 /// none of them should cost a file its colours.
-fn role_for(name: &str) -> Option<Role> {
+pub fn role_for(name: &str) -> Option<Role> {
     let mut candidate = name;
     loop {
         // Longest name first, so `constant.builtin` is not shadowed by

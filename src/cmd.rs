@@ -22,7 +22,7 @@
 use std::sync::{Mutex, OnceLock, RwLock};
 
 use crate::app::App;
-use crate::plugin::Tool;
+use crate::plugin::{Command as PluginCommand, Tool};
 
 /// One thing textfold can be told to do.
 ///
@@ -123,6 +123,10 @@ pub enum Run {
     Built(fn(&mut App)),
     /// A program a plugin brought with it.
     Tool(&'static Tool),
+    /// Something a plugin's own long-running program does. The editor sends
+    /// it the name and gets on with the next keystroke; what comes back
+    /// arrives later, like everything else that is not the keyboard.
+    Plugin(&'static PluginCommand),
     /// Contributed by a plugin that is switched off. The id is kept — a key
     /// bound to it should say where the command went rather than do nothing.
     Gone,
@@ -236,6 +240,15 @@ impl Cmd {
             _ => None,
         }
     }
+
+    /// The plugin command behind this, where it is one. What the palette asks
+    /// before offering a Rust plugin's command in a Python file.
+    pub fn plugin_command(&self) -> Option<&'static PluginCommand> {
+        match self.run() {
+            Run::Plugin(command) => Some(command),
+            _ => None,
+        }
+    }
 }
 
 /// Build the table: the built-ins first, in the order they are written, and
@@ -253,6 +266,7 @@ fn build() -> &'static [Entry] {
     }
 
     let mut tools: Vec<&'static Tool> = Vec::new();
+    let mut commands: Vec<&'static PluginCommand> = Vec::new();
     for plugin in crate::plugin::active() {
         for tool in &plugin.tools {
             if !crate::plugin::is_on(&tool.id) {
@@ -262,6 +276,19 @@ fn build() -> &'static [Entry] {
                 names.push(tool.id.clone());
             }
             tools.push(tool);
+        }
+        // A command a plugin's own program answers to. It takes an id here,
+        // before that program has ever been started — which is what lets the
+        // palette offer it, a key bind to it, and running it be the thing
+        // that starts the program.
+        for command in &plugin.commands {
+            if !crate::plugin::is_on(&command.id) {
+                continue;
+            }
+            if !names.contains(&command.id) {
+                names.push(command.id.clone());
+            }
+            commands.push(command);
         }
     }
 
@@ -285,6 +312,17 @@ fn build() -> &'static [Entry] {
                     behaviour: tool.behaviour(),
                     run: Run::Tool(tool),
                 },
+                None if commands.iter().any(|c| &c.id == name) => {
+                    let command = commands.iter().find(|c| &c.id == name).copied();
+                    let command = command.expect("just found it");
+                    Entry {
+                        name: command.id.clone(),
+                        about: command.about.clone(),
+                        group: Group::Tool,
+                        behaviour: command.behaviour,
+                        run: Run::Plugin(command),
+                    }
+                }
                 // Contributed by something that is switched off now. The id
                 // stays taken so that turning it back on gets it back.
                 None => Entry {

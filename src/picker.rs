@@ -50,6 +50,10 @@ pub enum Choice {
     Language(LangId),
     /// Something a language server offered to do about the code.
     Action(ServerId, Box<Value>),
+    /// A row a plugin put in a list of its own. The string is whatever the
+    /// plugin said the row is worth, handed straight back when it is chosen —
+    /// opaque here, because what it means is the plugin's business.
+    PluginItem(String),
     /// A setting, toggled or cycled in place rather than chosen and closed.
     Setting(&'static str),
     /// A Python environment to point this project's language servers at.
@@ -131,6 +135,8 @@ pub enum Kind {
     Environments,
     /// The languages and language servers there are, and which are on.
     Plugins,
+    /// A list a plugin put up, waiting for somebody to pick from it.
+    PluginPick,
 }
 
 impl Kind {
@@ -151,6 +157,9 @@ impl Kind {
             Kind::Settings => "Settings",
             Kind::Environments => "Python environment",
             Kind::Plugins => "Plugins",
+            // A plugin says what its own list is called. This is only the
+            // fallback for one that did not.
+            Kind::PluginPick => "Pick one",
         }
     }
 
@@ -185,6 +194,9 @@ pub struct Picker {
     /// The row a theme picker started from, to put back if you change your
     /// mind. Only used where moving through the list changes something.
     pub restore: Option<String>,
+    /// A title of its own, for a list whose kind cannot know what it is about
+    /// — which so far means one a plugin put up.
+    pub called: Option<String>,
     matcher: Matcher,
 }
 
@@ -200,6 +212,7 @@ impl Picker {
             top: 0,
             area: Rect::default(),
             restore: None,
+            called: None,
             // Paths get the path-aware ranking, which knows that a match in
             // the file name beats a match in a directory three levels up.
             matcher: Matcher::new(Config::DEFAULT.match_paths()),
@@ -220,6 +233,14 @@ impl Picker {
 
     /// Replace the rows, keeping the query. For a list the server rebuilds as
     /// you type.
+    /// What to write at the top of the box.
+    pub fn title(&self) -> &str {
+        match &self.called {
+            Some(name) => name,
+            None => self.kind.title(),
+        }
+    }
+
     pub fn set_rows(&mut self, rows: Vec<Row>) {
         self.rows = rows;
         self.refilter();

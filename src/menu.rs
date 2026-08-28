@@ -16,7 +16,7 @@ use crate::cmd::Cmd;
 use crate::doc::DocId;
 
 /// What choosing a row does.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Action {
     /// Run it on whatever is current.
     Run(Cmd),
@@ -26,6 +26,14 @@ pub enum Action {
     RunOn(DocId, Cmd),
     /// A line, not a row. Never chosen.
     Divide,
+    /// Hand this back to the plugin that put the menu up.
+    ///
+    /// The one row that is not a command the editor already has. A menu is
+    /// still a second way to reach something rather than a second
+    /// implementation of it — the something is just the plugin's rather than
+    /// the editor's, and the string is opaque here exactly as a panel's
+    /// action is.
+    Chosen(String),
 }
 
 /// One row.
@@ -44,6 +52,16 @@ pub struct Item {
 }
 
 impl Item {
+    /// A row a plugin put there. `value` is what it gets back.
+    pub fn chosen(label: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            label: label.into(),
+            key: None,
+            action: Action::Chosen(value.into()),
+            enabled: true,
+        }
+    }
+
     pub fn new(label: impl Into<String>, cmd: Cmd) -> Self {
         Self {
             label: label.into(),
@@ -188,7 +206,7 @@ impl Menu {
     /// line under "Paste" cut your selection.
     pub fn at(&self, at: usize) -> Option<Action> {
         let item = self.items.get(at)?;
-        item.choosable().then_some(item.action)
+        item.choosable().then_some(item.action.clone())
     }
 }
 

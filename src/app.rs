@@ -22,7 +22,7 @@ use ratatui::crossterm::event::{
     MouseEventKind,
 };
 use ratatui::layout::Rect;
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::cmd::{self, Behaviour, Cmd, Group, Spec};
 use crate::plugin::{Output, Tool};
@@ -32,6 +32,7 @@ use crate::edit::{self, Motion};
 use crate::git::Tracker;
 use crate::keys::{Key, Keys};
 use crate::lang::{self, LangId};
+use crate::host::{HostId, Hosts};
 use crate::lsp::{Ask, Goto, Incoming, ServerId, Servers};
 use crate::menu::{self, Menu};
 use crate::picker::{Choice, Kind, Picker, Row};
@@ -49,10 +50,48 @@ pub enum Event {
     Files(Vec<PathBuf>),
     /// A thread finished searching the project.
     Found(String, Vec<Row>),
+    /// A plugin's own program said something.
+    Plugin(HostId, Incoming),
+    /// A program the editor ran for a plugin has finished, and the plugin is
+    /// still waiting to be told how it went.
+    PluginRan(Box<crate::host::Ran>),
     /// A tool a plugin runs has finished. Boxed because it carries everything
     /// the program printed, and an event that is occasionally a megabyte
     /// should not make every keystroke a megabyte to move about.
     Tool(Box<crate::tool::Finished>),
+}
+
+/// A plugin waiting on an answer from the person at the keyboard.
+///
+/// One slot rather than a list, because only one overlay can be up at a time
+/// and these are all overlays. Whatever puts the box on the screen fills this
+/// in; whatever takes the box away has to empty it, one way or the other — a
+/// plugin left waiting on a box that has gone is a plugin that has hung.
+pub struct Asked {
+    host: HostId,
+    request: Value,
+}
+
+/// What came of a plugin asking the editor for something.
+enum Answer {
+    /// Worked out on the spot.
+    Now(Value),
+    /// Started, and the reply goes back when it finishes. The one case where
+    /// nothing is sent yet — and it has a name rather than being a silence,
+    /// so that forgetting to answer looks different from deciding not to.
+    Later,
+    /// No, and why. A plugin left waiting on a reply that never comes is a
+    /// plugin that has hung with nothing on the screen to say so.
+    No(String),
+}
+
+impl From<Result<Value, String>> for Answer {
+    fn from(result: Result<Value, String>) -> Self {
+        match result {
+            Ok(value) => Answer::Now(value),
+            Err(why) => Answer::No(why),
+        }
+    }
 }
 
 /// How long the mouse has to sit still over a word before textfold asks what
@@ -99,6 +138,12 @@ const GIT_CHECK_EVERY: Duration = Duration::from_millis(150);
 /// it, rarely enough that a hundred open files cost nothing.
 const DISK_CHECK_EVERY: Duration = Duration::from_millis(1200);
 
+/// How long the cursor has to sit still before the plugins are told where it
+/// is. Cursor motion is the highest-frequency event there is, and a plugin
+/// that asks a language model where the cursor is should be asked once when
+/// you stop, not forty times on the way.
+const SELECTION_SETTLES: Duration = Duration::from_millis(120);
+
 /// How long to wait after a keystroke before asking for completions, so that
 /// typing a word is one request rather than six.
 const COMPLETION_DELAY: Duration = Duration::from_millis(120);
@@ -134,6 +179,32 @@ pub struct Prompt {
     /// has got to is somewhere you meant to go, or only somewhere typing took
     /// it on the way.
     pub committed: bool,
+    /// A label of its own, for a prompt whose kind cannot know what it is
+    /// asking — which so far means one a plugin put up.
+    pub label: Option<String>,
+}
+
+impl Prompt {
+    /// An empty one of a kind, for a caller that will fill in the rest.
+    pub fn new(kind: PromptKind) -> Self {
+        Prompt {
+            kind,
+            input: String::new(),
+            caret: 0,
+            origin: None,
+            held: String::new(),
+            committed: false,
+            label: None,
+        }
+    }
+
+    /// What to write at the left of the box.
+    pub fn label(&self) -> &str {
+        match &self.label {
+            Some(given) => given,
+            None => self.kind.label(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -151,6 +222,9 @@ pub enum PromptKind {
     ReplaceFind,
     /// The replacement half.
     ReplaceWith,
+    /// A question a plugin asked. What it says is the plugin's, so the label
+    /// here is only the fallback for one that said nothing.
+    PluginAsked,
 }
 
 impl PromptKind {
@@ -163,6 +237,7 @@ impl PromptKind {
             PromptKind::Find => "Find",
             PromptKind::ReplaceFind => "Replace what",
             PromptKind::ReplaceWith => "Replace with",
+            PromptKind::PluginAsked => "A plugin asks",
         }
     }
 }
@@ -180,6 +255,8 @@ pub enum Then {
     Close(DocId),
     Quit,
     Reload(DocId),
+    /// A plugin asked, and is waiting to be told which way it went.
+    PluginAsked,
 }
 
 /// One thing a language server offered to insert.
@@ -890,6 +967,12 @@ pub struct App {
     pub status: Status,
 
     pub lsp: Servers,
+    /// The plugins that are programs rather than tables.
+    pub hosts: Hosts,
+    /// A plugin waiting on a box that is on the screen.
+    plugin_waiting: Option<Asked>,
+    /// Where the caret was last drawn, for anything that opens beside it.
+    pub caret: Option<(u16, u16)>,
     tx: Sender<Event>,
 
     /// What was cut or copied. Kept here as well as handed to the terminal,
@@ -936,6 +1019,10 @@ pub struct App {
     resting: Option<(Instant, u16, u16)>,
     /// When to ask for completions, having waited for typing to stop.
     completion_due: Option<Instant>,
+    /// When to tell the plugins where the cursor has ended up, and what they
+    /// were last told, so that nothing is sent twice.
+    selection_due: Option<Instant>,
+    selection_told: Option<(DocId, usize)>,
     /// What the language server would do about the problem under the cursor,
     /// fetched before anybody asks so that it can be offered rather than
     /// waited for. This is the whole of "you have not imported that" being
@@ -994,6 +1081,7 @@ impl App {
             .unwrap_or(crate::theme::FALLBACK);
         let keys = Keys::new(&config.keys);
         let lsp = Servers::new(tx.clone());
+        let hosts = Hosts::new(tx.clone());
         let project = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
         let mut app = Self {
@@ -1014,6 +1102,9 @@ impl App {
             signature: None,
             status: Status::quiet(),
             lsp,
+            hosts,
+            plugin_waiting: None,
+            caret: None,
             tx,
             clipboard: String::new(),
             last_search: String::new(),
@@ -1032,6 +1123,8 @@ impl App {
             last_click: None,
             resting: None,
             completion_due: None,
+            selection_due: None,
+            selection_told: None,
             fixes: None,
             offer: None,
             before_save: None,
@@ -1392,6 +1485,17 @@ impl App {
     fn close_doc(&mut self, id: DocId) {
         if let Some(path) = self.doc(id).and_then(|d| d.path.clone()) {
             self.lsp.did_close(&path);
+            self.hosts.closed(&path);
+        }
+        // A panel that has been closed is one the plugin can stop keeping up
+        // to date, and one it should be told about before it sends the next
+        // set of lines into nothing.
+        if let Some((plugin, panel)) = self
+            .doc(id)
+            .and_then(|d| d.panel.as_ref())
+            .map(|p| (p.plugin.clone(), p.id.clone()))
+        {
+            self.tell_panel(&plugin, "panel/closed", json!({ "panel": panel }));
         }
         self.docs.retain(|d| d.id != id);
         self.seen.remove(&id);
@@ -1458,6 +1562,7 @@ impl App {
     /// Short while something is on a timer, long while nothing is.
     pub fn idle(&self) -> Duration {
         if self.completion_due.is_some()
+            || self.selection_due.is_some()
             || self.fixes_due.is_some()
             || self.resting.is_some()
             || self.status.showing()
@@ -1478,6 +1583,12 @@ impl App {
         {
             self.completion_due = None;
             self.ask_for_completions(None, false);
+        }
+        if let Some(due) = self.selection_due
+            && due <= Instant::now()
+        {
+            self.selection_due = None;
+            self.tell_plugins_where_the_cursor_is();
         }
         if let Some((since, column, row)) = self.resting
             && since.elapsed() >= HOVER_DELAY
@@ -1765,6 +1876,17 @@ impl App {
     }
 
     pub fn handle(&mut self, event: Event) {
+        self.handled(event);
+        // A box a plugin put up may have been taken away by whatever that was
+        // — Escape, a click outside, a command that opened something else.
+        // Swept here rather than at each of the dozen places an overlay is
+        // dismissed from, so that none of them has to remember there was a
+        // plugin behind it.
+        self.sweep_plugin_question();
+        self.notice_the_cursor_moved();
+    }
+
+    fn handled(&mut self, event: Event) {
         match event {
             Event::Term(TermEvent::Key(key)) => self.on_key(key),
             Event::Term(TermEvent::Mouse(mouse)) => self.on_mouse(mouse),
@@ -1774,6 +1896,19 @@ impl App {
             }
             Event::Term(_) => {}
             Event::Lsp(id, message) => self.on_lsp(id, message),
+            Event::Plugin(id, message) => self.on_plugin(id, message),
+            Event::PluginRan(ran) => {
+                let ran = *ran;
+                if let Some(host) = self.hosts.get_mut(ran.host) {
+                    host.answer(
+                        ran.request,
+                        json!({
+                            "ok": ran.ok, "code": ran.code,
+                            "out": ran.out, "err": ran.err,
+                        }),
+                    );
+                }
+            }
             Event::Files(files) => {
                 self.files_walking = false;
                 // A walk that found exactly what the last one did leaves the
@@ -1848,6 +1983,27 @@ impl App {
             return;
         }
 
+        // An offer on the screen gets the handful of keys that steer it, the
+        // way the completion list does, and nothing else.
+        if self.hint_key(key) {
+            return;
+        }
+
+        // A panel is a plugin's own buffer, and gets the keys that would
+        // otherwise have *changed the text* — because a panel's text is not
+        // yours to change, so those keys are going spare. Everything else
+        // still does exactly what it always does: Ctrl-P is still the palette
+        // and the arrows still move, so a plugin cannot take a key anybody
+        // knows. The same rule as `Keys::suggest`, applied to a buffer.
+        if self.panel_wants(key) {
+            // Enter on something the plugin marked as doing something does
+            // that; otherwise the key goes on to the plugin like any other.
+            if key.code == KeyCode::Enter && self.panel_action_at(self.view().cursor()) {
+                return;
+            }
+            self.send_panel_key(key);
+            return;
+        }
         if let Some(cmd) = self.keys.lookup(key) {
             self.run(cmd);
             return;
@@ -1969,12 +2125,26 @@ impl App {
             }
         }
 
-        let App { docs, lsp, .. } = self;
+        let App { docs, lsp, hosts, .. } = self;
         if let Some(doc) = docs.iter().find(|d| d.id == id) {
             lsp.did_change(doc, &edits);
+            hosts.changed(doc, &edits);
         }
         if let Some(doc) = self.doc_mut(id) {
             doc.take_pending();
+        }
+        // An offer was about the text as it was. The text has moved on, so the
+        // offer is about something that is no longer there — the same rule an
+        // edit computed against an old version gets, arrived at from the other
+        // side.
+        if self.doc(id).is_some_and(|d| d.hint.is_some()) {
+            let plugin = self.doc(id).and_then(|d| d.hint.as_ref()).map(|h| h.plugin.clone());
+            if let Some(doc) = self.doc_mut(id) {
+                doc.hint = None;
+            }
+            if let Some(plugin) = plugin {
+                self.tell_panel(&plugin, "hint/dropped", json!({ "why": "the text changed" }));
+            }
         }
         self.hover = None;
         if self.view().doc == id {
@@ -2021,6 +2191,7 @@ impl App {
         match cmd.run() {
             cmd::Run::Built(run) => run(self),
             cmd::Run::Tool(tool) => self.run_tool(tool),
+            cmd::Run::Plugin(command) => self.run_plugin_command(command),
             cmd::Run::Gone => self.say(format!(
                 "{} came from a plugin that is switched off",
                 cmd.name()
@@ -2720,6 +2891,97 @@ impl App {
         }
     }
 
+    /// Run one of a plugin's commands.
+    ///
+    /// Nothing waits here. The command goes down the pipe and the next
+    /// keystroke is handled; whatever the plugin has to say about it arrives
+    /// later on the same channel the keyboard arrives on. A plugin that takes
+    /// four minutes to build a firmware image cannot make the cursor stutter,
+    /// because the cursor is not waiting on it.
+    fn run_plugin_command(&mut self, command: &'static crate::plugin::Command) {
+        let language = lang::get(self.here().language).name.clone();
+        if !command.wants(&language) {
+            return self.say(format!("{} is not for {language} files", command.name));
+        }
+        let path = self.here().path.clone();
+        let (line, column) = self.here().point_at_char(self.view().cursor());
+        // What is selected, if anything. An empty selection is `null` rather
+        // than an empty string: "nothing is selected" and "the empty string is
+        // selected" are different answers, and a plugin should not have to
+        // guess which it got.
+        let doc = self.here();
+        let selection: Option<String> = match self
+            .view()
+            .sel
+            .ranges()
+            .iter()
+            .filter(|r| !r.is_empty())
+            .map(|r| doc.slice(*r))
+            .collect::<Vec<String>>()
+        {
+            taken if taken.is_empty() => None,
+            taken => Some(taken.join("\n")),
+        };
+        // What the command is being run *on*. A plugin that does not care can
+        // ignore all of it; one that does should not have to ask. Counted
+        // from zero, as everything inside the editor is.
+        let context = json!({
+            "file": path,
+            "language": language,
+            "line": line,
+            "column": column,
+            "selection": selection,
+        });
+        // A buffer with no file of its own — a plugin's own output, say —
+        // still belongs to the project you are working in, and that is the
+        // project the command is about.
+        let from = path
+            .clone()
+            .unwrap_or_else(|| self.project.clone());
+        if command.opens_panel {
+            // Opening a panel is not something the plugin does; it is
+            // something the editor does, and then tells the plugin about so
+            // that it has somewhere to put its lines.
+            self.open_panel(command);
+        }
+        self.hosts.run(command, Some(&from), context);
+        self.take_plugin_problems();
+    }
+
+    /// Put a plugin's panel in front of you, making the buffer if this is the
+    /// first time.
+    ///
+    /// The same buffer each time, so opening it twice is going back to it
+    /// rather than ending up with two.
+    fn open_panel(&mut self, command: &'static crate::plugin::Command) {
+        let existing = self
+            .docs
+            .iter()
+            .find(|d| d.panel.as_ref().is_some_and(|p| p.id == command.id))
+            .map(|d| d.id);
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let id = self.new_scratch();
+                if let Some(doc) = self.doc_mut(id) {
+                    doc.name = command.name.clone();
+                    // Nothing types into a panel: what is in it belongs to the
+                    // plugin, and a half-typed-in panel would be a buffer
+                    // whose text and whose colours disagree.
+                    doc.read_only = true;
+                    doc.panel = Some(crate::doc::Panel {
+                        plugin: command.plugin.clone(),
+                        id: command.id.clone(),
+                        spans: Vec::new(),
+                        actions: Vec::new(),
+                    });
+                }
+                id
+            }
+        };
+        self.show(id);
+    }
+
     /// Start a tool, quietly. Answers whether it is on its way — a step in a
     /// save asks this rather than `run_tool`, because a tool that would not
     /// start must not leave the save waiting for it.
@@ -2901,8 +3163,20 @@ impl App {
         }
     }
 
-    /// Put some text in a buffer of its own, for reading rather than editing.
+    /// Put some text in a buffer of its own, for reading rather than editing,
+    /// and go to it.
     fn show_in_a_buffer(&mut self, name: &str, text: &str) {
+        self.put_in_a_buffer(name, text, true);
+    }
+
+    /// The same, saying whether to go to it.
+    ///
+    /// A tool you just ran should show you what it printed: you asked half a
+    /// second ago and you are waiting. A plugin's build finishing four minutes
+    /// later should not take the cursor out of whatever you got on with in the
+    /// meantime, which is why a plugin has to ask for that rather than getting
+    /// it by default.
+    fn put_in_a_buffer(&mut self, name: &str, text: &str, focus: bool) {
         // The same buffer each time, so running a test suite twice does not
         // leave two tabs of output to close.
         let existing = self
@@ -2928,9 +3202,11 @@ impl App {
             doc.mark_saved();
             self.after_edit_to(id, edits, None);
         }
-        self.show(id);
-        self.view_mut().sel = crate::text::Selections::single(Range::point(0));
-        self.scroll_into_view();
+        if focus {
+            self.show(id);
+            self.view_mut().sel = crate::text::Selections::single(Range::point(0));
+            self.scroll_into_view();
+        }
     }
 
     /// The tools a plugin asked to be run every time this file is saved.
@@ -2969,12 +3245,14 @@ impl App {
             Ok(()) => {
                 let name = doc.name.clone();
                 let lines = doc.len_lines();
-                let App { docs, lsp, .. } = self;
+                let App { docs, lsp, hosts, .. } = self;
                 if let Some(doc) = docs.iter().find(|d| d.id == id) {
                     lsp.did_save(doc);
+                    hosts.saved(doc);
                     // A buffer that has just been given a name is a buffer a
                     // language server has never heard of.
                     lsp.open(doc);
+                    hosts.opened_buffer(doc);
                 }
                 // Saving is how a file git has never seen becomes one it has,
                 // and how a "save as" becomes a different file entirely.
@@ -3011,9 +3289,10 @@ impl App {
                 failed.push(format!("{e}"));
                 continue;
             }
-            let App { docs, lsp, .. } = self;
+            let App { docs, lsp, hosts, .. } = self;
             if let Some(doc) = docs.iter().find(|d| d.id == id) {
                 lsp.did_save(doc);
+                hosts.saved(doc);
             }
             self.git.forget_baseline(id);
         }
@@ -3636,6 +3915,7 @@ impl App {
             origin: matches!(kind, PromptKind::Find).then(|| self.view().sel.clone()),
             held: String::new(),
             committed: false,
+            label: None,
         });
         self.completion = None;
         self.dismiss_popups();
@@ -3766,6 +4046,10 @@ impl App {
         let held = prompt.held.clone();
 
         match kind {
+            PromptKind::PluginAsked => {
+                self.overlay = Overlay::None;
+                self.settle_plugin_question(json!(input));
+            }
             PromptKind::GotoLine => {
                 self.overlay = Overlay::None;
                 match input.parse::<usize>() {
@@ -3957,6 +4241,9 @@ impl App {
                 self.run(cmd);
             }
             menu::Action::Divide => {}
+            // A row a plugin put there. The menu is already gone by the time
+            // this runs, so the answer is the last thing that happens to it.
+            menu::Action::Chosen(value) => self.settle_plugin_question(json!(value)),
         }
     }
 
@@ -4276,6 +4563,11 @@ impl App {
         };
         let then = confirm.then;
         let answer = match key.code {
+            // The editor's own questions have a third way out — save, discard,
+            // or change your mind. A plugin's has two, so changing your mind
+            // *is* the answer of no, and the plugin is told so rather than
+            // left looking at a box that will not close.
+            KeyCode::Esc if matches!(then, Then::PluginAsked) => Some('n'),
             KeyCode::Esc => Some('c'),
             KeyCode::Char(c) => Some(c.to_ascii_lowercase()),
             _ => None,
@@ -4286,6 +4578,10 @@ impl App {
         }
         self.overlay = Overlay::None;
         match (then, answer) {
+            // Its own arm before the general "cancel", because a plugin's
+            // question has no cancel: escaping it is an answer of no, and the
+            // plugin has to hear one or the other.
+            (Then::PluginAsked, _) => self.settle_plugin_question(json!(answer == 'y')),
             (_, 'c') => {}
             (Then::Close(id), 's') => {
                 self.save(None);
@@ -4375,6 +4671,10 @@ impl App {
         let rows: Vec<Row> = crate::cmd::all()
             .iter()
             .filter(|cmd| cmd.tool().is_none_or(|tool| tool.wants(&language)))
+            .filter(|cmd| {
+                cmd.plugin_command()
+                    .is_none_or(|command| command.wants(&language))
+            })
             .map(|cmd| {
                 Row::new(cmd.name(), Choice::Command(*cmd))
                     .detail(cmd.about())
@@ -4540,6 +4840,36 @@ impl App {
                     .detail(format!("{} — {}", plugin.id, plugin.detail()))
                     .tag(if on { "on" } else { "off" }),
             );
+            // A plugin that brings a program of its own says so before it is
+            // switched on, not after. "This adds a language" and "this runs a
+            // program of its own" are different decisions, and the list is
+            // where they are told apart.
+            if let Some(host) = &plugin.host {
+                let running = self
+                    .hosts
+                    .all()
+                    .iter()
+                    .find(|h| h.plugin == plugin.id && h.is_ready());
+                rows.push(
+                    Row::new(
+                        format!("  {}", host.command),
+                        Choice::Plugin(plugin.id.clone()),
+                    )
+                    .detail(match running {
+                        Some(h) => format!("its own program — running in {}", h.root.display()),
+                        None => format!("its own program — runs {}", host.command),
+                    })
+                    .tag(match (on, running.is_some(), self.hosts.given_up_on(&plugin.id)) {
+                        (false, _, _) => "off",
+                        // Said plainly rather than shown as on: a row that
+                        // looks fine and does nothing is the worst of the
+                        // three things this tag can say.
+                        (_, _, true) => "gave up",
+                        (_, true, _) => "running",
+                        _ => "on",
+                    }),
+                );
+            }
             for tool in &plugin.tools {
                 let ready = on && crate::plugin::is_on(&tool.id);
                 rows.push(
@@ -4601,6 +4931,13 @@ impl App {
         for doc in &mut self.docs {
             doc.redetect_language();
         }
+        // A plugin switched off stops its own program too, and one switched
+        // on again gets its crash count cleared — which is what makes
+        // "switch it off and on again" the way to give a plugin you have just
+        // fixed another go.
+        let plugin = id.split_once('/').map(|(p, _)| p).unwrap_or(id);
+        self.hosts.stop_plugin(plugin);
+
         self.lsp.restart();
         let docs: Vec<DocId> = self.docs.iter().map(|d| d.id).collect();
         for doc in docs {
@@ -4846,6 +5183,7 @@ impl App {
         }
 
         match choice {
+            Choice::PluginItem(value) => self.settle_plugin_question(json!(value)),
             Choice::Command(cmd) => self.run(cmd),
             Choice::Path(path) => self.open_path(&path),
             Choice::Buffer(id) => self.show(id),
@@ -5036,6 +5374,40 @@ impl App {
         if let Some(problem) = self.lsp.problems.pop() {
             self.lsp.problems.clear();
             self.say(problem);
+        }
+
+        // And the same moment is what starts a plugin that said it wanted to
+        // know about this kind of file. One funnel for both, so that a plugin
+        // cannot be woken by a route a language server is not.
+        let opened = self
+            .doc(id)
+            .and_then(|d| d.path.clone())
+            .map(|path| (path, lang::get(self.doc(id).map(|d| d.language).unwrap_or(lang::LangId::PLAIN)).name.clone()));
+        if let Some((path, language)) = opened {
+            self.hosts.opened(&path, &language);
+            let App { docs, hosts, .. } = self;
+            if let Some(doc) = docs.iter().find(|d| d.id == id) {
+                hosts.opened_buffer(doc);
+            }
+            self.take_plugin_problems();
+        }
+    }
+
+    /// Everything already open, for a plugin that has only just come up.
+    ///
+    /// A plugin started by the eleventh file opened should still know about
+    /// the first ten — otherwise what it is told depends on the order somebody
+    /// happened to open their tabs in.
+    fn catch_a_host_up(&mut self, id: HostId) {
+        if !self.hosts.get(id).is_some_and(|h| h.is_ready()) {
+            return;
+        }
+        let ids: Vec<DocId> = self.docs.iter().map(|d| d.id).collect();
+        for doc_id in ids {
+            let App { docs, hosts, .. } = self;
+            if let Some(doc) = docs.iter().find(|d| d.id == doc_id) {
+                hosts.opened_buffer(doc);
+            }
         }
     }
 
@@ -5700,6 +6072,25 @@ impl App {
         true
     }
 
+    /// The keys that steer an offer a plugin has made, while it is showing.
+    ///
+    /// Written like [`App::completion_key`] and for the same reason: these are
+    /// not bindings, they are what a box on the screen does while it is on the
+    /// screen. Tab takes it because Tab takes a suggestion in every editor
+    /// that offers one, and Tab is still indent every other time — the key is
+    /// not conditional, the offer is.
+    fn hint_key(&mut self, key: Key) -> bool {
+        if !self.hint_showing() {
+            return false;
+        }
+        match (key.code, key.mods) {
+            (KeyCode::Tab, KeyModifiers::NONE) => self.accept_hint(),
+            (KeyCode::Esc, _) => self.drop_hint("waved away"),
+            _ => return false,
+        }
+        true
+    }
+
     /// What is wrong at a spot, written for a hover.
     ///
     /// A language server says what it thinks of a piece of code twice over: as
@@ -5809,6 +6200,812 @@ impl App {
                 // line; it is worth one line saying what would have run.
                 self.say(format!("{name}: {why}"));
             }
+        }
+    }
+
+    /// Everything a plugin's own program says.
+    ///
+    /// The same three kinds of message a language server sends, read with a
+    /// different vocabulary. A request is answered before anything else
+    /// happens with it, because a plugin waiting on a reply is a plugin that
+    /// has stopped — and unlike a language server, a plugin is usually
+    /// something somebody in this building wrote and is still debugging.
+    fn on_plugin(&mut self, id: HostId, message: Incoming) {
+        match message {
+            Incoming::Notification { method, params } => {
+                // Nobody is waiting on an answer, so a refusal has nowhere to
+                // go but the status line — which is where a plugin author
+                // needs it anyway.
+                if let Answer::No(why) = self.plugin_asked(id, &method, &params, None) {
+                    self.say_bad(format!("{}: {why}", self.plugin_name(id)));
+                }
+            }
+            Incoming::Request {
+                id: request_id,
+                method,
+                params,
+            } => {
+                let answer = self.plugin_asked(id, &method, &params, Some(&request_id));
+                if let Some(host) = self.hosts.get_mut(id) {
+                    match answer {
+                        Answer::Now(result) => host.answer(request_id, result),
+                        Answer::No(why) => host.refuse(request_id, &why),
+                        Answer::Later => {}
+                    }
+                }
+            }
+            Incoming::Response { id: request, result } => {
+                let Some(ask) = self.hosts.get_mut(id).and_then(|h| h.claim(request)) else {
+                    return;
+                };
+                match (ask, result) {
+                    (crate::host::Ask::Initialize, Ok(result)) => {
+                        self.hosts.ready(id, result);
+                        self.catch_a_host_up(id);
+                    }
+                    (crate::host::Ask::Initialize, Err(why)) => {
+                        self.hosts.died(id, why.clone());
+                        self.say_bad(format!("{}: {why}", self.plugin_name(id)));
+                    }
+                    // A command that finished quietly finished. One that
+                    // failed says so, because the person pressed a key and is
+                    // owed an answer either way.
+                    (crate::host::Ask::Command(_), Ok(_)) => {}
+                    (crate::host::Ask::Command(name), Err(why)) => {
+                        self.say_bad(format!("{name}: {why}"))
+                    }
+                }
+            }
+            Incoming::Exited(why) => {
+                let name = self.plugin_name(id);
+                self.hosts.died(id, why.clone());
+                self.say(format!("{name}: {why}"));
+            }
+        }
+        self.take_plugin_problems();
+    }
+
+    /// Start the clock on telling the plugins where the cursor is.
+    ///
+    /// Swept once per event, like the plugin questions, rather than at each of
+    /// the hundred places a cursor can move from — every arrow key, every
+    /// click, every jump, every edit. One place that notices is one place that
+    /// cannot be forgotten in the hundred and first.
+    fn notice_the_cursor_moved(&mut self) {
+        let now = (self.view().doc, self.view().cursor());
+        if self.selection_told == Some(now) {
+            return;
+        }
+        // An offer was made about where the cursor *was*. Moving away from it
+        // is declining it, the same as it would be in any editor.
+        if self.here().hint.is_some() && self.here().hint.as_ref().is_some_and(|h| h.at != now.1) {
+            self.drop_hint("moved");
+        }
+        self.selection_told = Some(now);
+        self.selection_due = Some(Instant::now() + SELECTION_SETTLES);
+    }
+
+    /// Where the cursor is, for the plugins that asked about this language.
+    ///
+    /// Only those: a plugin that never asked to be told the text of a file has
+    /// no use for a running commentary on where you are in it.
+    fn tell_plugins_where_the_cursor_is(&mut self) {
+        let id = self.view().doc;
+        let at = self.view().cursor();
+        let Some((path, line, column, version)) = self.doc(id).and_then(|doc| {
+            let (line, column) = doc.point_at_char(at);
+            Some((doc.path.clone()?, line, column, doc.version))
+        }) else {
+            return;
+        };
+        let App { docs, hosts, .. } = self;
+        let Some(doc) = docs.iter().find(|d| d.id == id) else {
+            return;
+        };
+        hosts.selection_changed(
+            doc,
+            json!({
+                "path": path,
+                "version": version,
+                "line": line,
+                "column": column,
+            }),
+        );
+    }
+
+    /// Answer the plugin waiting on a box, and forget it.    /// Answer the plugin waiting on a box, and forget it.
+    ///
+    /// Called with `Value::Null` for "they changed their mind", which is an
+    /// answer: a plugin that put a list up and got nothing back would wait for
+    /// ever, and Escape is the commonest thing anybody does to a list.
+    fn settle_plugin_question(&mut self, answer: Value) {
+        let Some(asked) = self.plugin_waiting.take() else {
+            return;
+        };
+        if let Some(host) = self.hosts.get_mut(asked.host) {
+            host.answer(asked.request, answer);
+        }
+    }
+
+    /// A box a plugin put up has gone without being answered.
+    ///
+    /// Swept once per event rather than at each of the dozen places an overlay
+    /// can be dismissed from. Escape, a click outside, a command that opens
+    /// something else — all of them close the box, and none of them should
+    /// have to remember there was a plugin behind it.
+    fn sweep_plugin_question(&mut self) {
+        if self.plugin_waiting.is_some() && matches!(self.overlay, Overlay::None) {
+            self.settle_plugin_question(Value::Null);
+        }
+    }
+
+    /// Put a plugin's question on the screen and remember who asked it.
+    fn ask_for_plugin(&mut self, id: HostId, request: Option<&Value>, overlay: Overlay) -> Answer {
+        let Some(request) = request.cloned() else {
+            return Answer::No("that has to be asked, not told".into());
+        };
+        // A second question while the first is still on the screen: the older
+        // one is answered with nothing rather than left hanging, because its
+        // box is about to be replaced by this one.
+        self.settle_plugin_question(Value::Null);
+        self.overlay = overlay;
+        self.plugin_waiting = Some(Asked {
+            host: id,
+            request,
+        });
+        Answer::Later
+    }
+
+    /// Which buffer a plugin means: the one it named, or the one in front of
+    /// you if it named none.
+    fn plugin_means(&self, params: &Value) -> Result<DocId, String> {
+        let Some(path) = params.get("path").and_then(Value::as_str) else {
+            return Ok(self.view().doc);
+        };
+        let path = Path::new(path);
+        self.docs
+            .iter()
+            .find(|d| d.path.as_deref() == Some(path))
+            .map(|d| d.id)
+            .ok_or_else(|| format!("{} is not open", path.display()))
+    }
+
+    /// An edit a plugin worked out, applied the way a keystroke would be.
+    ///
+    /// Versioned, and **refused** rather than applied when the buffer has
+    /// moved on: a plugin that computed a fix against version 40 of a file
+    /// that is now at 43 is holding an edit for text that is no longer there,
+    /// and applying it would corrupt the file rather than fix it.
+    fn plugin_edit(&mut self, params: &Value) -> Result<Value, String> {
+        let id = self.plugin_means(params)?;
+        let doc = self.doc(id).ok_or("that buffer is not open")?;
+        if let Some(against) = params.get("version").and_then(Value::as_i64)
+            && against != doc.version as i64
+        {
+            return Err(format!(
+                "that was worked out against version {against}, and this is {}",
+                doc.version
+            ));
+        }
+        if doc.read_only {
+            return Err(format!("{} is read-only", doc.name));
+        }
+
+        // Lines and columns, both counted in characters from zero — the same
+        // numbers a plugin is given for a diagnostic, and the same ones the
+        // editor counts in everywhere.
+        let changes: Vec<crate::doc::Change> = params
+            .get("edits")
+            .and_then(Value::as_array)
+            .ok_or("an edit needs some edits")?
+            .iter()
+            .filter_map(|edit| {
+                let at = |line: &str, column: &str| -> Option<usize> {
+                    let row = edit.get(line)?.as_u64()? as usize;
+                    let col = edit.get(column).and_then(Value::as_u64).unwrap_or(0) as usize;
+                    Some(doc.char_at_point(row, col))
+                };
+                let from = at("line", "column")?;
+                let to = at("end_line", "end_column").unwrap_or(from).max(from);
+                let text = edit.get("text").and_then(Value::as_str).unwrap_or_default();
+                Some(crate::doc::Change::replace(from, to, text.to_string()))
+            })
+            .collect();
+        if changes.is_empty() {
+            return Err("none of those edits said where to go".into());
+        }
+        // Through the same door a language server's edits go through, which
+        // is what makes a plugin's work one thing to undo, and what tells the
+        // language servers about it without a plugin having to.
+        Ok(json!({ "applied": self.apply_changes_to(id, changes) }))
+    }
+
+    /// Text a plugin is offering to put in where the cursor is.
+    ///
+    /// Shown, not inserted. Until it is taken the file is exactly as it was,
+    /// which is the whole difference between an offer and an edit — and it is
+    /// why this needs no version check: nothing has happened to the text yet.
+    fn plugin_hint(&mut self, id: HostId, params: &Value) -> Result<Value, String> {
+        let Some(plugin) = self.hosts.get(id).map(|h| h.plugin.clone()) else {
+            return Err("that plugin is not running".into());
+        };
+        let doc_id = self.plugin_means(params)?;
+        let text = params
+            .get("text")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+
+        let cursor = self.view().cursor();
+        let Some(doc) = self.doc_mut(doc_id) else {
+            return Err("that buffer is not open".into());
+        };
+        // Cleared by an empty offer, which is how a plugin says "never mind"
+        // without a second message.
+        if text.is_empty() {
+            doc.hint = None;
+            return Ok(json!({ "showing": false }));
+        }
+        let at = match (
+            params.get("line").and_then(Value::as_u64),
+            params.get("column").and_then(Value::as_u64),
+        ) {
+            (Some(line), column) => {
+                doc.char_at_point(line as usize, column.unwrap_or(0) as usize)
+            }
+            // Nothing said means where the cursor is, which is what an inline
+            // suggestion nearly always means.
+            _ => cursor,
+        };
+        // An offer about somewhere the cursor is not is an offer nobody would
+        // see, and one that would surprise them if they walked into it later.
+        if at != cursor {
+            doc.hint = None;
+            return Ok(json!({ "showing": false }));
+        }
+        doc.hint = Some(crate::doc::Hint { plugin, at, text });
+        Ok(json!({ "showing": true }))
+    }
+
+    /// Whether there is an offer on the screen to take.
+    fn hint_showing(&self) -> bool {
+        self.here()
+            .hint
+            .as_ref()
+            .is_some_and(|hint| hint.at == self.view().cursor())
+    }
+
+    /// Put the offered text in, as an ordinary edit.
+    ///
+    /// Through the same door a keystroke goes through, so it is one thing to
+    /// undo and the language servers hear about it — a plugin's suggestion
+    /// becomes your text the moment you take it, and is your text in every way
+    /// after that.
+    fn accept_hint(&mut self) {
+        let id = self.view().doc;
+        let Some(hint) = self.doc_mut(id).and_then(|doc| doc.hint.take()) else {
+            return;
+        };
+        let count = self.apply_changes_to(
+            id,
+            vec![crate::doc::Change::replace(hint.at, hint.at, hint.text.clone())],
+        );
+        if count > 0 {
+            // The cursor goes to the end of what was put in, which is where
+            // you would be if you had typed it.
+            let to = hint.at + hint.text.chars().count();
+            let len = self.here().len_chars();
+            self.view_mut().sel = Selections::single(Range::point(to.min(len)));
+            self.scroll_into_view();
+        }
+        let plugin = hint.plugin.clone();
+        self.tell_panel(&plugin, "hint/taken", json!({ "text": hint.text }));
+    }
+
+    /// Take the offer away, and say why, so the plugin knows whether to make
+    /// another one.
+    fn drop_hint(&mut self, why: &str) {
+        let id = self.view().doc;
+        let Some(hint) = self.doc_mut(id).and_then(|doc| doc.hint.take()) else {
+            return;
+        };
+        let plugin = hint.plugin.clone();
+        self.tell_panel(&plugin, "hint/dropped", json!({ "why": why }));
+    }
+
+    /// Everything a plugin's panel says, all at once.    /// Everything a plugin's panel says, all at once.
+    ///
+    /// The whole panel each time rather than a diff. A panel is tens of lines
+    /// and changes a few times a second at worst, so sending the lot is
+    /// simpler on both sides and impossible to desynchronise. If somebody ever
+    /// builds a ten-thousand-line register view, a patch message can be added
+    /// then — the shape here leaves room for one.
+    fn plugin_panel(&mut self, id: HostId, params: &Value) -> Result<Value, String> {
+        let Some(plugin) = self.hosts.get(id).map(|h| h.plugin.clone()) else {
+            return Err("that plugin is not running".into());
+        };
+        let wanted = params
+            .get("panel")
+            .and_then(Value::as_str)
+            .ok_or("which panel?")?
+            .to_string();
+        let Some(doc_id) = self
+            .docs
+            .iter()
+            .find(|d| {
+                d.panel
+                    .as_ref()
+                    .is_some_and(|p| p.id == wanted && p.plugin == plugin)
+            })
+            .map(|d| d.id)
+        else {
+            // Sent about a panel nobody has opened. Not an error a plugin can
+            // do much about — it may have been closed while the message was
+            // in flight — but worth saying rather than swallowing.
+            return Err(format!("{wanted} is not open"));
+        };
+
+        let (text, spans, actions) = panel_lines(
+            params
+                .get("lines")
+                .and_then(Value::as_array)
+                .ok_or("a panel needs some lines")?,
+        );
+
+        // Replaced the way any other whole-buffer change is, so that the
+        // cursor is carried across a refresh rather than thrown back to the
+        // top of a panel somebody was halfway down.
+        let Some(doc) = self.doc_mut(doc_id) else {
+            return Err(format!("{wanted} is not open"));
+        };
+        let was = doc.len_chars();
+        let sel = Selections::single(Range::point(0));
+        let lines = text.lines().count();
+        let edits = doc.apply_atomic(
+            vec![crate::doc::Change::replace(0, was, text)],
+            &sel,
+        );
+        if let Some(panel) = &mut doc.panel {
+            panel.spans = spans;
+            panel.actions = actions;
+        }
+        doc.mark_saved();
+        self.after_edit_to(doc_id, edits, None);
+        Ok(json!({ "lines": lines }))
+    }
+
+    /// Do whatever the plugin marked the text under the cursor as doing.
+    ///
+    /// Answers whether there was anything there, so that Enter in a panel with
+    /// nothing under it goes on to mean what Enter usually means rather than
+    /// being quietly eaten.
+    fn panel_action_at(&mut self, at: usize) -> bool {
+        let Some(doc) = self.docs.iter().find(|d| d.id == self.view().doc) else {
+            return false;
+        };
+        let Some(panel) = &doc.panel else { return false };
+        let Some((_, action)) = panel
+            .actions
+            .iter()
+            .find(|(range, _)| range.start() <= at && at < range.end())
+        else {
+            return false;
+        };
+        let (plugin, id, action) = (panel.plugin.clone(), panel.id.clone(), action.clone());
+        self.tell_panel(&plugin, "panel/action", json!({ "panel": id, "action": action }));
+        true
+    }
+
+    /// Where on the screen to open something that belongs beside the cursor.
+    ///
+    /// The caret's own cell where there is one. A pane with no caret in it —
+    /// one that is not focused — falls back to its top corner, which is where
+    /// a menu about that pane should go anyway.
+    fn cursor_on_screen(&self) -> (u16, u16) {
+        self.caret.unwrap_or_else(|| {
+            let area = self.view().area;
+            (area.x, area.y)
+        })
+    }
+
+    /// Whether a keystroke belongs to the plugin whose panel you are in.
+    ///
+    /// The rule: a panel gets the keys that would otherwise have **changed the
+    /// text**. A panel's text is not yours to change, so those keys are going
+    /// spare — and everything else still does exactly what it always does, so
+    /// a plugin cannot take a key anybody knows. The same bargain as
+    /// `Keys::suggest`, made for a buffer instead of for a binding.
+    fn panel_wants(&self, key: Key) -> bool {
+        self.here().panel.is_some() && self.keys.lookup(key).is_none_or(|cmd| cmd.writes())
+    }
+
+    /// Hand a keystroke to the plugin whose panel is in front of you.
+    fn send_panel_key(&mut self, key: Key) {
+        let Some((plugin, id)) = self
+            .here()
+            .panel
+            .as_ref()
+            .map(|p| (p.plugin.clone(), p.id.clone()))
+        else {
+            return;
+        };
+        let at = self.view().cursor();
+        let (line, column) = self.here().point_at_char(at);
+        self.tell_panel(
+            &plugin,
+            "panel/key",
+            // Where the cursor was as well as which key: nearly everything a
+            // panel does with a key it does to the row you are standing on,
+            // and making every plugin work that out for itself from a cursor
+            // it was never told about would be silly.
+            json!({ "panel": id, "key": key.spelled(), "line": line, "column": column }),
+        );
+    }
+
+    /// Say something to whichever host is running a plugin, about a panel.
+    fn tell_panel(&mut self, plugin: &str, method: &str, params: Value) {
+        let id = self
+            .hosts
+            .all()
+            .iter()
+            .position(|h| h.plugin == plugin && h.is_ready())
+            .map(HostId);
+        if let Some(host) = id.and_then(|id| self.hosts.get_mut(id)) {
+            host.notify_out(method, params);
+        }
+    }
+
+    /// Problems a plugin found, in the margin beside the language server's.
+    ///
+    /// Namespaced by plugin, so a fresh set from one replaces only its own
+    /// findings. A plugin cannot clear clangd's, and clangd cannot clear its.
+    fn plugin_diagnostics(&mut self, id: HostId, params: &Value) -> Result<Value, String> {
+        let Some(plugin) = self
+            .hosts
+            .get(id)
+            .and_then(|h| crate::plugin::find(&h.plugin))
+        else {
+            return Err("that plugin is not running".into());
+        };
+        let told = crate::doc::Told::Plugin(plugin.id.as_str());
+        let name = plugin.name.clone();
+
+        // A plugin says everything it thinks about a file at once, so a set
+        // that names a file replaces what it said about that file; one that
+        // names none replaces everything it has said.
+        let only: Option<PathBuf> = params
+            .get("path")
+            .and_then(Value::as_str)
+            .map(PathBuf::from);
+        for doc in &mut self.docs {
+            if only.as_deref().is_none_or(|p| doc.path.as_deref() == Some(p)) {
+                doc.diagnostics.retain(|d| d.told != told);
+            }
+        }
+
+        let items = params
+            .get("items")
+            .and_then(Value::as_array)
+            .ok_or("diagnostics need some items")?;
+        let mut count = 0;
+        for item in items {
+            let path = item
+                .get("path")
+                .and_then(Value::as_str)
+                .map(PathBuf::from)
+                .or_else(|| only.clone());
+            let Some(doc_id) = self
+                .docs
+                .iter()
+                .find(|d| match &path {
+                    Some(p) => d.path.as_deref() == Some(p.as_path()),
+                    None => false,
+                })
+                .map(|d| d.id)
+            else {
+                // About a file that is not open. Perfectly normal for a plugin
+                // that has just built a whole project.
+                continue;
+            };
+            let Some(doc) = self.doc_mut(doc_id) else {
+                continue;
+            };
+            let row = item.get("line").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let col = item.get("column").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let end_row = item
+                .get("end_line")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize)
+                .unwrap_or(row);
+            let end_col = item
+                .get("end_column")
+                .and_then(Value::as_u64)
+                .map(|n| n as usize)
+                // Nothing said about where it ends means the one character it
+                // starts at, so that there is something to underline.
+                .unwrap_or(col + 1);
+            let from = doc.char_at_point(row, col);
+            let to = doc.char_at_point(end_row, end_col);
+            doc.diagnostics.push(crate::doc::Diagnostic {
+                range: Range::new(from, to.max(from)),
+                severity: match item.get("severity").and_then(Value::as_str) {
+                    Some("error") => crate::doc::Severity::Error,
+                    Some("info") => crate::doc::Severity::Info,
+                    Some("hint") => crate::doc::Severity::Hint,
+                    _ => crate::doc::Severity::Warning,
+                },
+                message: item
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .unwrap_or("something is wrong here")
+                    .to_string(),
+                source: Some(
+                    item.get("source")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| name.clone()),
+                ),
+                code: item
+                    .get("code")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                data: None,
+                told,
+            });
+            count += 1;
+        }
+        Ok(json!({ "shown": count }))
+    }
+
+    /// Which plugin a host belongs to, for a line in the status bar.
+    fn plugin_name(&self, id: HostId) -> String {
+        self.hosts
+            .get(id)
+            .map(|h| h.plugin.clone())
+            .unwrap_or_else(|| "a plugin".into())
+    }
+
+    /// Anything the host machinery wanted to say, moved to the status line —
+    /// it runs in the middle of other work and the screen is not its to write
+    /// on.
+    fn take_plugin_problems(&mut self) {
+        let problems = std::mem::take(&mut self.hosts.problems);
+        if let Some(first) = problems.into_iter().next() {
+            self.say_bad(first);
+        }
+    }
+
+    /// One thing a plugin asked the editor to do.
+    ///
+    /// The rule this list is written against: **a plugin may do nothing a
+    /// keystroke cannot**. Every arm goes through the same door a person does,
+    /// so a plugin's work is undoable, themed and consistent for free, and
+    /// there is no second implementation of anything to drift.
+    fn plugin_asked(
+        &mut self,
+        id: HostId,
+        method: &str,
+        params: &Value,
+        // The JSON-RPC id, where this came as a question rather than as a
+        // statement. `run` is the one thing that needs it, because the answer
+        // is sent from a thread long after this returns.
+        request: Option<&Value>,
+    ) -> Answer {
+        let text = |key: &str| -> String {
+            params
+                .get(key)
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        match method {
+            "status/say" => {
+                let words = text("text");
+                if words.trim().is_empty() {
+                    return Answer::No("said nothing".into());
+                }
+                match params.get("kind").and_then(Value::as_str) {
+                    Some("good") => self.say_good(words),
+                    Some("bad") => self.say_bad(words),
+                    _ => self.say(words),
+                }
+                Answer::Now(Value::Null)
+            }
+            "buffer/show" => {
+                let name = match text("name") {
+                    empty if empty.trim().is_empty() => format!("{} output", self.plugin_name(id)),
+                    given => given,
+                };
+                // A plugin has to ask to be taken to. Most of the time it
+                // should not: what it has to say arrives when it arrives, and
+                // where the cursor is belongs to whoever is typing.
+                let focus = params
+                    .get("focus")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                self.put_in_a_buffer(&name, &text("text"), focus);
+                Answer::Now(Value::Null)
+            }
+            "buffer/read" => match self
+                .plugin_means(params)
+                .and_then(|id| self.doc(id).ok_or_else(|| "that buffer is not open".into()))
+            {
+                Ok(doc) => Answer::Now(json!({
+                    "path": doc.path,
+                    "language": lang::get(doc.language).name,
+                    "version": doc.version,
+                    "text": doc.text(),
+                })),
+                Err(why) => Answer::No(why),
+            },
+            "buffer/edit" => self.plugin_edit(params).into(),
+            "panel/set" => self.plugin_panel(id, params).into(),
+            "hint/set" => self.plugin_hint(id, params).into(),
+            // The editor's own list, prompt and yes/no, lent out. A plugin
+            // asking "which board?" gets the same box, the same keys and the
+            // same colours as Ctrl-P, which is the point: it should look like
+            // textfold rather than like a plugin.
+            "pick" => {
+                let rows: Vec<Row> = params
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|item| {
+                                // A bare string is both what is shown and what
+                                // comes back, which is most lists.
+                                if let Some(label) = item.as_str() {
+                                    return Some(Row::new(
+                                        label,
+                                        Choice::PluginItem(label.to_string()),
+                                    ));
+                                }
+                                let label = item.get("label").and_then(Value::as_str)?;
+                                let value = item
+                                    .get("value")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or(label);
+                                let mut row =
+                                    Row::new(label, Choice::PluginItem(value.to_string()));
+                                if let Some(detail) = item.get("detail").and_then(Value::as_str) {
+                                    row = row.detail(detail);
+                                }
+                                if let Some(tag) = item.get("tag").and_then(Value::as_str) {
+                                    row = row.tag(tag);
+                                }
+                                Some(row)
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if rows.is_empty() {
+                    return Answer::No("there was nothing in that list".into());
+                }
+                let mut picker = Picker::new(Kind::PluginPick, rows);
+                picker.called = Some(match text("title") {
+                    empty if empty.trim().is_empty() => self.plugin_name(id),
+                    given => given,
+                });
+                self.ask_for_plugin(id, request, Overlay::Picker(picker))
+            }
+            "prompt" => {
+                let mut prompt = Prompt::new(PromptKind::PluginAsked);
+                prompt.label = Some(match text("title") {
+                    empty if empty.trim().is_empty() => format!("{}?", self.plugin_name(id)),
+                    given => given,
+                });
+                prompt.input = text("value");
+                prompt.caret = prompt.input.chars().count();
+                self.ask_for_plugin(id, request, Overlay::Prompt(prompt))
+            }
+            "confirm" => {
+                let message = match text("text") {
+                    empty if empty.trim().is_empty() => {
+                        return Answer::No("a question needs asking".into());
+                    }
+                    given => given,
+                };
+                let confirm = Confirm {
+                    message,
+                    choices: vec![('y', "yes".into()), ('n', "no".into())],
+                    then: Then::PluginAsked,
+                };
+                self.ask_for_plugin(id, request, Overlay::Confirm(confirm))
+            }
+            // A menu where the cursor is, rather than in the middle of the
+            // screen. The difference between `pick` and this is the same
+            // difference the editor's own two lists have: `pick` is for
+            // choosing out of hundreds by typing part of a name, a menu is for
+            // the handful of things that make sense right here, read rather
+            // than searched, and it has to appear where you are.
+            "menu" => {
+                let items: Vec<menu::Item> = params
+                    .get("items")
+                    .and_then(Value::as_array)
+                    .map(|items| {
+                        items
+                            .iter()
+                            .map(|item| {
+                                // A bare string is a row that is its own
+                                // answer; a null is a divider.
+                                if item.is_null() {
+                                    return menu::Item::divider();
+                                }
+                                if let Some(label) = item.as_str() {
+                                    return menu::Item::chosen(label, label);
+                                }
+                                let label =
+                                    item.get("label").and_then(Value::as_str).unwrap_or("");
+                                let value = item
+                                    .get("value")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or(label);
+                                menu::Item::chosen(label, value).enabled(
+                                    item.get("enabled")
+                                        .and_then(Value::as_bool)
+                                        .unwrap_or(true),
+                                )
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !items.iter().any(|item| matches!(item.action, menu::Action::Chosen(_))) {
+                    return Answer::No("there was nothing in that menu".into());
+                }
+                // Where the cursor is on the screen. A click has already put
+                // the cursor where it landed, so a menu asked for after a
+                // click on a panel row opens on that row.
+                let anchor = self.cursor_on_screen();
+                self.ask_for_plugin(id, request, Overlay::Menu(menu::Menu::new(items, anchor)))
+            }
+            "open" => {
+                let path = text("path");
+                if path.trim().is_empty() {
+                    return Answer::No("open needs a path".into());
+                }
+                let path = self.project.join(expand_path(&path));
+                self.open_path(&path);
+                if let Some(line) = params.get("line").and_then(Value::as_u64) {
+                    let column = params.get("column").and_then(Value::as_u64).unwrap_or(0);
+                    self.jump_to(line as usize, column as usize);
+                }
+                Answer::Now(Value::Null)
+            }
+            "diagnostics/set" => self.plugin_diagnostics(id, params).into(),
+            "run" => {
+                let command = text("command");
+                if command.trim().is_empty() {
+                    return Answer::No("run needs something to run".into());
+                }
+                // Notified rather than asked. There is nowhere to send the
+                // answer, and a program run for nobody is a program run by
+                // accident.
+                let Some(request) = request.cloned() else {
+                    return Answer::No("run has to be asked, not told".into());
+                };
+                let args = params
+                    .get("args")
+                    .and_then(Value::as_array)
+                    .map(|list| {
+                        list.iter()
+                            .filter_map(Value::as_str)
+                            .map(str::to_string)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let cwd = params.get("cwd").and_then(Value::as_str).map(PathBuf::from);
+                match self.hosts.run_program(id, request, &command, args, cwd) {
+                    // Answered from the thread, when the program is done.
+                    Ok(()) => Answer::Later,
+                    Err(why) => Answer::No(why),
+                }
+            }
+            // Deliberately not a silence: a plugin author who has misspelt a
+            // method, or reached for one textfold does not have yet, should
+            // find that out from the editor rather than from nothing
+            // happening.
+            _ => Answer::No(format!("textfold has no {method}")),
         }
     }
 
@@ -6578,7 +7775,7 @@ impl App {
     /// Turn a server's text edits into one undoable change to one document.
     fn apply_edits_to(&mut self, id: DocId, edits: &[Value]) -> usize {
         let Some(doc) = self.doc(id) else { return 0 };
-        let mut changes: Vec<crate::doc::Change> = edits
+        let changes: Vec<crate::doc::Change> = edits
             .iter()
             .filter_map(|edit| {
                 let range = edit.get("range")?;
@@ -6590,16 +7787,25 @@ impl App {
                 Some(crate::doc::Change::replace(from, to, text))
             })
             .collect();
+        self.apply_changes_to(id, changes)
+    }
+
+    /// One document, one undoable change, whoever worked the edits out.
+    ///
+    /// Shared by the language servers and the plugins deliberately: the
+    /// sorting, the overlap check, the panes and the undo step are the awkward
+    /// parts, and having two of them would mean having one that is wrong.
+    fn apply_changes_to(&mut self, id: DocId, mut changes: Vec<crate::doc::Change>) -> usize {
         if changes.is_empty() {
             return 0;
         }
-        // A server sends its edits against the file as it is, in no
-        // particular order and never overlapping. Sorting is all that is
-        // needed to make them a transaction.
+        // Edits arrive against the file as it is, in no particular order and
+        // never overlapping. Sorting is all that is needed to make them a
+        // transaction.
         changes.sort_by_key(|c| (c.from, c.to));
         changes.dedup_by(|a, b| a.from == b.from && a.to == b.to && a.text == b.text);
         if changes.windows(2).any(|pair| pair[0].to > pair[1].from) {
-            self.say_bad("the server sent overlapping edits; nothing was changed");
+            self.say_bad("those edits overlap each other; nothing was changed");
             return 0;
         }
         let count = changes.len();
@@ -6621,15 +7827,86 @@ impl App {
             pane.absorb(&applied, len);
         }
 
-        let App { docs, lsp, .. } = self;
+        let App { docs, lsp, hosts, .. } = self;
         if let Some(doc) = docs.iter().find(|d| d.id == id) {
             lsp.did_change(doc, &applied);
+            hosts.changed(doc, &applied);
         }
         if let Some(doc) = self.doc_mut(id) {
             doc.take_pending();
         }
         self.scroll_into_view();
         count
+    }
+}
+
+/// A panel's lines, as text, colours and the parts that do something.
+///
+/// Worked out together in one pass, so that a span can never point at text
+/// that is not there — which it could if the text and the ranges were built
+/// separately and one of them was changed later.
+#[allow(clippy::type_complexity)]
+fn panel_lines(
+    lines: &[Value],
+) -> (
+    String,
+    Vec<(Range, crate::theme::Role)>,
+    Vec<(Range, String)>,
+) {
+    let mut text = String::new();
+    let mut spans: Vec<(Range, crate::theme::Role)> = Vec::new();
+    let mut actions: Vec<(Range, String)> = Vec::new();
+    let mut at = 0usize;
+    let nothing = Vec::new();
+    for line in lines {
+        // A bare string is a line with nothing marked in it, which is most
+        // lines in most panels.
+        if let Some(plain) = line.as_str() {
+            text.push_str(plain);
+            text.push('\n');
+            at += plain.chars().count() + 1;
+            continue;
+        }
+        for span in line.get("spans").and_then(Value::as_array).unwrap_or(&nothing) {
+            let words = span.get("text").and_then(Value::as_str).unwrap_or_default();
+            if words.is_empty() {
+                continue;
+            }
+            // Characters, not bytes: a panel with a box-drawing character or
+            // an accent in it must still line its colours up with its text.
+            let end = at + words.chars().count();
+            let range = Range::new(at, end);
+            if let Some(role) = span.get("style").and_then(Value::as_str).and_then(panel_role) {
+                spans.push((range, role));
+            }
+            if let Some(action) = span.get("action").and_then(Value::as_str) {
+                actions.push((range, action.to_string()));
+            }
+            text.push_str(words);
+            at = end;
+        }
+        text.push('\n');
+        at += 1;
+    }
+    (text, spans, actions)
+}
+
+/// What a plugin's style name means, in the theme's terms.
+///
+/// Names rather than colours, on purpose. A panel asking for `keyword` is
+/// themed with everything else and re-themes for free when the person switches
+/// — where a plugin picking `#7FBDA7` would be a plugin that looks wrong on
+/// eleven of the sixteen themes and cannot be fixed from outside.
+///
+/// The names are tree-sitter's, which the editor already knows, plus a couple
+/// a plugin author would reach for that a grammar has no use for.
+fn panel_role(name: &str) -> Option<crate::theme::Role> {
+    match name {
+        // Not a capture any grammar produces, and the first thing anybody
+        // wants for the quiet half of a line.
+        "muted" | "dim" => Some(crate::theme::Role::Comment),
+        "warning" => Some(crate::theme::Role::Attribute),
+        _ => crate::syntax::role_for(name),
     }
 }
 
@@ -7436,6 +8713,13 @@ impl App {
         let Some(at) = self.position_at(column, row) else {
             return;
         };
+        // A panel is a plugin's own buffer, and the parts of it the plugin
+        // marked as doing something do it when you click them — which is what
+        // "clickable" has meant on a screen for forty years.
+        if self.panel_action_at(at) {
+            self.place_cursor(at, false, false);
+            return;
+        }
         // Ctrl-click is what every editor has taught people goes to the
         // definition of the thing under the pointer.
         if mods.contains(KeyModifiers::CONTROL) {
@@ -7580,6 +8864,34 @@ impl App {
             if !inside {
                 self.place_cursor(at, false, false);
             }
+        }
+        // A panel is a plugin's buffer, and the editor's own menu for it is
+        // Cut and Paste greyed out — true, and no use to anybody. The gesture
+        // goes to the plugin instead, with where it landed and whatever it had
+        // marked there, so it can put up a menu of its own.
+        if let Some((plugin, panel)) = self
+            .here()
+            .panel
+            .as_ref()
+            .map(|p| (p.plugin.clone(), p.id.clone()))
+        {
+            let at = self.view().cursor();
+            let (line, column) = self.here().point_at_char(at);
+            let action = self
+                .here()
+                .panel
+                .as_ref()
+                .and_then(|p| {
+                    p.actions
+                        .iter()
+                        .find(|(range, _)| range.start() <= at && at < range.end())
+                })
+                .map(|(_, action)| action.clone());
+            return self.tell_panel(
+                &plugin,
+                "panel/context",
+                json!({ "panel": panel, "line": line, "column": column, "action": action }),
+            );
         }
         let menu = self.text_menu((column, row));
         self.overlay = Overlay::Menu(menu);
@@ -8029,6 +9341,8 @@ commands! {
         |app| app.join_lines();
     INDENT => "indent", Edit, Edits, "Push the line right one level",
         |app| app.on_tab(false);
+    ACCEPT_HINT => "accept-hint", Edit, Edits, "Take the suggestion a plugin is offering",
+        |app| app.accept_hint();
     UNINDENT => "unindent", Edit, Edits, "Pull the line left one level",
         |app| app.on_tab(true);
     TOGGLE_COMMENT => "toggle-comment", Edit, Edits, "Comment the selected lines out, or back in",
@@ -8195,6 +9509,427 @@ mod tests {
                 app.type_char(c);
             }
         }
+    }
+
+    /// What a plugin asked for, answered the way the event loop answers it.
+    fn plugin_asks(app: &mut App, method: &str, params: serde_json::Value) -> Result<Value, String> {
+        match app.plugin_asked(HostId(0), method, &params, Some(&json!(1))) {
+            Answer::Now(value) => Ok(value),
+            Answer::No(why) => Err(why),
+            Answer::Later => Ok(json!("later")),
+        }
+    }
+
+    /// A keystroke through the whole loop, so that everything `handle` does
+    /// afterwards — including noticing that a box has gone — happens too.
+    fn pressed(app: &mut App, key: &str) {
+        let key = Key::parse(key).expect("a key");
+        app.handle(Event::Term(TermEvent::Key(KeyEvent::new(key.code, key.mods))));
+    }
+
+    #[test]
+    fn a_list_a_plugin_put_up_answers_with_the_row_that_was_picked() {
+        let (mut app, _rx) = editor();
+        let asked = app.plugin_asked(
+            HostId(0),
+            "pick",
+            &json!({ "title": "Which board?", "items": [
+                { "label": "Nucleo F401RE", "value": "f401re" },
+                { "label": "Discovery F407", "value": "f407" }
+            ]}),
+            Some(&json!(1)),
+        );
+        assert!(matches!(asked, Answer::Later), "the person has not answered yet");
+        assert!(app.plugin_waiting.is_some());
+        match &app.overlay {
+            Overlay::Picker(picker) => assert_eq!(picker.title(), "Which board?"),
+            _ => panic!("no list went up"),
+        }
+
+        pressed(&mut app, "down");
+        pressed(&mut app, "enter");
+        assert!(
+            app.plugin_waiting.is_none(),
+            "the plugin should have been answered"
+        );
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn changing_your_mind_about_a_plugins_question_is_still_an_answer() {
+        // The property that matters most about all of these: Escape is the
+        // commonest thing anybody does to a box, and a plugin that got nothing
+        // back would wait for ever.
+        for (method, params) in [
+            ("pick", json!({ "items": ["one", "two"] })),
+            ("prompt", json!({ "title": "Which port?" })),
+            ("confirm", json!({ "text": "Erase the chip?" })),
+            ("menu", json!({ "items": ["Input", "Output"] })),
+        ] {
+            let (mut app, _rx) = editor();
+            app.plugin_asked(HostId(0), method, &params, Some(&json!(1)));
+            assert!(app.plugin_waiting.is_some(), "{method} did not ask");
+            pressed(&mut app, "esc");
+            assert!(
+                app.plugin_waiting.is_none(),
+                "{method} left the plugin waiting on a box that had gone"
+            );
+        }
+    }
+
+    #[test]
+    fn a_plugins_second_question_does_not_leave_the_first_hanging() {
+        // The second box replaces the first on the screen, so the first has to
+        // be answered with nothing rather than quietly forgotten.
+        let (mut app, _rx) = editor();
+        app.plugin_asked(HostId(0), "prompt", &json!({}), Some(&json!(1)));
+        let first = app.plugin_waiting.as_ref().map(|a| a.request.clone());
+        assert_eq!(first, Some(json!(1)));
+
+        app.plugin_asked(HostId(0), "confirm", &json!({ "text": "sure?" }), Some(&json!(2)));
+        assert_eq!(
+            app.plugin_waiting.as_ref().map(|a| a.request.clone()),
+            Some(json!(2)),
+            "the second question should be the one waiting now"
+        );
+    }
+
+    #[test]
+    fn a_plugins_menu_opens_where_the_cursor_is_and_answers_what_was_picked() {
+        let (mut app, _rx) = editor();
+        app.caret = Some((40, 12));
+
+        let asked = app.plugin_asked(
+            HostId(0),
+            "menu",
+            &json!({ "items": [
+                { "label": "Go to it", "value": "go" },
+                null,
+                { "label": "Input",  "value": "in" },
+                { "label": "Analog", "value": "analog", "enabled": false }
+            ]}),
+            Some(&json!(1)),
+        );
+        assert!(matches!(asked, Answer::Later));
+
+        match &app.overlay {
+            Overlay::Menu(menu) => {
+                // Where the pointer is, not the middle of the screen. That is
+                // the whole difference between this and `pick`.
+                assert_eq!(menu.anchor, (40, 12));
+                assert_eq!(menu.len(), 4, "the divider is a row too");
+            }
+            _ => panic!("no menu opened"),
+        }
+
+        pressed(&mut app, "enter");
+        assert!(app.plugin_waiting.is_none(), "the plugin should have its answer");
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn a_menu_with_nothing_to_choose_is_not_put_up_at_all() {
+        // Dividers are rows but not choices. A menu of nothing but lines
+        // would be a box you cannot get out of except by escaping it.
+        let (mut app, _rx) = editor();
+        match app.plugin_asked(HostId(0), "menu", &json!({ "items": [null, null] }), Some(&json!(1))) {
+            Answer::No(why) => assert!(why.contains("nothing")),
+            _ => panic!("it should have been turned down"),
+        }
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn a_question_told_rather_than_asked_is_turned_down() {
+        // A notification has no id, so there is nowhere to send the answer.
+        // Better to say so than to put a box on the screen that answers into
+        // the void.
+        let (mut app, _rx) = editor();
+        match app.plugin_asked(HostId(0), "pick", &json!({ "items": ["a"] }), None) {
+            Answer::No(why) => assert!(why.contains("asked")),
+            _ => panic!("it should have been turned down"),
+        }
+        assert!(matches!(app.overlay, Overlay::None));
+    }
+
+    #[test]
+    fn a_panel_gets_the_keys_that_would_have_changed_the_text() {
+        let (mut app, _rx) = editor();
+        let key = |text: &str| Key::parse(text).expect("a key");
+
+        // In an ordinary buffer, nothing is a plugin's.
+        assert!(!app.panel_wants(key("r")));
+
+        let id = app.view().doc;
+        if let Some(doc) = app.doc_mut(id) {
+            doc.read_only = true;
+            doc.panel = Some(crate::doc::Panel {
+                plugin: "cargo".into(),
+                id: "cargo/report".into(),
+                spans: Vec::new(),
+                actions: Vec::new(),
+            });
+        }
+
+        // A plain letter would have typed a character, and a panel is not
+        // yours to type into — so it is the plugin's.
+        assert!(app.panel_wants(key("r")));
+        assert!(app.panel_wants(key("c")));
+        // So is Enter, which would have made a newline.
+        assert!(app.panel_wants(key("enter")));
+
+        // But nothing anybody knows is taken. Every one of these still does
+        // what it does everywhere else in the editor.
+        for text in ["ctrl-p", "ctrl-w", "ctrl-q", "down", "ctrl-f", "alt-,", "f8"] {
+            assert!(
+                !app.panel_wants(key(text)),
+                "{text} should still be the editor's"
+            );
+        }
+    }
+
+    /// An offer, as a plugin would have made it.
+    fn suggesting(app: &mut App, text: &str) {
+        let at = app.view().cursor();
+        let id = app.view().doc;
+        if let Some(doc) = app.doc_mut(id) {
+            doc.hint = Some(crate::doc::Hint {
+                plugin: "copilot".into(),
+                at,
+                text: text.into(),
+            });
+        }
+    }
+
+    #[test]
+    fn taking_a_suggestion_puts_it_in_as_one_thing_to_undo() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "let x = ");
+        suggesting(&mut app, "1 + 2;");
+
+        assert!(app.hint_showing());
+        pressed(&mut app, "tab");
+        assert_eq!(app.here().text(), "let x = 1 + 2;");
+        // The cursor ends where it would have if you had typed it.
+        assert_eq!(app.view().cursor(), "let x = 1 + 2;".chars().count());
+        // And it is your text now, in every way — including undoably.
+        app.run(Cmd::UNDO);
+        assert_eq!(app.here().text(), "let x = ");
+    }
+
+    #[test]
+    fn tab_is_still_tab_when_nothing_is_being_offered() {
+        // The key is not conditional, the offer is. An editor where Tab
+        // stopped indenting because a plugin was installed would be an editor
+        // nobody would install the plugin into.
+        let (mut app, _rx) = editor();
+        typed(&mut app, "x");
+        assert!(!app.hint_showing());
+        pressed(&mut app, "tab");
+        assert!(
+            app.here().text().starts_with('x') && app.here().text().len() > 1,
+            "tab should have indented, got {:?}",
+            app.here().text()
+        );
+    }
+
+    #[test]
+    fn an_offer_goes_when_you_walk_away_from_it() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "hello");
+        suggesting(&mut app, " world");
+        assert!(app.hint_showing());
+
+        pressed(&mut app, "left");
+        assert!(
+            app.here().hint.is_none(),
+            "moving off an offer is declining it"
+        );
+    }
+
+    #[test]
+    fn an_offer_goes_when_the_text_it_was_about_changes() {
+        // It was worked out against the text as it was. The same rule an edit
+        // computed against an old version gets, arrived at from the other side.
+        let (mut app, _rx) = editor();
+        typed(&mut app, "hello");
+        suggesting(&mut app, " world");
+        typed(&mut app, "!");
+        assert!(app.here().hint.is_none());
+    }
+
+    #[test]
+    fn escape_waves_an_offer_away_without_taking_it() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "hello");
+        suggesting(&mut app, " world");
+        pressed(&mut app, "esc");
+        assert!(app.here().hint.is_none());
+        assert_eq!(app.here().text(), "hello", "escape should not have taken it");
+    }
+
+    #[test]
+    fn a_panels_colours_line_up_with_its_text() {
+        let (text, spans, actions) = panel_lines(&[
+            json!({ "spans": [
+                { "text": "USART2", "style": "keyword" },
+                { "text": "  TX ", "style": "muted" },
+                { "text": "PA2", "style": "string", "action": "pin:PA2" }
+            ]}),
+            json!(""),
+            json!("plain line"),
+        ]);
+        assert_eq!(text, "USART2  TX PA2\n\nplain line\n");
+
+        // Every span points at exactly the words it was given.
+        let at = |r: Range| text.chars().skip(r.start()).take(r.len()).collect::<String>();
+        assert_eq!(at(spans[0].0), "USART2");
+        assert_eq!(at(spans[1].0), "  TX ");
+        assert_eq!(at(spans[2].0), "PA2");
+        assert_eq!(actions.len(), 1, "only one span said it does anything");
+        assert_eq!(at(actions[0].0), "PA2");
+        assert_eq!(actions[0].1, "pin:PA2");
+    }
+
+    #[test]
+    fn a_panel_is_counted_in_characters_and_not_in_bytes() {
+        // A box-drawing character is three bytes and one column. Counting
+        // bytes here would put every colour on a line after the first
+        // non-ASCII character in the wrong place.
+        let (text, spans, _) = panel_lines(&[json!({ "spans": [
+            { "text": "▸ ", "style": "muted" },
+            { "text": "ADC1", "style": "keyword" }
+        ]})]);
+        assert_eq!(text, "▸ ADC1\n");
+        let second = spans[1].0;
+        assert_eq!(
+            text.chars().skip(second.start()).take(second.len()).collect::<String>(),
+            "ADC1"
+        );
+    }
+
+    #[test]
+    fn a_style_a_plugin_asks_for_is_the_themes_own() {
+        // Names rather than colours, so a panel is themed with everything
+        // else. Tree-sitter's names, which the editor already knows...
+        assert_eq!(panel_role("keyword"), Some(crate::theme::Role::Keyword));
+        assert_eq!(panel_role("string"), Some(crate::theme::Role::String));
+        // ...as specific as the theme actually goes...
+        assert_eq!(
+            panel_role("keyword.control"),
+            Some(crate::theme::Role::KeywordControl)
+        );
+        // ...and falling back along the dots when it goes further, the way a
+        // grammar's capture does.
+        assert_eq!(panel_role("keyword.made.up"), Some(crate::theme::Role::Keyword));
+        // ...plus the couple a plugin author reaches for that no grammar has.
+        assert_eq!(panel_role("muted"), Some(crate::theme::Role::Comment));
+        // A name nobody knows is drawn as ordinary text rather than refused:
+        // a panel with one style misspelt should still be a readable panel.
+        assert_eq!(panel_role("fuchsia"), None);
+    }
+
+    #[test]
+    fn only_the_marked_parts_of_a_panel_do_anything() {
+        let (mut app, _rx) = editor();
+        let id = app.view().doc;
+        if let Some(doc) = app.doc_mut(id) {
+            doc.panel = Some(crate::doc::Panel {
+                plugin: "cargo".into(),
+                id: "cargo/report".into(),
+                spans: Vec::new(),
+                actions: vec![(Range::new(4, 9), "go:somewhere".into())],
+            });
+        }
+        // Inside the marked stretch, and at its first character.
+        assert!(app.panel_action_at(4));
+        assert!(app.panel_action_at(8));
+        // Just past the end, and before the start. Enter there should go on to
+        // mean what Enter usually means rather than being quietly eaten.
+        assert!(!app.panel_action_at(9));
+        assert!(!app.panel_action_at(3));
+    }
+
+    #[test]
+    fn a_plugin_asking_for_something_textfold_does_not_do_is_told_so() {
+        // Not a silence. A plugin author who has misspelt a method, or reached
+        // for one that does not exist yet, should hear it from the editor
+        // rather than watch nothing happen.
+        let (mut app, _rx) = editor();
+        assert_eq!(
+            plugin_asks(&mut app, "buffer/incinerate", json!({})),
+            Err("textfold has no buffer/incinerate".into())
+        );
+    }
+
+    #[test]
+    fn a_plugin_can_read_a_buffer_and_change_it() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "one\ntwo\nthree");
+
+        let read = plugin_asks(&mut app, "buffer/read", json!({})).expect("it should read");
+        assert_eq!(read["text"], "one\ntwo\nthree");
+        let version = read["version"].clone();
+
+        // Line and column both counted from zero, in characters.
+        let done = plugin_asks(
+            &mut app,
+            "buffer/edit",
+            json!({ "version": version, "edits": [
+                { "line": 1, "column": 0, "end_line": 1, "end_column": 3, "text": "TWO" }
+            ]}),
+        )
+        .expect("it should apply");
+        assert_eq!(done["applied"], 1);
+        assert_eq!(app.here().text(), "one\nTWO\nthree");
+
+        // And it went through the same door a keystroke does, so it is one
+        // thing to undo — which is the whole reason for insisting on that.
+        app.run(Cmd::UNDO);
+        assert_eq!(app.here().text(), "one\ntwo\nthree");
+    }
+
+    #[test]
+    fn an_edit_worked_out_against_older_text_is_refused_rather_than_applied() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "hello");
+        let stale = app.here().version;
+        typed(&mut app, " there");
+        assert_ne!(app.here().version, stale, "typing should move the version on");
+
+        // A plugin holding an edit for text that is no longer there would
+        // corrupt the file rather than fix it, so it is turned down and told
+        // why — not applied, and not silently dropped either.
+        let refused = plugin_asks(
+            &mut app,
+            "buffer/edit",
+            json!({ "version": stale, "edits": [
+                { "line": 0, "column": 0, "end_line": 0, "end_column": 5, "text": "goodbye" }
+            ]}),
+        );
+        assert!(
+            refused.is_err_and(|why| why.contains(&stale.to_string())),
+            "a stale edit should say which version it was for"
+        );
+        assert_eq!(app.here().text(), "hello there");
+    }
+
+    #[test]
+    fn a_plugin_that_says_nothing_is_not_given_the_status_line() {
+        let (mut app, _rx) = editor();
+        assert!(plugin_asks(&mut app, "status/say", json!({ "text": "  " })).is_err());
+        assert!(plugin_asks(&mut app, "status/say", json!({ "text": "building" })).is_ok());
+    }
+
+    #[test]
+    fn problems_from_a_plugin_that_is_not_running_go_nowhere() {
+        // The id names no host, which is what a message arriving after one has
+        // died looks like.
+        let (mut app, _rx) = editor();
+        assert_eq!(
+            plugin_asks(&mut app, "diagnostics/set", json!({ "items": [] })),
+            Err("that plugin is not running".into())
+        );
     }
 
     /// The keystroke another program sends to say "open this", as bytes on the

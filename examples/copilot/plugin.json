@@ -1,0 +1,43 @@
+{
+  "id": "copilot",
+  "name": "GitHub Copilot",
+  "about": "Inline suggestions from Copilot, and a chat panel",
+
+  "_about": [
+    "Two halves. The inline suggestions are real Copilot, bridged to the",
+    "`copilot-language-server` that GitHub ships — you need to be signed in",
+    "(copilot/sign-in) and to have a subscription.",
+    "",
+    "The chat panel is not: Copilot's language server has no conversation",
+    "API, so the panel runs whatever `settings.chat.command` points at and",
+    "shows what comes back. Point it at something you have.",
+    "",
+    "To install it:",
+    "  cd examples/copilot && npm install",
+    "  ln -s $PWD ~/.config/textfold/plugins/copilot",
+    "",
+    "Then open a Rust or Python file and start typing. Tab takes a",
+    "suggestion, Esc waves it away."
+  ],
+
+  "host": {
+    "command": "python3",
+    "args": ["${plugin}/textfold_copilot.py"],
+    "roots": ["Cargo.toml", "package.json", "pyproject.toml", ".git"],
+    "activate": ["language:Rust", "language:Python", "language:TypeScript", "command"],
+    "wants_buffers": ["rust", "python", "typescript", "javascript", "go", "c", "cpp"],
+    "settings": {
+      "chat": { "command": ["copilot", "-p"] }
+    }
+  },
+
+  "panels": [
+    { "name": "chat", "about": "Ask Copilot something, in a panel" }
+  ],
+
+  "commands": [
+    { "name": "sign-in", "about": "Sign in to GitHub Copilot" },
+    { "name": "status", "about": "Whether Copilot is signed in and working" },
+    { "name": "suggestions", "about": "Turn inline suggestions on or off" }
+  ]
+}

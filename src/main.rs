@@ -12,12 +12,14 @@ mod diff;
 mod doc;
 mod edit;
 mod git;
+mod host;
 mod keys;
 mod lang;
 mod lsp;
 mod menu;
 mod picker;
 mod plugin;
+mod rpc;
 mod session;
 mod syntax;
 mod term;
@@ -130,6 +132,16 @@ fn main() -> Result<()> {
                 let state = if plugin::is_on(&tool.id) { "on " } else { "off" };
                 println!("{state}    {:<20} runs {}", tool.id, tool.command);
             }
+            // A plugin that brings a program of its own says so here as well
+            // as in the list inside the editor: it is a different thing to
+            // switch on from one that only adds a language.
+            if let Some(host) = &plugin.host {
+                println!("      {:<20} its own program: {}", "", host.command);
+                for command in &plugin.commands {
+                    let state = if plugin::is_on(&command.id) { "on " } else { "off" };
+                    println!("{state}    {:<20} {}", command.id, command.about);
+                }
+            }
         }
         for problem in plugin::problems() {
             eprintln!("{problem}");
@@ -229,6 +241,7 @@ fn main() -> Result<()> {
     // matters, since it is the only one with the cursors where you left them.
     app.remember_session(true);
     app.lsp.shutdown_all();
+    app.hosts.shutdown_all();
     stop(wants_mouse, wants_keys);
     result
 }

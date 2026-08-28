@@ -1001,6 +1001,10 @@ are afresh. A file whose language you set by hand keeps what you told it.
 |---|---|
 | `languages` | how to colour a language, comment it out, and which servers to run — see [Languages](#languages) |
 | `tools` | programs to run on the file: formatters, linters, test runs — see [Tools](#tools) |
+| `host` | a program of its own that stays running — see [A plugin that is a program](#a-plugin-that-is-a-program) |
+| `commands` | things that program answers to, each a command like any other |
+| `panels` | buffers that program fills — see [A panel of its own](#a-panel-of-its-own) |
+| `host.settings` | whatever the plugin wants to be told about itself |
 | `themes` | sets of colours, in the shape a [theme file](#colours) is in |
 | `keys` | keys it would like bound, by command name |
 
@@ -1021,7 +1025,7 @@ are afresh. A file whose language you set by hand keeps what you told it.
 ```
 
 Per plugin: `id`, `name`, `about`, `enabled` (say `false` to ship one switched
-off), and the four contribution tables above.
+off), and the contribution tables above.
 
 **A plugin's keys are a suggestion, not a claim.** One is bound only if
 nothing already wants that key, so a plugin cannot quietly take Ctrl-S, and a
@@ -1087,6 +1091,299 @@ setup with no language server involved at all:
     "pattern": "%f:%l:%c: %m", "on_save": true }
 ] }
 ```
+
+### A plugin that is a program
+
+A tool is started, prints, and dies. That is most of what people write plugins
+for, and it is why `tools` exists — but it cannot do anything that has to be
+*remembered* between one keystroke and the next. It cannot hold a build that is
+still running, keep a connection to a debug probe, or tell you where it has got
+to while it is getting there.
+
+A plugin with a `host` is the other kind. It is a program textfold starts and
+then talks to for as long as it is wanted, over its own standard input and
+output. **It can be written in any language**: the whole of what it has to do
+is read and write JSON on a pipe.
+
+```json
+{ "id": "cargo", "name": "Cargo",
+  "about": "Build, check, test and clippy, without leaving the editor",
+
+  "host": {
+    "command": "python3",
+    "args": ["${plugin}/textfold_cargo.py"],
+    "roots": ["Cargo.toml"],
+    "activate": ["language:Rust", "command"]
+  },
+
+  "commands": [
+    { "name": "check", "about": "Check this project, without building it" },
+    { "name": "test",  "about": "Run this project's tests" },
+    { "name": "stop",  "about": "Stop whatever cargo is doing" }
+  ],
+
+  "keys": { "cargo/check": ["f6"] } }
+```
+
+That one is real and it is in the repository: `examples/cargo`, about a hundred
+and fifty lines of Python with nothing installed to run it. To try it:
+
+```sh
+ln -s $PWD/examples/cargo ~/.config/textfold/plugins/cargo
+```
+
+Its real interface, though, is `cargo/report`: a panel it drives itself.
+`c`, `b`, `t` and `l` run check, build, test and clippy; `x` stops one; `o`
+shows what cargo actually said underneath the list; `Enter` or a click on a
+problem goes to it. The problems appear grouped by file *while the build is
+still running*. Nothing opens a tab of text at you.
+
+It also has `cargo/problems`, which puts what it found in the editor's own
+fuzzy list and jumps to the one you pick, and `cargo/clean`, which asks first.
+Right-clicking a problem in its panel opens a menu under the pointer, with "Go
+to it" above the four runs.
+
+There is a second one in `examples/copilot`: GitHub Copilot, in about four
+hundred lines. Its inline suggestions are real — it bridges to the
+`copilot-language-server` GitHub ships, which speaks the same framing textfold's
+plugins do, so the plugin is mostly a translator between two protocols that
+already agree about how to move JSON down a pipe. Its chat panel is not: Copilot's
+language server has no conversation API, so the panel runs whatever
+`settings.chat.command` points at. Between them the two examples use every
+message in the protocol.
+
+**It stays out of rust-analyzer's way**, which is worth copying if you write
+something similar. textfold already runs rust-analyzer and configures it to
+run `cargo clippy` on save, so the compiler's errors are already in your
+margin — the plugin therefore keeps its findings in its panel and leaves the
+margin alone, and `d` mirrors them in for anyone who has turned that off. It
+also builds in a target directory of its own: two cargos sharing one take
+turns on the lock and tread on each other's fingerprints, which shows up as a
+build that says `Finished` and reports none of the errors that are plainly
+there.
+
+Then open a Rust file and press F6. `cargo check…` appears in the status line,
+then each line cargo prints about where it has got to, **then each compiler
+error in the margin as the compiler finds it** — not at the end — and the
+output in a buffer. Press F6 again while it is still going and it says so
+rather than starting a second cargo. None of those four things is possible for
+a tool.
+
+Per host: `command` and `args` (what to run), `roots` (the files that mark the
+top of a project — one process per project, as with a language server),
+`activate` (below), `wants_buffers` (which languages it wants to be told the
+text of; leave it out and it is told nothing), and `env`.
+
+`${plugin}` in a command, an argument or an environment variable is the
+directory the manifest was read from. A host runs in your project, not beside
+its own files, so this is how a plugin points at the program it ships with.
+
+**Nothing starts until it is wanted.** `activate` says what counts:
+
+| | |
+|---|---|
+| `"language:Rust"` | a file of that language was opened |
+| `"file:**/*.ioc"` | a file matching that was opened — `*` within a name, `**` across directories |
+| `"command"` | one of its own commands was run |
+
+Running one of a plugin's commands always starts it, whether or not `command`
+is listed — a command in the palette that quietly did nothing would be a bug
+rather than a setting. So a plugin nobody has asked anything of is a plugin
+that is not running: fourteen installed and a Rust file open is one process,
+not fourteen.
+
+Each entry in `commands` becomes a command like any other: it is in the
+palette, you can bind a key to it, `plugins` has a switch for it, and it takes
+its id the moment the manifest is read — before the program has ever been
+started, which is what lets running it be the thing that starts the program.
+Say `"behaviour": "edits"` for one that changes the text, and it will be
+refused on a read-only file along with everything else that does.
+
+A command a plugin's program is given does not hold the editor up. It goes
+down the pipe and the next keystroke is dealt with; whatever the plugin has to
+say arrives later, on the same channel the keyboard arrives on. A plugin that
+takes four minutes to build a firmware image cannot make the cursor stutter,
+because the cursor is not waiting on it — and a plugin that wedges itself
+entirely is a queue that stops filling rather than an editor that stops
+drawing. One that falls over three times in a minute is left alone until you
+switch it off and on again.
+
+**What a plugin can ask the editor for:**
+
+| | |
+|---|---|
+| `status/say` | a line in the status bar. `"kind"` of `"good"` or `"bad"` colours it |
+| `buffer/show` | open some text in a buffer, for output worth reading properly. Say `"focus": true` to be taken to it — by default you are not, because a build finishing four minutes later should not move your cursor |
+| `buffer/read` | the text of a buffer, its language and its version |
+| `buffer/edit` | change one, as one undoable step |
+| `diagnostics/set` | problems in the margin |
+| `run` | run a program, and be told how it went |
+| `pick` | put a list up and be told what was chosen |
+| `prompt` | ask for a line of text |
+| `confirm` | ask a yes-or-no question |
+| `open` | open a file, optionally at a line |
+| `panel/set` | fill a panel of its own with styled, clickable lines |
+| `hint/set` | offer some text where the cursor is — shown, not inserted |
+
+…and what the editor tells it: `buffer/opened` · `changed` · `saved` ·
+`closed`, `selection/changed`, `command/run`, `panel/opened` · `closed` ·
+`action` · `key`, and `hint/taken` · `dropped`.
+
+`selection/changed` says where the cursor has come to rest — **come to rest**,
+not where it is: cursor motion is the highest-frequency thing that happens in
+an editor, and it is sent once you stop rather than forty times on the way.
+Like the buffer messages, only plugins that named a language in
+`wants_buffers` get it.
+
+A plugin is handed its own `settings` from the manifest at `initialize`. The
+editor carries that block and does not read it: what a plugin wants to be told
+about itself is the plugin's business.
+
+The last four are the editor's own boxes, lent out. A plugin asking "which
+board?" gets the same fuzzy list as `Ctrl-P`, with the same keys, the same
+colours and the same theme — which is the point: a plugin should look like
+textfold rather than like a plugin. It asks with a title and some items and is
+told what was picked; **changing your mind is an answer too**, so Escape sends
+back nothing rather than leaving a plugin waiting for ever on a box that has
+gone.
+
+Every one of them goes through the same code a keystroke does. That is the
+rule the rest of this is built to — **a plugin may do nothing a keystroke
+cannot** — and it is what makes a plugin's edit undoable, tells the language
+servers about it, and carries the cursors across it without a plugin having to
+know any of that exists.
+
+### Suggestions in the text
+
+A plugin can offer text where the cursor is, drawn in place but not put in:
+
+```json
+{ "method": "hint/set",
+  "params": { "path": "/src/fib.py", "line": 2, "column": 4,
+              "text": "if n < 0:\n    raise ValueError(...)" } }
+```
+
+The first line of it appears after the cursor in the colour of something that
+is not there yet, with `+10 lines` after it if there is more. `Tab` takes it,
+`Esc` waves it away, and moving the cursor or changing the text takes the offer
+back — it was worked out about the text as it was, and the text has moved on.
+An empty `text` clears it, which is how a plugin says "never mind" without a
+second message.
+
+Taking it is an ordinary edit: one thing to undo, and the language servers hear
+about it, because a suggestion becomes your text the moment you take it and is
+your text in every way afterwards. The plugin is told `hint/taken` or
+`hint/dropped` either way, so it knows whether to offer something else.
+
+`Tab` is still indent every other time. The key is not conditional — the offer
+is: while one is on the screen it takes the handful of keys that steer it, the
+same way the completion list does, and the rest of the time nothing has
+changed.
+
+Only the line the cursor is on is drawn over, and only to the right of the
+cursor, so nothing that is really in your file is ever covered by something
+that is not.
+
+### A panel of its own
+
+A plugin can also have a buffer that it fills. Declare one beside the commands:
+
+```json
+{ "panels": [
+  { "name": "report", "about": "What cargo found, as a list you can click" }
+] }
+```
+
+It becomes a command like any other — `cargo/report` in the palette, bindable,
+with a switch in `plugins` — and running it opens the panel and tells the
+plugin there is somewhere to draw. What the plugin sends is a list of lines:
+
+```json
+{ "method": "panel/set", "params": { "panel": "stm32/pins", "lines": [
+    { "spans": [ { "text": "USART2", "style": "keyword" },
+                 { "text": "  TX ",  "style": "muted" },
+                 { "text": "PA2",    "style": "string", "action": "pin:PA2" } ] },
+    "",
+    "a line with nothing marked in it is just a string"
+] } }
+```
+
+Clicking a span that has an `action`, or pressing `Enter` on one, sends
+`panel/action` back with that string. What it says is the plugin's business —
+the editor hands it straight back and never looks inside it. That is the whole
+interaction model, and it is enough for a tree, a form, a toolbar or a list of
+problems.
+
+A panel **is a buffer**. It is a tab, it splits, it scrolls, it has a border,
+and `Alt-,` gets you back to it — because it is the same `Document` as
+everything else, with two differences: it is read-only, and its colours come
+from the plugin instead of from a grammar.
+
+**Keys in a panel.** A panel is handed the keystrokes that would otherwise have
+*changed the text* — which, in a buffer that is not yours to change, are going
+spare. So plain letters, `Enter`, `Tab` and `Backspace` arrive as `panel/key`
+with the key spelled the way a settings file spells it (`c`, `ctrl-.`, `f6`),
+along with the line and column the cursor was on. Everything else still does
+exactly what it does everywhere else: `Ctrl-P` is the palette, `Ctrl-W` closes
+the tab, the arrows move, `F8` goes to the next problem. A plugin cannot take a
+key you already know — the same bargain a plugin's suggested bindings get,
+made for a buffer instead.
+
+**Styles are named, never coloured.** A span asks for `keyword`, `string`,
+`error`, `muted` — the same names a grammar's captures use, resolved against
+whatever theme you are in. So a panel is themed with the rest of the editor and
+re-themes for free when you switch, and a plugin author cannot pick colours that
+fight your theme. A name nothing knows is drawn as ordinary text rather than
+refused, so one style misspelt is not a panel you cannot read.
+
+The plugin sends the whole panel each time rather than a patch. A panel is tens
+of lines and changes a few times a second at worst, so there is nothing to
+diff and nothing that can fall out of step with what is on the screen.
+
+The panel is replaced the way any other whole-buffer change is, so the cursor
+is carried across a refresh rather than thrown back to the top of a panel you
+were halfway down. `panel/closed` says you have closed it, so a plugin can stop
+keeping it up to date.
+
+Two of those want spelling out.
+
+**Positions are lines and columns, counted from zero, in characters.** Not
+bytes, and not the UTF-16 that LSP counts in. That is what `diagnostics/set`
+and `buffer/edit` take. A column past the end of its line means the end of
+that line, which is what a compiler pointing at "column 200" of a
+forty-character line means. The one exception is `buffer/changed`, which
+carries plain character offsets — a plugin keeping its own copy of the text
+wants the two numbers it can slice with.
+
+**An edit says which version it was worked out against, and is refused if the
+buffer has moved on.** A plugin that computed a fix against version 40 of a
+file that is now at 43 is holding an edit for text that is not there any more,
+and applying it would damage the file rather than mend it. So it comes back as
+an error saying which version it was for, and the plugin can ask again. The
+same rule the editor already applies to a formatter's reply.
+
+Problems from a plugin sit in the margin beside the language server's, and are
+**namespaced by plugin**: a fresh set from one replaces only its own findings.
+A plugin cannot clear clangd's, and clangd cannot clear the plugin's. Sending
+`items` with a `path` replaces what that plugin said about that file; sending
+none replaces everything it has said.
+
+Buffer traffic goes only to plugins that asked for it. `wants_buffers` in the
+manifest names the languages, and a plugin that named none is told nothing at
+all — the messages are `buffer/opened`, `buffer/changed`, `buffer/saved` and
+`buffer/closed`, and a plugin that comes up late is told about everything
+already open rather than only about what you open next.
+
+The protocol is JSON-RPC 2.0 framed the way a language server's is — a
+`Content-Length` header, a blank line, then that many bytes. That is
+deliberate: nearly every language already has a library that speaks it, so a
+plugin author writes handlers rather than a transport. In Python it is about
+twenty lines to do by hand, which is what `examples/cargo` does so that you can
+read all of it.
+
+Anything the program writes to standard error goes to the log — `textfold
+--log-path` says where — rather than onto the screen, which belongs to the
+editor.
 
 ### Languages
 
@@ -1332,6 +1629,14 @@ the keys and the colours rather than asking you to restart the editor, and an
 id survives that, so a buffer that was Python is still Python when Python
 comes back.
 
+**Everything textfold talks to that is not a person talks the same way.** A
+language server and a plugin's own program are both a child process, a thread
+that does nothing but frame JSON off its output, and a note of what each
+outstanding question meant — written once, in `rpc`, and used twice. Which is
+most of the reason a plugin can be written in any language: the format was
+picked because every language already has a library for it, not because it was
+the easiest to write here.
+
 **A command is a number, and the list is open.** `Cmd` is an index into a
 registry, so a key binding, a palette row, a menu row and a status-bar button
 all hold the same thing whether the command behind it is one textfold ships or
@@ -1349,11 +1654,11 @@ cannot, which is what keeps the two from drifting.
 
 The modules: `text` (positions and selections), `doc` (the rope, undo, files),
 `edit` (every operation), `view` (panes, scrolling, folding, the screen↔text
-map), `syntax` (tree-sitter), `lang` (the language table), `lsp` (the client),
-`git` (branch and diff), `picker` (the fuzzy list), `menu` (the context menus),
-`keys` and `cmd` (the vocabulary), `app` (state and dispatch), `ui` (drawing),
-`theme`, `config`, `term` (the clipboard, and what else the terminal is asked
-for).
+map), `syntax` (tree-sitter), `lang` (the language table), `rpc` (JSON-RPC on a
+pipe), `lsp` and `host` (the two things that speak it), `git` (branch and diff),
+`picker` (the fuzzy list), `menu` (the context menus), `keys` and `cmd` (the
+vocabulary), `app` (state and dispatch), `ui` (drawing), `theme`, `config`,
+`term` (the clipboard, and what else the terminal is asked for).
 
 ---
 

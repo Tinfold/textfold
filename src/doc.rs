@@ -198,6 +198,10 @@ pub struct Document {
     /// What the language servers have said about this file: one list, with
     /// each server's own findings replaced whole when it sends new ones.
     pub diagnostics: Vec<Diagnostic>,
+    /// What makes this a plugin's buffer rather than a file's.
+    pub panel: Option<Panel>,
+    /// Text a plugin is offering to put in, shown but not there.
+    pub hint: Option<Hint>,
     /// Why this file has no colours, where the reason is worth showing — so
     /// that a file drawn in one colour is explained rather than mysterious.
     /// `None` means either that it is coloured or that textfold has no grammar
@@ -259,6 +263,43 @@ pub struct Diagnostic {
     pub told: Told,
 }
 
+/// Text a plugin is offering, drawn where it would go but not in the file.
+///
+/// The thing an inline completion is: you can see what would happen if you
+/// took it, and until you do, the file is exactly as you left it. Kept on the
+/// document rather than on the pane because it is about the text — two panes
+/// showing the same file are looking at the same offer.
+pub struct Hint {
+    /// Which plugin is offering, so that one plugin's offer cannot clear
+    /// another's and the right one is told when it is taken.
+    pub plugin: String,
+    /// Where it would go, as a character index.
+    pub at: usize,
+    pub text: String,
+}
+
+/// A buffer a plugin fills, rather than one a file fills.
+///
+/// Deliberately a `Document` and not a new kind of pane. Splitting, scrolling,
+/// focus, the tab bar and the pane border all work already, and a panel that
+/// needed its own versions of them would be a second implementation of each.
+/// What a panel does differently is exactly two things: where its colours come
+/// from, and that parts of it do something when you press Enter on them.
+pub struct Panel {
+    /// Which plugin owns it: the id its host is found by.
+    pub plugin: String,
+    /// Which of that plugin's panels this is: `stm32/pins`.
+    pub id: String,
+    /// The colours, as character ranges. Stands in for the tree-sitter
+    /// highlights, which a panel has none of — the plugin says what its own
+    /// text means, in names taken from the theme rather than in colours, so a
+    /// panel is themed with everything else and a plugin author cannot pick
+    /// colours that fight the theme.
+    pub spans: Vec<(Range, crate::theme::Role)>,
+    /// Which stretches do something, and what to send back when they do.
+    pub actions: Vec<(Range, String)>,
+}
+
 /// Where a complaint came from.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Told {
@@ -266,6 +307,10 @@ pub enum Told {
     Server(usize),
     /// A tool a plugin runs, by the command name it answers to.
     Tool(&'static str),
+    /// A plugin's own program, by its plugin id. Separate from `Tool` because
+    /// the two go stale differently: a tool's findings are replaced when it is
+    /// run again, and a plugin's when it says so.
+    Plugin(&'static str),
 }
 
 /// How bad it is.
@@ -398,6 +443,8 @@ impl Document {
             recolour_tries: 0,
             syntax: None,
             diagnostics: Vec::new(),
+            panel: None,
+            hint: None,
             colours_off: None,
             stamp: None,
             on_disk: OnDisk::Same,
@@ -460,6 +507,8 @@ impl Document {
             recolour_tries: 0,
             syntax: None,
             diagnostics: Vec::new(),
+            panel: None,
+            hint: None,
             colours_off: None,
             stamp,
             on_disk: OnDisk::Same,
@@ -852,6 +901,20 @@ impl Document {
     /// Out-of-range values are clamped rather than refused: a server that is
     /// one edit behind sends them all the time, and dropping the answer would
     /// be worse than pointing slightly to the left.
+    /// The character index at a line and column, both counted in characters
+    /// from zero — the way the editor counts everywhere else, and the way a
+    /// plugin is asked to.
+    ///
+    /// A column past the end of its line lands at the end of that line rather
+    /// than running on into the next one: a compiler pointing at "column 200"
+    /// of a forty-character line means the end of it.
+    pub fn char_at_point(&self, line: usize, column: usize) -> usize {
+        let line = line.min(self.rope.len_lines().saturating_sub(1));
+        let start = self.rope.line_to_char(line);
+        let end = crate::text::line_end(&self.rope, line);
+        (start + column).min(end)
+    }
+
     pub fn char_at_lsp_point(&self, line: usize, utf16_col: usize) -> usize {
         let line = line.min(self.rope.len_lines().saturating_sub(1));
         let start = self.rope.line_to_char(line);
@@ -1234,3 +1297,28 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod point_tests {
+    use super::*;
+
+    #[test]
+    fn a_line_and_column_counted_in_characters_finds_the_place() {
+        let mut doc = Document::scratch(DocId(0), "test".into(), Indent::Spaces(4));
+        let sel = crate::text::Selections::single(crate::text::Range::point(0));
+        doc.apply_atomic(vec![Change::replace(0, 0, String::from("héllo\nwörld\n"))], &sel);
+
+        // Characters, not bytes and not UTF-16: the accented letter is one of
+        // each, and column three is past it either way.
+        assert_eq!(doc.char_at_point(0, 0), 0);
+        assert_eq!(doc.char_at_point(0, 3), 3);
+        assert_eq!(doc.char_at_point(1, 0), 6);
+        assert_eq!(doc.char_at_point(1, 5), 11);
+
+        // A column past the end of its line stops at the end of that line
+        // rather than running on into the next one — which is what a compiler
+        // means when it points at column 200 of a five-character line.
+        assert_eq!(doc.char_at_point(0, 200), 5);
+        // And a line past the end of the file lands in the last one.
+        assert_eq!(doc.char_at_point(99, 0), doc.char_at_point(2, 0));
+    }
+}
