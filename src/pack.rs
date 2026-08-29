@@ -15,7 +15,7 @@
 //!
 //! ```text
 //! textfold --list-packages
-//! textfold --install ./examples/cargo     a directory with a plugin.json in it
+//! textfold --install ./my-plugin          a directory with a plugin.json in it
 //! textfold --install pyright              something a repository is offering
 //! textfold --refresh                      ask the repositories what they have
 //! textfold --update                       fetch a newer version of anything
@@ -500,6 +500,36 @@ fn installed_version(id: &str) -> Option<String> {
         .or_else(|| receipt_of(id)?.version)
 }
 
+/// Whether there is anything at all at this path, a link that points nowhere
+/// included.
+///
+/// [`Path::exists`] follows links, so it says no to a link whose target has
+/// gone — and then everything that writes there fails with "file exists",
+/// which is the least helpful way to be told. Linking a plugin in and later
+/// installing the published copy over it is a thing the documentation
+/// suggests doing, so this is a path that gets walked.
+fn is_there(path: &Path) -> bool {
+    std::fs::symlink_metadata(path).is_ok()
+}
+
+/// Take away whatever is at this path: a link as a link, a directory as a
+/// directory.
+///
+/// The distinction is the one uninstall already makes. Removing *the link*
+/// is safe either way — what it points at is somebody's working copy and is
+/// none of our business — and following it to delete the target would be the
+/// worst thing this code could do.
+fn remove_whatever_is_at(path: &Path) -> Result<(), String> {
+    let Ok(what) = std::fs::symlink_metadata(path) else {
+        return Ok(());
+    };
+    match what.file_type().is_symlink() || what.is_file() {
+        true => std::fs::remove_file(path),
+        false => std::fs::remove_dir_all(path),
+    }
+    .map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// Whether a plugin's directory is one textfold may take away again.
 ///
 /// Three answers, and they are all different. A directory with our receipt in
@@ -619,10 +649,16 @@ pub fn available(from: Sources) -> Vec<Package> {
                 .unwrap_or_else(|| format!("from {}", repository.name)),
             // What it will want, said before anything has been downloaded —
             // which is the point of the index carrying it.
+            //
+            // Except what it names inside itself. A plugin whose `needs` is
+            // `${plugin}/node_modules/…` is naming a file that will exist once
+            // it is installed, and there is nothing to fill `${plugin}` in
+            // with until it is: checking would report every such plugin as
+            // missing a program with a `${` in its name.
             missing: entry
                 .needs
                 .iter()
-                .filter(|command| !on_path(command))
+                .filter(|command| !command.contains("${") && !on_path(command))
                 .cloned()
                 .collect(),
             here: false,
@@ -971,7 +1007,7 @@ fn install_to(id: &str) -> Result<PathBuf, String> {
         .join(id);
     // Installing over a directory somebody wrote by hand would throw away
     // work nobody asked us to touch.
-    if to.exists() && removable(id).is_none() {
+    if is_there(&to) && removable(id).is_none() {
         return Err(format!(
             "{} is already there and textfold did not put it there",
             to.display()
@@ -1139,9 +1175,7 @@ impl Plan {
                 // A reinstall replaces rather than merges: files left over
                 // from a version that had more in it are worse than a clean
                 // copy of the version you asked for.
-                if to.exists() {
-                    std::fs::remove_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
-                }
+                remove_whatever_is_at(to)?;
                 copy_in(from, to)?;
                 write_receipt(
                     to,
@@ -1172,9 +1206,6 @@ impl Plan {
                 )
             }
             Files::Remove(dir) => {
-                let linked = std::fs::symlink_metadata(dir)
-                    .map(|m| m.file_type().is_symlink())
-                    .unwrap_or(false);
                 say(Note::Doing {
                     at: self.steps.len(),
                     of: self.steps.len(),
@@ -1182,11 +1213,7 @@ impl Plan {
                 });
                 // A link is removed as a link. What it points at is somebody's
                 // working copy and is none of our business.
-                match linked {
-                    true => std::fs::remove_file(dir),
-                    false => std::fs::remove_dir_all(dir),
-                }
-                .map_err(|e| format!("{}: {e}", dir.display()))
+                remove_whatever_is_at(dir)
             }
         }
     }
@@ -1318,9 +1345,7 @@ fn fetch_in(remote: &Remote, to: &Path) -> Result<(), String> {
     // The replacement, as late as possible: everything that could fail has
     // failed by now, so the window in which the plugin is neither the old one
     // nor the new one is two file system calls wide.
-    if to.exists() {
-        std::fs::remove_dir_all(to).map_err(|e| tidy(format!("{}: {e}", to.display())))?;
-    }
+    remove_whatever_is_at(to).map_err(tidy)?;
     let moved = std::fs::rename(&root, to).is_ok();
     if !moved {
         // A rename across file systems does not work, and a cache and a
@@ -1748,6 +1773,50 @@ mod tests {
     }
 
     #[test]
+    fn installing_over_a_link_replaces_the_link_and_not_what_it_points_at() {
+        // Linking a plugin in while you work on it is what the documentation
+        // suggests, so installing the published copy over one is a path that
+        // gets walked. `Path::exists` follows a link, so a link whose target
+        // has gone reads as nothing being there — and then every write to it
+        // fails with "file exists", which is the least helpful way to be told.
+        let dir = scratch("over-a-link");
+        let working = dir.join("my-copy");
+        std::fs::create_dir_all(&working).expect("made");
+        std::fs::write(working.join(MANIFEST), r#"{"id":"zls"}"#).expect("written");
+
+        let installed = dir.join("plugins").join("zls");
+        std::fs::create_dir_all(installed.parent().expect("a parent")).expect("made");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&working, &installed).expect("linked");
+        #[cfg(not(unix))]
+        return;
+
+        // Nothing is there as far as `exists` is concerned once the target
+        // goes, and something very much is there as far as the disk is.
+        assert!(is_there(&installed));
+
+        remove_whatever_is_at(&installed).expect("the link went");
+        assert!(!is_there(&installed), "the link is gone");
+        assert!(working.is_dir(), "and what it pointed at is untouched");
+        assert!(
+            working.join(MANIFEST).is_file(),
+            "following the link to delete the target is the worst thing this could do"
+        );
+
+        // And a link that points nowhere at all, which is what a working copy
+        // that has been moved away leaves behind.
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("gone"), &installed).expect("linked");
+            assert!(is_there(&installed), "a dangling link is still something");
+            assert!(!installed.exists(), "though `exists` says otherwise");
+            remove_whatever_is_at(&installed).expect("it went anyway");
+            assert!(!is_there(&installed));
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn a_single_manifest_becomes_a_directory_with_a_receipt_in_it() {
         let dir = scratch("one-file");
         let from = dir.join("zig.json");
@@ -1756,6 +1825,36 @@ mod tests {
         copy_in(&from, &to).expect("copied");
         assert!(to.join(MANIFEST).is_file());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn what_a_package_names_inside_itself_is_not_reported_as_missing() {
+        // A plugin whose `needs` is `${plugin}/node_modules/…` names a file
+        // that exists once it is installed, and there is nothing to fill
+        // `${plugin}` in with until it is. Reported as missing, every such
+        // plugin sits in the list saying it needs a program with a `${` in
+        // its name.
+        let entry = crate::repo::Entry {
+            id: "copilot".into(),
+            name: None,
+            about: None,
+            version: "1.0.0".into(),
+            url: "dist/copilot-1.0.0.tar.gz".into(),
+            sha256: None,
+            size: None,
+            needs: vec![
+                "python3".into(),
+                "${plugin}/node_modules/x/language-server.js".into(),
+                "a-program-nobody-wrote".into(),
+            ],
+            see: None,
+        };
+        let missing: Vec<&String> = entry
+            .needs
+            .iter()
+            .filter(|command| !command.contains("${") && !on_path(command))
+            .collect();
+        assert_eq!(missing, ["a-program-nobody-wrote"]);
     }
 
     #[test]

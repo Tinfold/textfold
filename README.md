@@ -1253,7 +1253,7 @@ From a terminal:
 ```
 textfold --list-packages                 what could be installed, and from where
 textfold --install ruff                  something a repository is offering
-textfold --install ./examples/cargo      a directory with a plugin.json in it
+textfold --install ./my-plugin           a directory with a plugin.json in it
 textfold --refresh                       ask the repositories what they have
 textfold --update                        fetch a newer version of anything
 textfold --update ruff                   or of just the one
@@ -1295,14 +1295,14 @@ the copy you already had is untouched.
 else you have named:
 
 ```json
-{ "package_paths": ["~/src/textfold/examples", "~/work/editor-plugins"] }
+{ "package_paths": ["~/src/textfold-plugins/plugins", "~/work/editor-plugins"] }
 ```
 
 Point it at a checkout of somebody's plugins and every directory in it becomes
 a row you can choose. A package sitting on the machine beats a fetch of the
 same id: what is here already is what somebody meant.
 
-**And a path, said outright**, which is what `--install ./examples/cargo` is.
+**And a path, said outright**, which is what `--install ./my-plugin` is.
 
 #### Updates
 
@@ -1610,14 +1610,16 @@ is read and write JSON on a pipe.
   "keys": { "cargo/check": ["f6"] } }
 ```
 
-That one is real and it is in the repository: `examples/cargo`, about a hundred
-and fifty lines of Python with nothing installed to run it. To try it:
+That one is real. It lives in
+[textfold-plugins](https://github.com/Tinfold/textfold-plugins/tree/main/plugins/cargo),
+about a hundred and fifty lines of Python with nothing installed to run it. To
+try it:
 
 ```sh
-textfold --install ./examples/cargo
+textfold --install cargo
 ```
 
-**Both examples use the installer system**, and they show the two shapes it
+**Both of them use the installer system**, and they show the two shapes it
 takes. `cargo` says `"needs": ["python3", "cargo"]` and gives no `install` — no
 editor should be fetching somebody a Rust toolchain — so the plugins list says
 `needs cargo` and points at `see`:
@@ -1645,16 +1647,18 @@ the third `needs`: a path rather than a program name. A bare name is looked up
 on the `PATH` and has to be runnable; a path only has to be there, because
 `language-server.js` is handed to node and will never be executed directly.
 
-Or, if you are going to be editing it, link it in instead so that your changes
-are the ones that run — `uninstall-plugin` knows the difference and will remove
-the link rather than your working copy:
+Or, if you are going to be editing it, clone the plugins repository and link it
+in so that your changes are the ones that run — `uninstall-plugin` knows the
+difference and will remove the link rather than your working copy:
 
 ```sh
-ln -s $PWD/examples/cargo ~/.config/textfold/plugins/cargo
+git clone https://github.com/Tinfold/textfold-plugins
+ln -s $PWD/textfold-plugins/plugins/cargo ~/.config/textfold/plugins/cargo
 ```
 
-Or put `{ "package_paths": ["~/src/textfold/examples"] }` in your settings and
-both examples turn up in `install-plugin`.
+Or put `{ "package_paths": ["~/src/textfold-plugins/plugins"] }` in your
+settings and every plugin in the checkout turns up in `install-plugin`, ahead
+of the fetched copy.
 
 Its real interface, though, is `cargo/report`: a panel it drives itself.
 `c`, `b`, `t` and `l` run check, build, test and clippy; `x` stops one; `o`
@@ -1667,13 +1671,14 @@ fuzzy list and jumps to the one you pick, and `cargo/clean`, which asks first.
 Right-clicking a problem in its panel opens a menu under the pointer, with "Go
 to it" above the four runs.
 
-There is a second one in `examples/copilot`: GitHub Copilot, in about four
-hundred lines. Its inline suggestions are real — it bridges to the
+There is a second one,
+[`copilot`](https://github.com/Tinfold/textfold-plugins/tree/main/plugins/copilot):
+GitHub Copilot, in about four hundred lines. Its inline suggestions are real — it bridges to the
 `copilot-language-server` GitHub ships, which speaks the same framing textfold's
 plugins do, so the plugin is mostly a translator between two protocols that
 already agree about how to move JSON down a pipe. Its chat panel is not: Copilot's
 language server has no conversation API, so the panel runs whatever
-`settings.chat.command` points at. Between them the two examples use every
+`settings.chat.command` points at. Between them the two use every
 message in the protocol.
 
 **It stays out of rust-analyzer's way**, which is worth copying if you write
@@ -1902,8 +1907,8 @@ The protocol is JSON-RPC 2.0 framed the way a language server's is — a
 `Content-Length` header, a blank line, then that many bytes. That is
 deliberate: nearly every language already has a library that speaks it, so a
 plugin author writes handlers rather than a transport. In Python it is about
-twenty lines to do by hand, which is what `examples/cargo` does so that you can
-read all of it.
+twenty lines to do by hand, which is what the `cargo` plugin does so that you
+can read all of it.
 
 Anything the program writes to standard error goes to the log — `textfold
 --log-path` says where — rather than onto the screen, which belongs to the
