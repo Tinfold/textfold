@@ -118,6 +118,19 @@ pub struct View {
     /// Where this pane is pinned, if it is pinned at all. `None` is an
     /// ordinary pane, which is what all of them used to be.
     pub dock: Option<Dock>,
+    /// How much of the middle this pane gets, against its neighbours.
+    ///
+    /// Relative rather than absolute: they are added up and each pane gets its
+    /// share of whatever there is, so a terminal that is resized keeps the
+    /// proportions you dragged rather than the columns. Equal until somebody
+    /// pulls a divider, which is what every pane used to get always.
+    pub share: f32,
+    /// Whether this pane shows one buffer and only that one.
+    ///
+    /// For a pane that is half of a pair — the plugin's own settings beside
+    /// yours — where opening a file into it would leave you comparing your
+    /// settings against something that is not what they are settings for.
+    pub pinned: bool,
     pub sel: Selections,
     /// The first line on screen, and how far into it when a folded line is cut
     /// across the top of the pane.
@@ -167,6 +180,8 @@ impl View {
         Self {
             doc,
             dock: None,
+            share: 1.0,
+            pinned: false,
             grip: None,
             sel: Selections::default(),
             top: 0,

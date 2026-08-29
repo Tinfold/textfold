@@ -85,34 +85,26 @@ fn place_panes(app: &mut App, body: Rect) {
     let ordinary: Vec<usize> = (0..app.panes.len())
         .filter(|at| app.panes[*at].dock.is_none())
         .collect();
-    let count = ordinary.len().max(1) as u16;
+    // What each pane in the middle gets, by the share it has been dragged to.
+    let along = share_out(
+        &ordinary.iter().map(|at| app.panes[*at].share).collect::<Vec<f32>>(),
+        match app.side_by_side {
+            true => middle.width,
+            false => middle.height,
+        },
+        least_pane(app.side_by_side),
+    );
 
     for index in 0..app.panes.len() {
         let frame = match docked.iter().find(|(at, _)| *at == index) {
             Some((_, frame)) => *frame,
             None => {
-                let at = ordinary.iter().position(|p| *p == index).unwrap_or(0) as u16;
-                if app.side_by_side {
-                    let width = middle.width / count;
-                    let x = middle.x + width * at;
-                    // The last pane takes whatever is left over, so a width
-                    // that does not divide evenly does not leave a stripe of
-                    // nothing.
-                    let width = if at + 1 == count {
-                        middle.width - width * at
-                    } else {
-                        width
-                    };
-                    Rect::new(x, middle.y, width, middle.height)
-                } else {
-                    let height = middle.height / count;
-                    let y = middle.y + height * at;
-                    let height = if at + 1 == count {
-                        middle.height - height * at
-                    } else {
-                        height
-                    };
-                    Rect::new(middle.x, y, middle.width, height)
+                let at = ordinary.iter().position(|p| *p == index).unwrap_or(0);
+                let before: u16 = along[..at].iter().sum();
+                let size = along.get(at).copied().unwrap_or(0);
+                match app.side_by_side {
+                    true => Rect::new(middle.x + before, middle.y, size, middle.height),
+                    false => Rect::new(middle.x, middle.y + before, middle.width, size),
                 }
             }
         };
@@ -121,8 +113,23 @@ fn place_panes(app: &mut App, body: Rect) {
         // the divider you drag it by. Taken out of the room the text gets,
         // not added to the room the dock takes, so what a plugin asked for is
         // what the dock occupies.
+        // A pane in the middle that is not the first has a divider on its
+        // leading edge, and it is the same thing as its focus rule: a line
+        // already drawn between two panes, which is exactly where somebody
+        // reaches to pull them. Side by side that costs nothing — the rule was
+        // already there — and stacked it takes the row the rule cannot use.
+        let after_another = app.panes[index].dock.is_none()
+            && ordinary.first().is_some_and(|first| *first != index);
         let (grip, inner) = match app.panes[index].dock.map(|d| d.edge) {
             _ if frame.width == 0 || frame.height == 0 => (None, frame),
+            None if after_another && app.side_by_side => (
+                Some(Rect::new(frame.x, frame.y, 1, frame.height)),
+                frame,
+            ),
+            None if after_another => (
+                Some(Rect::new(frame.x, frame.y, frame.width, 1)),
+                Rect::new(frame.x, frame.y + 1, frame.width, frame.height - 1),
+            ),
             Some(Edge::Left) => (
                 Some(Rect::new(frame.right() - 1, frame.y, 1, frame.height)),
                 Rect::new(frame.x, frame.y, frame.width - 1, frame.height),
@@ -264,6 +271,62 @@ fn carve_docks(app: &App, body: Rect) -> (Rect, Vec<(usize, Rect)>) {
     (middle, placed)
 }
 
+/// Divide `room` between panes in the proportions they have been dragged to.
+///
+/// Proportions rather than columns, so that resizing the terminal keeps the
+/// layout you chose rather than the numbers it happened to work out to. The
+/// last pane takes the remainder, so a share that does not divide evenly does
+/// not leave a stripe of nothing down the middle of the screen.
+pub fn share_out(shares: &[f32], room: u16, least: u16) -> Vec<u16> {
+    if shares.is_empty() {
+        return Vec::new();
+    }
+    // What is left may be less than the least a pane is allowed, on a terminal
+    // too small to hold them all. There is no answer that respects both, and
+    // the one that must not happen is a panic: `clamp` with a floor above its
+    // ceiling is a crash, and "the window got short" is not a crashing matter.
+    let least = least.min(room);
+    let total: f32 = shares.iter().map(|s| s.max(0.0)).sum();
+    if total <= 0.0 {
+        // Nothing to go on. Equal, which is what they all were to begin with.
+        let each = room / shares.len() as u16;
+        let mut out = vec![each; shares.len()];
+        *out.last_mut().expect("not empty") = room - each * (shares.len() as u16 - 1);
+        return out;
+    }
+    let mut out: Vec<u16> = Vec::with_capacity(shares.len());
+    let mut used = 0;
+    for (at, share) in shares.iter().enumerate() {
+        if at + 1 == shares.len() {
+            out.push(room.saturating_sub(used));
+            break;
+        }
+        // Never nothing: a pane dragged shut would be a pane with no edge left
+        // to drag it back by.
+        let size = ((share.max(0.0) / total) * room as f32).round() as u16;
+        let left = room.saturating_sub(used);
+        let size = size.clamp(least.min(left), left);
+        out.push(size);
+        used += size;
+    }
+    out
+}
+
+/// The least a pane in the middle may be dragged down to: columns when they
+/// are side by side, rows when they are stacked. A pane narrower than a line
+/// number and a word is not a pane; a pane shorter than three rows has no room
+/// to show you where you are in it.
+pub const MIN_PANE: u16 = 8;
+pub const MIN_PANE_ROWS: u16 = 3;
+
+/// Which of those two applies, given how the panes are arranged.
+pub fn least_pane(side_by_side: bool) -> u16 {
+    match side_by_side {
+        true => MIN_PANE,
+        false => MIN_PANE_ROWS,
+    }
+}
+
 /// The least the middle may be squeezed to. Below this the editor stops being
 /// an editor with a sidebar and becomes a sidebar with a rumour of an editor.
 const MIN_MIDDLE: u16 = 20;
@@ -324,15 +387,22 @@ fn draw_pane(frame: &mut Frame, app: &App, index: usize, ground: Color) -> Optio
     // the pane it belongs to has the focus, for the same reason the focus
     // rule is: so that "which of these am I typing into" has an answer on the
     // screen.
-    if let Some(grip) = view.grip {
+    // The rule down a pane's own left edge is already drawn by the pane, and
+    // for a pane in the middle that rule *is* the divider — drawing over it
+    // would only replace one vertical line with another.
+    let draw_grip = view.dock.is_some() || !app.side_by_side;
+    if let Some(grip) = view.grip.filter(|_| draw_grip) {
         let colour = match focused {
             true => theme.accent,
             false => theme.chrome(),
         };
-        let (line, across) = match view.dock.map(|d| d.edge) {
-            Some(view::Edge::Bottom) => ("\u{2500}", true),
-            _ => ("\u{2502}", false),
+        let across = match view.dock.map(|d| d.edge) {
+            Some(view::Edge::Bottom) => true,
+            Some(_) => false,
+            // A pane in the middle, stacked: the divider lies across.
+            None => true,
         };
+        let line = if across { "\u{2500}" } else { "\u{2502}" };
         let buf = frame.buffer_mut();
         for step in 0..if across { grip.width } else { grip.height } {
             let at = match across {
@@ -2972,6 +3042,41 @@ mod tests {
     }
 
     #[test]
+    fn panes_in_the_middle_share_it_in_the_proportions_they_were_dragged_to() {
+        // Equal until somebody pulls a divider, and proportional afterwards —
+        // so resizing the terminal keeps the layout you chose rather than the
+        // number of columns it happened to work out to.
+        assert_eq!(share_out(&[1.0, 1.0], 100, MIN_PANE), vec![50, 50]);
+        assert_eq!(share_out(&[1.0, 1.0, 1.0], 100, MIN_PANE), vec![33, 33, 34]);
+        assert_eq!(share_out(&[30.0, 70.0], 100, MIN_PANE), vec![30, 70]);
+        // The same proportions in half the room.
+        assert_eq!(share_out(&[30.0, 70.0], 50, MIN_PANE), vec![15, 35]);
+        // Every column is given out: no stripe of nothing down the middle.
+        for room in [40u16, 61, 80, 137] {
+            for shares in [vec![1.0, 1.0], vec![1.0, 2.0, 7.0], vec![5.0]] {
+                let given = share_out(&shares, room, MIN_PANE);
+                assert_eq!(given.iter().sum::<u16>(), room, "{shares:?} in {room}");
+            }
+        }
+        // And nothing is dragged shut, because a pane with no width has no
+        // edge left to drag it back by.
+        assert!(share_out(&[1.0, 400.0], 100, MIN_PANE)[0] >= MIN_PANE);
+
+        // A window too small to hold what a pane is owed has no answer that
+        // respects both, and the one it must not give is a crash — `clamp`
+        // with a floor above its ceiling panics, and "the window got short" is
+        // not a crashing matter.
+        for room in 0u16..12 {
+            for count in 1usize..5 {
+                let shares = vec![1.0; count];
+                let given = share_out(&shares, room, MIN_PANE);
+                assert_eq!(given.len(), count, "{count} panes in {room}");
+                assert_eq!(given.iter().sum::<u16>(), room, "{count} panes in {room}");
+            }
+        }
+    }
+
+    #[test]
     fn a_dock_never_squeezes_the_code_out_of_the_editor() {
         // A plugin asking for eighty columns on a narrow terminal gets what
         // there is to give, not an editor with no room left in it.
@@ -3625,4 +3730,5 @@ mod tests {
     }
 
 }
+
 

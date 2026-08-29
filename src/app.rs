@@ -1026,10 +1026,12 @@ enum Drag {
     Lines { anchor: usize },
     /// Moving the view with the scroll bar.
     Scrollbar,
-    /// Pulling a docked pane's divider to make it wider or narrower.
-    DockEdge {
+    /// Pulling the divider on a pane's edge to make it wider or narrower —
+    /// a sidebar against the middle, or one pane in the middle against the
+    /// one before it.
+    Divider {
         /// Which pane, by its place in the list. Held rather than looked up
-        /// again, because a drag that started on one sidebar must not jump to
+        /// again, because a drag that started on one divider must not jump to
         /// another if the panes are renumbered underneath it.
         pane: usize,
     },
@@ -1083,6 +1085,14 @@ pub struct App {
     /// Where the caret was last drawn, for anything that opens beside it.
     pub caret: Option<(u16, u16)>,
     tx: Sender<Event>,
+    /// The two buffers of a plugin's settings, while they are open: what the
+    /// plugin ships, and what you say about it.
+    ///
+    /// Held as a pair because they are one thing to look at and one thing to
+    /// close. Leaving the manifest behind after you have shut your own
+    /// settings would be leaving half a comparison on the screen, and it is a
+    /// buffer nobody can do anything with on its own.
+    settings_pair: Option<(DocId, DocId)>,
     /// Whether the package repositories have been asked what they have yet.
     /// The difference between "there is nothing newer" and "nobody has looked
     /// yet", which are different answers to the same question.
@@ -1225,6 +1235,7 @@ impl App {
             side_by_side: true,
             overlay: Overlay::None,
             completion: None,
+            settings_pair: None,
             checked_for_updates: false,
             hover: None,
             signature: None,
@@ -1428,10 +1439,15 @@ impl App {
         // replaced itself with the file you clicked would have thrown away the
         // tree to show you one leaf of it. The only thing a docked pane ever
         // shows is the panel it was opened for.
-        if self.panes.get(self.focus).is_some_and(|p| p.dock.is_some())
-            && self.doc(id).is_none_or(|d| d.panel.is_none())
-            && let Some(at) = self.beside_the_docks()
-        {
+        // Never into a sidebar, and never into a pane that is pinned to one
+        // buffer — the manifest half of a plugin's settings shows the manifest
+        // and nothing else.
+        let here = self.panes.get(self.focus);
+        let refuses = here.is_some_and(|pane| {
+            (pane.dock.is_some() && self.doc(id).is_none_or(|d| d.panel.is_none()))
+                || (pane.pinned && pane.doc != id)
+        });
+        if refuses && let Some(at) = self.somewhere_to_open() {
             self.focus = at;
         }
         let at = self.focus.min(self.panes.len() - 1);
@@ -1671,6 +1687,13 @@ impl App {
 
     /// Close a buffer, having already decided that it is all right to.
     fn close_doc(&mut self, id: DocId) {
+        // Half a comparison is not worth leaving on the screen, so closing
+        // either buffer takes the arrangement down with it. `close_settings_panes`
+        // has already cleared the pair by the time it comes back round here,
+        // so the second close is an ordinary one.
+        if self.is_settings_half(id) {
+            self.close_settings_panes();
+        }
         if let Some(path) = self.doc(id).and_then(|d| d.path.clone()) {
             self.lsp.did_close(&path);
             self.hosts.closed(&path);
@@ -3936,6 +3959,16 @@ impl App {
 
     fn close_pane(&mut self) {
         let at = self.focus.min(self.panes.len().saturating_sub(1));
+        // Both halves of a plugin's settings go together, whichever one you
+        // were standing in when you asked.
+        if self
+            .panes
+            .get(at)
+            .is_some_and(|pane| self.is_settings_half(pane.doc))
+            && self.close_settings_panes()
+        {
+            return;
+        }
         let docked = self.panes.get(at).is_some_and(|p| p.dock.is_some());
         // A dock is always closable — it is a thing you put there, and the
         // editor is still an editor without it. What has to survive is the
@@ -3964,6 +3997,20 @@ impl App {
         (0..len)
             .map(|step| (self.focus + step) % len)
             .find(|at| self.panes[*at].dock.is_none())
+    }
+
+    /// A pane that will take whatever is being opened: not a sidebar, and not
+    /// one pinned to a buffer of its own.
+    ///
+    /// Falls back to the first pane that is merely not a sidebar, because a
+    /// screen with nowhere at all to put a file still has to put it
+    /// somewhere.
+    fn somewhere_to_open(&self) -> Option<usize> {
+        let len = self.panes.len();
+        let round = |from: usize| (0..len).map(move |step| (from + step) % len);
+        round(self.focus)
+            .find(|at| self.panes[*at].dock.is_none() && !self.panes[*at].pinned)
+            .or_else(|| self.beside_the_docks())
     }
 
     fn focus_pane(&mut self, by: isize) {
@@ -5360,12 +5407,74 @@ impl App {
         }
         self.focus = self.beside_the_docks().unwrap_or(0);
         self.side_by_side = true;
+        // Opened before the pane is pinned, since pinning is what stops a pane
+        // being pointed at anything else.
+        self.close_settings_panes();
         self.show(shipped);
+        let left = self.focus;
         self.run(Cmd::SPLIT);
         self.open_path(&path);
+        let yours = self.view().doc;
+        // The manifest half shows the manifest and nothing else. Opening a
+        // file into it would leave you comparing your settings against
+        // something that is not what they are settings for.
+        self.panes[left].pinned = true;
+        self.settings_pair = Some((shipped, yours));
         self.say(format!(
             "{id}: what it ships on the left, what you say on the right"
         ));
+    }
+
+    /// Whether this buffer is one half of a plugin's settings.
+    fn is_settings_half(&self, id: DocId) -> bool {
+        self.settings_pair
+            .is_some_and(|(shipped, yours)| shipped == id || yours == id)
+    }
+
+    /// Put both halves of a plugin's settings away.
+    ///
+    /// One thing to look at is one thing to close. Shutting your own settings
+    /// and being left with the manifest is being left with half a comparison
+    /// and a buffer there is nothing to do with.
+    ///
+    /// Answers whether there was anything to close, so that the ordinary
+    /// close can go on and do the ordinary thing when there was not.
+    fn close_settings_panes(&mut self) -> bool {
+        let Some((shipped, yours)) = self.settings_pair.take() else {
+            return false;
+        };
+        // The panes first, so that nothing is left pointing at a buffer that
+        // is about to go.
+        for id in [shipped, yours] {
+            while let Some(at) = self
+                .panes
+                .iter()
+                .position(|pane| pane.doc == id && pane.dock.is_none())
+                .filter(|_| self.ordinary_panes() > 1)
+            {
+                self.panes.remove(at);
+            }
+        }
+        for pane in &mut self.panes {
+            pane.pinned = false;
+        }
+        self.focus = self.focus.min(self.panes.len().saturating_sub(1));
+        // The manifest is a buffer textfold made to be read beside something
+        // else, so it goes with it. Yours is a real file and stays open, the
+        // way any file you were editing does.
+        self.close_doc(shipped);
+        if self.panes.iter().all(|pane| pane.doc != yours)
+            && let Some(at) = self.beside_the_docks()
+        {
+            // Nothing is showing your settings any more — the pane that was
+            // has gone — so put the pane that is left somewhere sensible.
+            let fallback = self.most_recent().unwrap_or(yours);
+            self.focus = at;
+            if self.panes[at].doc == shipped {
+                self.show(fallback);
+            }
+        }
+        true
     }
 
     // ---- Installing one ----
@@ -9722,7 +9831,7 @@ impl App {
         // is chrome rather than text, and dragging it is the only thing it
         // does.
         if let Some(pane) = self.grip_at(column, row) {
-            self.drag = Some(Drag::DockEdge { pane });
+            self.drag = Some(Drag::Divider { pane });
             return;
         }
 
@@ -10116,6 +10225,74 @@ impl App {
         })
     }
 
+    /// Pull the divider on a pane's edge to wherever the pointer is.
+    ///
+    /// Two things wear the same handle. A sidebar's divider changes the
+    /// sidebar's size and leaves the middle to take up the slack; a divider
+    /// between two panes in the middle moves room from one to the other, since
+    /// there is nowhere else for it to come from.
+    fn pull_divider(&mut self, pane: usize, column: u16, row: u16) {
+        match self.panes.get(pane).and_then(|p| p.dock) {
+            Some(_) => self.resize_dock(pane, column, row),
+            None => self.resize_pane(pane, column, row),
+        }
+    }
+
+    /// Move room across the divider between this pane and the one before it.
+    ///
+    /// Both are measured against where the divider actually is rather than by
+    /// how far the pointer has moved, so it stays under the pointer over a
+    /// long drag. What comes out is written back as *shares* — the two of them
+    /// keep the proportion you dragged when the terminal is resized, rather
+    /// than the number of columns it happened to work out to.
+    fn resize_pane(&mut self, pane: usize, column: u16, row: u16) {
+        let ordinary: Vec<usize> = (0..self.panes.len())
+            .filter(|at| self.panes[*at].dock.is_none())
+            .collect();
+        let Some(which) = ordinary.iter().position(|at| *at == pane).filter(|at| *at > 0) else {
+            return;
+        };
+        let (before, here) = (ordinary[which - 1], ordinary[which]);
+        let (start, whole) = match self.side_by_side {
+            true => (
+                self.panes[before].frame.x,
+                self.panes[before].frame.width + self.panes[here].frame.width,
+            ),
+            false => (
+                self.panes[before].frame.y,
+                self.panes[before].frame.height + self.panes[here].frame.height,
+            ),
+        };
+        let at = match self.side_by_side {
+            true => column,
+            false => row,
+        };
+        // Neither side may be dragged shut: a pane with no width has no edge
+        // left to drag it back by. On a screen with no room for two of them
+        // there is nothing to drag, and nothing happens.
+        let least = crate::ui::least_pane(self.side_by_side);
+        let most = whole.saturating_sub(least);
+        if most < least {
+            return;
+        }
+        let first = at.saturating_sub(start).clamp(least, most);
+
+        // Everything keeps the size it has now, and the two either side of
+        // this divider take what was dragged — so pulling one edge does not
+        // quietly reflow the panes that were nowhere near it.
+        for at in &ordinary {
+            let pane = &mut self.panes[*at];
+            pane.share = match self.side_by_side {
+                true => pane.frame.width as f32,
+                false => pane.frame.height as f32,
+            }
+            .max(1.0);
+        }
+        self.panes[before].share = first as f32;
+        self.panes[here].share = (whole - first) as f32;
+        self.session_changed();
+    }
+
     /// Make a dock as wide, or as tall, as the pointer says.
     ///
     /// Measured from the far edge of the dock rather than by how far the
@@ -10169,7 +10346,7 @@ impl App {
                 }
             }
             Some(Drag::Scrollbar) => self.scroll_to_bar(row),
-            Some(Drag::DockEdge { pane }) => self.resize_dock(pane, column, row),
+            Some(Drag::Divider { pane }) => self.pull_divider(pane, column, row),
             Some(Drag::Tab { id, .. }) => {
                 if let Some(Drag::Tab { at, .. }) = &mut self.drag {
                     *at = (column, row);
@@ -12865,6 +13042,77 @@ mod tests {
         std::fs::remove_file(&path).ok();
     }
 
+    /// Plugin settings open on a plugin that certainly exists, with a real
+    /// file made and then taken away again. `None` where there is nowhere to
+    /// keep settings, or where a real one is already there and must not be
+    /// disturbed.
+    fn settings_open(app: &mut App, id: &str) -> Option<PathBuf> {
+        let path = crate::plugin::settings_path(id)?;
+        if path.exists() {
+            return None;
+        }
+        app.edit_plugin_settings(id);
+        Some(path)
+    }
+
+    #[test]
+    fn the_manifest_half_of_plugin_settings_shows_the_manifest_and_nothing_else() {
+        // Opening a file into it would leave you comparing your settings
+        // against something that is not what they are settings for.
+        let (mut app, _rx) = editor();
+        let Some(path) = settings_open(&mut app, "rust") else {
+            return;
+        };
+        let shipped = app.panes[0].doc;
+        assert!(app.panes[0].pinned, "the manifest half is not pinned");
+        assert!(app.doc(shipped).expect("it").read_only, "and it is read-only");
+
+        // Standing in it and opening something puts that something in the
+        // other pane, and leaves the manifest where it was.
+        app.focus = 0;
+        app.run(Cmd::NEW);
+        assert_eq!(app.panes[0].doc, shipped, "the manifest was replaced");
+        assert_eq!(app.focus, 1, "the focus should have moved out of it");
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
+    fn closing_either_half_of_plugin_settings_closes_both() {
+        // One thing to look at is one thing to close. Being left with the
+        // manifest is being left with half a comparison and a buffer there is
+        // nothing to do with.
+        let (mut app, _rx) = editor();
+        let Some(path) = settings_open(&mut app, "rust") else {
+            return;
+        };
+        let shipped = app.panes[0].doc;
+        assert_eq!(app.ordinary_panes(), 2);
+
+        // From the side you were most likely editing.
+        app.focus = 1;
+        app.run(Cmd::CLOSE_PANE);
+        assert_eq!(app.ordinary_panes(), 1, "the other pane stayed");
+        assert!(
+            app.docs.iter().all(|d| d.id != shipped),
+            "the manifest is still open with nothing to compare it to"
+        );
+        assert!(app.panes.iter().all(|p| !p.pinned), "a pane is still pinned");
+
+        // And from the other side, which should behave the same.
+        std::fs::remove_file(&path).ok();
+        let Some(path) = settings_open(&mut app, "rust") else {
+            return;
+        };
+        let shipped = app.panes[0].doc;
+        app.focus = 0;
+        app.run(Cmd::CLOSE_PANE);
+        assert_eq!(app.ordinary_panes(), 1);
+        assert!(app.docs.iter().all(|d| d.id != shipped));
+
+        std::fs::remove_file(&path).ok();
+    }
+
     #[test]
     fn a_docked_panel_opens_beside_the_code_rather_than_over_it() {
         // The whole point of a dock: you asked for a tree of files, not for
@@ -12916,6 +13164,45 @@ mod tests {
         app.show(sidebar);
         assert_eq!(app.focus, 0);
         assert_eq!(app.panes[0].doc, sidebar);
+    }
+
+    #[test]
+    fn the_divider_between_two_panes_can_be_pulled_either_way() {
+        let (mut app, _rx) = editor();
+        app.screen = Rect::new(0, 0, 100, 30);
+        app.run(Cmd::SPLIT);
+        assert_eq!(app.panes.len(), 2);
+        // What the drawing would have worked out: two equal halves.
+        app.panes[0].frame = Rect::new(0, 1, 50, 28);
+        app.panes[1].frame = Rect::new(50, 1, 50, 28);
+
+        // Pull the divider right: the first pane grows, the second gives.
+        app.pull_divider(1, 70, 10);
+        assert_eq!(app.panes[0].share, 70.0);
+        assert_eq!(app.panes[1].share, 30.0);
+        // Which is a proportion, not a column count — the same drag in a
+        // narrower terminal keeps the same split.
+        assert_eq!(
+            crate::ui::share_out(
+                &[app.panes[0].share, app.panes[1].share],
+                50,
+                crate::ui::MIN_PANE
+            ),
+            vec![35, 15]
+        );
+
+        // And neither side can be pulled shut.
+        app.panes[0].frame = Rect::new(0, 1, 70, 28);
+        app.panes[1].frame = Rect::new(70, 1, 30, 28);
+        app.pull_divider(1, 0, 10);
+        assert_eq!(app.panes[0].share, crate::ui::MIN_PANE as f32);
+        assert_eq!(app.panes[1].share, (100 - crate::ui::MIN_PANE) as f32);
+
+        // Dragging the leading edge of the *first* pane is not a divider at
+        // all — there is nothing on the other side of it.
+        let was = app.panes[0].share;
+        app.pull_divider(0, 40, 10);
+        assert_eq!(app.panes[0].share, was);
     }
 
     #[test]

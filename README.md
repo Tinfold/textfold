@@ -255,6 +255,12 @@ own idea of whether lines fold — the same file open twice is two views of one
 document, and typing in either moves the other's cursor along with the text it
 was pointing at.
 
+**The line between two panes can be dragged.** Panes share the middle equally
+until you pull one of the dividers, and what you pull them to is a
+*proportion* rather than a number of columns — so resizing the terminal keeps
+the layout you chose. Neither side can be pulled shut, since a pane with no
+width has no edge left to pull it back by.
+
 ### Comparing two panes
 
 Alt-C compares the pane you are in with the one beside it. The bar in the
@@ -328,6 +334,8 @@ them wrong.
 | wheel over the tabs | walk along them, when there are more open than fit |
 | click a ‹ or › | the next tab that way |
 | drag the scroll bar | move through the file |
+| drag the line between two panes | make one wider and the other narrower |
+| drag a sidebar's edge | make it wider or narrower |
 | click the status bar | the language, the position, the problems and the colours are buttons |
 
 While textfold has the mouse, your terminal's own click-to-select does not
@@ -1239,8 +1247,14 @@ So yours are a layer *over* the manifest:
 
 `plugin-settings` in the palette is the way in: pick a plugin and it opens
 **what it ships on the left, what you say on the right**, which is the one
-arrangement that answers *what could I even put here*. The left half is
-read-only — it is the plugin's, and it is the file an update throws away.
+arrangement that answers *what could I even put here*.
+
+The left half is the plugin's, so it does not behave like a pane you happen to
+have open. It is read-only, and it is **pinned**: opening a file while you are
+standing in it puts that file in the other pane, because comparing your
+settings against something that is not what they are settings for is not a
+comparison. The two are one thing to close, too — `close-pane` in either half
+puts both away.
 
 Objects merge key by key, so saying something about `java.format` leaves
 `java.completion` exactly as the plugin shipped it, and an update changes the
@@ -1941,7 +1955,7 @@ is what collapsible means from a keyboard — and the plugin is told
 where it was next time you open the project.
 
 In every other respect it is an ordinary pane: a cursor, the focus rule, Tab
-in and out, `close-pane`. That is deliberate — a sidebar that was its own kind
+in and out, `close-pane`, and a divider you can pull to resize it. That is deliberate — a sidebar that was its own kind
 of surface would need its own answer to every question a pane has already
 answered. It differs in three small ways, each because a sidebar is not a
 file: no line numbers down it, no row in the tab strip, and closing the last
