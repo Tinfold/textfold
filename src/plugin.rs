@@ -797,17 +797,17 @@ pub fn settings_path(id: &str) -> Option<PathBuf> {
 /// each of its servers is told. Nothing here can change what a plugin is —
 /// its id, its commands, what it says it needs — because those are the
 /// plugin, not your opinion of it.
+///
+/// Nor whether it is *on*. That is asked and answered in `config.json` under
+/// `plugins`, which is where the list with the switches in it writes what you
+/// chose. One question with two places to answer it is worse than one place
+/// that is slightly further away.
 #[derive(Deserialize, Default, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct FileOverride {
     /// Notes to yourself. JSON has nowhere to put a comment.
     #[serde(default, rename = "_about")]
     _about: Option<serde_json::Value>,
-    /// Whether it is on, said outright. The same thing the plugins list
-    /// writes into `config.json`, allowed here too so that everything about
-    /// one plugin can live in one file.
-    #[serde(default)]
-    enabled: Option<bool>,
     /// Merged over what the plugin's own program is told at `initialize`.
     #[serde(default)]
     settings: Option<serde_json::Value>,
@@ -883,27 +883,24 @@ pub fn settings_stub(plugin: &Plugin) -> String {
     let mut about = vec![
         format!("Your settings for {}, laid over what it ships.", plugin.id),
         String::new(),
-        "The manifest beside this is what you are overriding. That file is          replaced whole every time the plugin updates; this one is never          touched, which is the point of it being a separate file."
-            .to_string(),
+        "The manifest beside this is what you are overriding. That file is replaced".into(),
+        "whole every time the plugin updates; this one is never touched, which is".into(),
+        "the point of it being a separate file.".into(),
         String::new(),
-        "Objects merge key by key, so saying something about one setting          leaves the rest alone. Lists and everything else replace."
-            .to_string(),
+        "Objects merge key by key, so saying something about one setting leaves the".into(),
+        "rest exactly as it shipped. Lists and everything else replace.".into(),
     ];
     let mut body = serde_json::Map::new();
+
     if plugin.host.is_some() {
         about.push(String::new());
-        about.push(
-            "`settings` is what this plugin's own program is told about itself              at startup."
-                .to_string(),
-        );
+        about.push("`settings` is what this plugin's own program is told at startup.".into());
         body.insert("settings".into(), serde_json::json!({}));
     }
     if !plugin.servers.is_empty() {
         about.push(String::new());
-        about.push(
-            "`servers` is by server name, and each may say `settings`,              `init_options`, `env`, `args`, `roots` or `command`."
-                .to_string(),
-        );
+        about.push("`servers` is by server name. Each may say `settings`,".into());
+        about.push("`init_options`, `env`, `args`, `roots` or `command`.".into());
         let mut servers = serde_json::Map::new();
         for server in &plugin.servers {
             servers.insert(server.name.clone(), serde_json::json!({ "settings": {} }));
@@ -912,12 +909,12 @@ pub fn settings_stub(plugin: &Plugin) -> String {
     }
     if body.is_empty() {
         about.push(String::new());
-        about.push(
-            "This plugin runs nothing, so there is nothing to configure beyond              whether it is on."
-                .to_string(),
-        );
-        body.insert("enabled".into(), serde_json::json!(true));
+        about.push("This plugin runs no program of its own and no language server,".into());
+        about.push("so there is nothing here to tell it. Whether it is on at all is".into());
+        about.push("a different question, asked in `plugins` — the palette, or".into());
+        about.push("`plugins` in config.json.".into());
     }
+
     let mut out = serde_json::Map::new();
     out.insert("_about".into(), serde_json::json!(about));
     out.extend(body);
@@ -979,9 +976,6 @@ pub fn merge_into(base: &mut Option<serde_json::Value>, over: Option<&serde_json
 impl FilePlugin {
     /// Lay your settings over what the plugin shipped.
     fn apply_override(&mut self, said: FileOverride) {
-        if let Some(enabled) = said.enabled {
-            self.enabled = Some(enabled);
-        }
         if let Some(host) = &mut self.host {
             merge_into(&mut host.settings, said.settings.as_ref());
         }
@@ -1912,21 +1906,60 @@ mod tests {
     }
 
     #[test]
-    fn a_settings_file_can_switch_a_plugin_off_and_cannot_change_what_it_is() {
-        let mut file: FilePlugin =
-            serde_json::from_str(r#"{"id":"ruff","name":"Ruff","needs":["ruff"]}"#).unwrap();
-        file.apply_override(serde_json::from_str(r#"{"enabled":false}"#).unwrap());
-        let (plugin, _) = file.into_plugin("ruff", Source::BuiltIn);
-        assert!(!plugin.on_by_default);
-        // Its identity is the plugin's, not your opinion of it — there is no
-        // way to say any of this, and the parser says so rather than ignoring
-        // it quietly.
-        for wrong in [r#"{"id":"mine"}"#, r#"{"needs":["x"]}"#, r#"{"install":[]}"#] {
+    fn a_settings_file_says_what_a_plugin_is_told_and_nothing_else() {
+        // What a plugin *is* belongs to the plugin, not to your opinion of it,
+        // and whether it is *on* is asked in `config.json` under `plugins` —
+        // one question with two places to answer it is worse than one place.
+        // Each of these is refused rather than ignored quietly, because a
+        // setting that does nothing and says nothing is an afternoon.
+        for wrong in [
+            r#"{"enabled":false}"#,
+            r#"{"id":"mine"}"#,
+            r#"{"needs":["x"]}"#,
+            r#"{"install":[]}"#,
+            r#"{"languages":{}}"#,
+        ] {
             assert!(
                 serde_json::from_str::<FileOverride>(wrong).is_err(),
                 "{wrong} should not be something a settings file can say"
             );
         }
+        // And what it can say, it says.
+        let said: FileOverride =
+            serde_json::from_str(r#"{"_about":"why","settings":{"a":1},"servers":{}}"#)
+                .expect("this is the whole of the shape");
+        assert_eq!(said.settings, Some(json!({"a": 1})));
+    }
+
+    #[test]
+    fn a_first_draft_names_the_servers_the_plugin_actually_has() {
+        // A file made empty is a blank page and a guess.
+        let file: FilePlugin = serde_json::from_str(
+            r#"{"id":"vscode-langservers","languages":{
+                 "css":{"servers":[{"name":"css-language-server","command":"a"}]},
+                 "html":{"servers":[{"name":"html-language-server","command":"b"}]}}}"#,
+        )
+        .unwrap();
+        let (plugin, _) = file.into_plugin("vscode-langservers", Source::BuiltIn);
+        let stub = settings_stub(&plugin);
+        // It parses as one of these, which is the least a first draft can do.
+        let read: FileOverride = serde_json::from_str(&stub).expect("{stub}");
+        assert_eq!(read.servers.len(), 2);
+        assert!(stub.contains("css-language-server"), "{stub}");
+        assert!(stub.contains("html-language-server"), "{stub}");
+        // And no `settings` of its own, because this plugin brings no program
+        // of its own to tell anything to.
+        assert_eq!(read.settings, None, "{stub}");
+
+        // And a plugin with nothing to be told says so rather than offering
+        // an empty shape to fill in.
+        let file: FilePlugin =
+            serde_json::from_str(r#"{"id":"rust","languages":{"rust":{"extensions":["rs"]}}}"#)
+                .unwrap();
+        let (plugin, _) = file.into_plugin("rust", Source::BuiltIn);
+        let stub = settings_stub(&plugin);
+        serde_json::from_str::<FileOverride>(&stub).expect("{stub}");
+        assert!(stub.contains("nothing here to tell it"), "{stub}");
     }
 
     #[test]

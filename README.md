@@ -1249,18 +1249,20 @@ there would be no way to *shorten* a list you cannot see.
 
 | | |
 |---|---|
-| `enabled` | whether it is on |
 | `settings` | over what the plugin's own program is told at startup |
 | `servers.<name>` | over one of its language servers: `settings`, `init_options`, `env`, `args`, `roots`, `command` |
 
-`env` merges too, so naming one variable does not drop the others. What you
-cannot say is anything about what a plugin *is* — its id, its commands, what
-it needs, how to install it. Those are the plugin, not your opinion of it, and
-the file is refused rather than half-obeyed if it tries.
+`env` merges too, so naming one variable does not drop the others.
 
-Everything else you set already lived outside the plugin and always survived:
-what is switched off (`plugins` in `config.json`), your keys, and
-`languages.json`.
+What you cannot say here is anything about what a plugin *is* — its id, its
+commands, what it needs, how to install it. Those are the plugin, not your
+opinion of it. **Nor whether it is on**: that is `plugins` in `config.json`,
+where the list with the switches in it writes what you chose, and one question
+with two places to answer it is worse than one place slightly further away.
+Either way the file is refused rather than half-obeyed if it tries.
+
+Everything else you set already lived outside the plugin and always survived
+an update: what is switched off, your keys, and `languages.json`.
 
 **A plugin's keys are a suggestion, not a claim.** One is bound only if
 nothing already wants that key, so a plugin cannot quietly take Ctrl-S, and a
