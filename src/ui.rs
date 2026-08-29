@@ -18,10 +18,10 @@ use ratatui::style::{Color, Modifier, Style};
 use crate::app::{App, Overlay, PromptKind, Tone};
 use crate::cmd::Cmd;
 use crate::config::LineNumbers;
-use crate::doc::{Diagnostic, Document, Severity};
+use crate::doc::{Diagnostic, DocId, Document, Severity};
 use crate::text::{self, Range};
 use crate::theme::Theme;
-use crate::view::{self, Layout, View};
+use crate::view::{self, Edge, Layout, View};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let area = frame.area();
@@ -77,29 +77,44 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// Done before anything is drawn, because the mouse reads these back and a
 /// click has to land on what is actually on the screen.
 fn place_panes(app: &mut App, body: Rect) {
-    let count = app.panes.len().max(1) as u16;
+    // The docked panes come off the edges first, and what is left is the
+    // middle for everything else to share. Done in this order because that is
+    // what docking means: a sidebar is not competing with the code for room,
+    // it is taking its share off the top and handing the rest over.
+    let (middle, docked) = carve_docks(app, body);
+    let ordinary: Vec<usize> = (0..app.panes.len())
+        .filter(|at| app.panes[*at].dock.is_none())
+        .collect();
+    let count = ordinary.len().max(1) as u16;
+
     for index in 0..app.panes.len() {
-        let at = index as u16;
-        let frame = if app.side_by_side {
-            let width = body.width / count;
-            let x = body.x + width * at;
-            // The last pane takes whatever is left over, so a width that does
-            // not divide evenly does not leave a stripe of nothing.
-            let width = if at + 1 == count {
-                body.width - width * at
-            } else {
-                width
-            };
-            Rect::new(x, body.y, width, body.height)
-        } else {
-            let height = body.height / count;
-            let y = body.y + height * at;
-            let height = if at + 1 == count {
-                body.height - height * at
-            } else {
-                height
-            };
-            Rect::new(body.x, y, body.width, height)
+        let frame = match docked.iter().find(|(at, _)| *at == index) {
+            Some((_, frame)) => *frame,
+            None => {
+                let at = ordinary.iter().position(|p| *p == index).unwrap_or(0) as u16;
+                if app.side_by_side {
+                    let width = middle.width / count;
+                    let x = middle.x + width * at;
+                    // The last pane takes whatever is left over, so a width
+                    // that does not divide evenly does not leave a stripe of
+                    // nothing.
+                    let width = if at + 1 == count {
+                        middle.width - width * at
+                    } else {
+                        width
+                    };
+                    Rect::new(x, middle.y, width, middle.height)
+                } else {
+                    let height = middle.height / count;
+                    let y = middle.y + height * at;
+                    let height = if at + 1 == count {
+                        middle.height - height * at
+                    } else {
+                        height
+                    };
+                    Rect::new(middle.x, y, middle.width, height)
+                }
+            }
         };
 
         let id = app.panes[index].doc;
@@ -122,7 +137,14 @@ fn place_panes(app: &mut App, body: Rect) {
         // A column of its own for the rule that says which pane has the
         // focus, rather than borrowing one from the line numbers — which for
         // a file long enough would have taken a digit with it.
-        let gutter = numbers + rule_width(count);
+        // A docked pane is a plugin's own surface. Line numbers down a tree of
+        // file names are noise, and the room they take is room the names
+        // needed — so a dock gets the focus rule and nothing else.
+        let numbers = match app.panes[index].dock.is_some() {
+            true => 0,
+            false => numbers,
+        };
+        let gutter = numbers + rule_width(app.panes.len() as u16);
         // A scroll bar down the right, except in a pane too narrow to spare it.
         let bar = if frame.width > 20 { 1 } else { 0 };
         let text_width = frame.width.saturating_sub(gutter + bar).max(1);
@@ -133,6 +155,92 @@ fn place_panes(app: &mut App, body: Rect) {
         pane.area = Rect::new(frame.x + gutter, frame.y, text_width, frame.height);
     }
 }
+
+/// Take the docked panes off the edges of `body`, and say what is left for
+/// everything else.
+///
+/// Left, then right, then bottom, and each one is clamped so that the middle
+/// never disappears: a plugin asking for eighty columns on a narrow terminal
+/// gets what there is to give rather than an editor with no room in it. Two
+/// docks on the same edge sit next to each other and share what that edge was
+/// given, which is the least surprising answer and needs no rule of its own.
+fn carve_docks(app: &App, body: Rect) -> (Rect, Vec<(usize, Rect)>) {
+    let mut middle = body;
+    let mut placed: Vec<(usize, Rect)> = Vec::new();
+
+    for edge in [Edge::Left, Edge::Right, Edge::Bottom] {
+        let here: Vec<(usize, u16)> = app
+            .panes
+            .iter()
+            .enumerate()
+            .filter_map(|(at, pane)| {
+                pane.dock
+                    .filter(|dock| dock.edge == edge)
+                    .map(|dock| (at, dock.size.max(1)))
+            })
+            .collect();
+        if here.is_empty() {
+            continue;
+        }
+        // Never more than half of what is left, so the code stays the thing
+        // the editor is mostly showing.
+        let room = match edge.is_side() {
+            true => middle.width,
+            false => middle.height,
+        };
+        let wanted: u16 = here.iter().map(|(_, size)| *size).sum();
+        let given = wanted.min(room.saturating_sub(MIN_MIDDLE));
+        if given == 0 {
+            // Nothing to give. The dock is placed empty rather than left
+            // unplaced, so a click can never land on a stale rectangle.
+            for (at, _) in here {
+                placed.push((at, Rect::new(middle.x, middle.y, 0, 0)));
+            }
+            continue;
+        }
+        // Each dock keeps its share of what was actually given, so shrinking
+        // the terminal shrinks them in proportion rather than starving the
+        // last one.
+        let mut used = 0;
+        for (which, (at, size)) in here.iter().enumerate() {
+            let last = which + 1 == here.len();
+            let share = match last {
+                true => given - used,
+                false => ((*size as u32 * given as u32) / wanted.max(1) as u32) as u16,
+            };
+            let frame = match edge {
+                Edge::Left => Rect::new(middle.x + used, middle.y, share, middle.height),
+                Edge::Right => Rect::new(
+                    middle.x + middle.width - given + used,
+                    middle.y,
+                    share,
+                    middle.height,
+                ),
+                Edge::Bottom => Rect::new(
+                    middle.x,
+                    middle.y + middle.height - given + used,
+                    middle.width,
+                    share,
+                ),
+            };
+            placed.push((*at, frame));
+            used += share;
+        }
+        match edge {
+            Edge::Left => {
+                middle.x += given;
+                middle.width -= given;
+            }
+            Edge::Right => middle.width -= given,
+            Edge::Bottom => middle.height -= given,
+        }
+    }
+    (middle, placed)
+}
+
+/// The least the middle may be squeezed to. Below this the editor stops being
+/// an editor with a sidebar and becomes a sidebar with a rumour of an editor.
+const MIN_MIDDLE: u16 = 20;
 
 fn digits(n: usize) -> usize {
     n.max(1).to_string().len()
@@ -745,9 +853,22 @@ fn draw_tabs(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
     // state the file is in, because they are never both wanted at once and one
     // column is one column.
     let here = app.view().doc;
+    // What is docked is not a tab. A sidebar is part of the editor's shape,
+    // and a row across the top offering to switch to the thing already down
+    // the left — and to close it with a cross that is not how you close it —
+    // is a row saying something untrue.
+    let docked: Vec<DocId> = app
+        .panes
+        .iter()
+        .filter(|pane| pane.dock.is_some())
+        .map(|pane| pane.doc)
+        .collect();
     let mut tabs = Vec::new();
     let mut total = 0u16;
     for doc in app.docs() {
+        if docked.contains(&doc.id) {
+            continue;
+        }
         let label = format!(" {} ", doc.name);
         let width = (text::str_width(&label) + 2) as u16;
         tabs.push((doc.id, label, tab_state(doc), total, width));
@@ -2761,6 +2882,108 @@ mod tests {
     }
 
     #[test]
+    fn a_dock_takes_its_room_off_the_edge_and_the_rest_share_what_is_left() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(Config::default(), tx);
+        let body = Rect::new(0, 1, 100, 28);
+
+        // One ordinary pane: it has the lot.
+        place_panes(&mut app, body);
+        assert_eq!(app.panes[0].frame, Rect::new(0, 1, 100, 28));
+
+        // A dock on the left takes thirty columns and the pane takes seventy.
+        let doc = app.panes[0].doc;
+        let mut sidebar = crate::view::View::new(doc, false);
+        sidebar.dock = Some(crate::view::Dock::new(crate::view::Edge::Left, Some(30)));
+        app.panes.insert(0, sidebar);
+        place_panes(&mut app, body);
+        assert_eq!(app.panes[0].frame, Rect::new(0, 1, 30, 28));
+        assert_eq!(app.panes[1].frame, Rect::new(30, 1, 70, 28));
+
+        // A second sidebar on the right, and the middle is what is left.
+        let mut right = crate::view::View::new(doc, false);
+        right.dock = Some(crate::view::Dock::new(crate::view::Edge::Right, Some(20)));
+        app.panes.push(right);
+        place_panes(&mut app, body);
+        assert_eq!(app.panes[0].frame, Rect::new(0, 1, 30, 28));
+        assert_eq!(app.panes[1].frame, Rect::new(30, 1, 50, 28));
+        assert_eq!(app.panes[2].frame, Rect::new(80, 1, 20, 28));
+
+        // And along the bottom, which is a height rather than a width.
+        let mut bottom = crate::view::View::new(doc, false);
+        bottom.dock = Some(crate::view::Dock::new(crate::view::Edge::Bottom, Some(8)));
+        app.panes.push(bottom);
+        place_panes(&mut app, body);
+        assert_eq!(app.panes[3].frame, Rect::new(30, 21, 50, 8));
+        assert_eq!(app.panes[1].frame, Rect::new(30, 1, 50, 20));
+    }
+
+    #[test]
+    fn a_dock_never_squeezes_the_code_out_of_the_editor() {
+        // A plugin asking for eighty columns on a narrow terminal gets what
+        // there is to give, not an editor with no room left in it.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(Config::default(), tx);
+        let doc = app.panes[0].doc;
+        let mut sidebar = crate::view::View::new(doc, false);
+        sidebar.dock = Some(crate::view::Dock::new(crate::view::Edge::Left, Some(80)));
+        app.panes.insert(0, sidebar);
+
+        let body = Rect::new(0, 1, 60, 20);
+        place_panes(&mut app, body);
+        assert!(
+            app.panes[1].frame.width >= MIN_MIDDLE,
+            "the middle was squeezed to {}",
+            app.panes[1].frame.width
+        );
+        // The two together are still exactly the body: no stripe of nothing.
+        assert_eq!(app.panes[0].frame.width + app.panes[1].frame.width, 60);
+    }
+
+    #[test]
+    fn what_is_docked_is_not_offered_as_a_tab() {
+        // A row across the top offering to switch to the thing already down
+        // the left — and to close it with a cross that is not how you close
+        // it — is a row saying something untrue.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(Config::default(), tx);
+        app.screen = Rect::new(0, 0, 90, 12);
+        // A second buffer standing in for the plugin's own.
+        app.run(crate::cmd::Cmd::NEW);
+        let sidebar = app.view().doc;
+        if let Some(doc) = app.doc_mut(sidebar) {
+            doc.name = "tree".into();
+        }
+        let mut pane = crate::view::View::new(sidebar, false);
+        pane.dock = Some(crate::view::Dock::new(crate::view::Edge::Left, Some(20)));
+        app.panes.insert(0, pane);
+        app.focus = 1;
+
+        let mut terminal = Terminal::new(TestBackend::new(90, 12)).expect("a terminal");
+        terminal.draw(|frame| super::draw(frame, &mut app)).expect("drawn");
+        let buffer = terminal.backend().buffer();
+        let row: String = (0..buffer.area.width).map(|x| buffer[(x, 0)].symbol()).collect();
+        assert!(!row.contains("tree"), "the sidebar was offered as a tab: {row:?}");
+        assert!(row.contains("untitled"), "the real tab went missing: {row:?}");
+    }
+
+    #[test]
+    fn a_dock_has_no_line_numbers_down_it() {
+        // A tree of file names does not have lines you refer to by number,
+        // and the room they take is room the names needed.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(Config::default(), tx);
+        let doc = app.panes[0].doc;
+        let mut sidebar = crate::view::View::new(doc, false);
+        sidebar.dock = Some(crate::view::Dock::new(crate::view::Edge::Left, Some(30)));
+        app.panes.insert(0, sidebar);
+        place_panes(&mut app, Rect::new(0, 1, 100, 28));
+        // One column for the focus rule, and nothing else.
+        assert_eq!(app.panes[0].gutter, 1);
+        assert!(app.panes[1].gutter > 1, "the code still has its numbers");
+    }
+
+    #[test]
     fn a_hover_line_wider_than_the_screen_is_folded_rather_than_elided() {
         // What the box does about a long line, drawn: no ellipsis, nothing
         // running off the side, and every word still there to read.
@@ -3338,3 +3561,4 @@ mod tests {
     }
 
 }
+

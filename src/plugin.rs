@@ -314,6 +314,19 @@ pub struct Command {
     /// that is what it is from the outside: a row in the palette, a key you
     /// can bind, a switch in the plugins list.
     pub opens_panel: bool,
+    /// Where the panel sits, for one that is part of the editor's shape
+    /// rather than a buffer you switch to.
+    ///
+    /// `None` is a tab, which is what a panel used to always be and is still
+    /// the right answer for something you read and then leave — a build
+    /// report, a list of test failures. An edge is for something you keep
+    /// beside the code: a tree of files, a list of problems along the bottom.
+    ///
+    /// Declared in the manifest rather than announced by the running program,
+    /// for the same reason the command is: the editor should be able to lay
+    /// the thing out before the plugin has ever been started. A plugin that
+    /// wants to move it afterwards can, with `panel/dock`.
+    pub dock: Option<crate::view::Dock>,
 }
 
 impl Command {
@@ -906,6 +919,14 @@ struct FileCommand {
     name: String,
     #[serde(default)]
     about: Option<String>,
+    /// `"left"`, `"right"` or `"bottom"` — a panel that is part of the
+    /// editor's shape. Absent means a tab. Meaningless on a command.
+    #[serde(default)]
+    dock: Option<String>,
+    /// How wide a docked panel is in columns, or how tall in rows. Absent
+    /// means a sensible one for the edge.
+    #[serde(default)]
+    size: Option<u16>,
     /// `"passive"`, `"edits"` or `"types"`. Absent means passive, since a
     /// command that changes the text is the rarer kind and saying so should
     /// be deliberate — the answer decides whether it may run on a read-only
@@ -1064,8 +1085,28 @@ impl FilePlugin {
                 problems.push(format!("{id}: {name} has no host to run it"));
                 continue;
             }
+            // A `dock` on something that is not a panel has nothing to
+            // place, and silently ignoring it would leave somebody looking
+            // for a sidebar that was never going to appear.
+            let dock = match (&c.dock, opens_panel) {
+                (None, _) => None,
+                (Some(_), false) => {
+                    problems.push(format!("{id}: {name} is a command, so it cannot be docked"));
+                    None
+                }
+                (Some(where_), true) => match crate::view::Edge::parse(where_) {
+                    Some(edge) => Some(crate::view::Dock::new(edge, c.size)),
+                    None => {
+                        problems.push(format!(
+                            "{id}: {name} cannot be docked {where_:?} — left, right or bottom"
+                        ));
+                        None
+                    }
+                },
+            };
             commands.push(Command {
                 opens_panel,
+                dock,
                 behaviour: match c.behaviour.as_deref().map(str::trim) {
                     Some("edits") => crate::cmd::Behaviour::Edits,
                     Some("types") => crate::cmd::Behaviour::Types,
@@ -1484,6 +1525,70 @@ mod tests {
             host.args,
             ["/home/me/.config/textfold/plugins/p/run.py".to_string()]
         );
+    }
+
+    #[test]
+    fn a_panel_says_in_its_manifest_where_it_sits() {
+        // Declared rather than announced, so the editor can lay the thing out
+        // before the plugin has ever been started.
+        let file: FilePlugin = serde_json::from_str(
+            r#"{"id":"files","host":{"command":"python3"},
+                "panels":[{"name":"tree","dock":"left","size":32},
+                          {"name":"log","dock":"bottom"},
+                          {"name":"report"}]}"#,
+        )
+        .unwrap();
+        let (plugin, problems) = file.into_plugin("files", Source::BuiltIn);
+        assert!(problems.is_empty(), "{problems:?}");
+        let dock = |name: &str| {
+            plugin
+                .commands
+                .iter()
+                .find(|c| c.name == name)
+                .and_then(|c| c.dock)
+        };
+        assert_eq!(
+            dock("tree"),
+            Some(crate::view::Dock {
+                edge: crate::view::Edge::Left,
+                size: 32
+            })
+        );
+        // No size means one that suits the edge — columns for a side, rows
+        // for the bottom.
+        assert_eq!(
+            dock("log"),
+            Some(crate::view::Dock {
+                edge: crate::view::Edge::Bottom,
+                size: crate::view::DEFAULT_DOCK_HEIGHT
+            })
+        );
+        // And a panel that says nothing is a tab, which is what they all were.
+        assert_eq!(dock("report"), None);
+    }
+
+    #[test]
+    fn a_panel_docked_somewhere_that_is_not_an_edge_is_a_complaint() {
+        // Silently ignoring it would leave somebody looking for a sidebar
+        // that was never going to appear.
+        let file: FilePlugin = serde_json::from_str(
+            r#"{"id":"p","host":{"command":"x"},"panels":[{"name":"t","dock":"middle"}]}"#,
+        )
+        .unwrap();
+        let (plugin, problems) = file.into_plugin("p", Source::BuiltIn);
+        assert_eq!(plugin.commands[0].dock, None);
+        assert_eq!(
+            problems,
+            [r#"p: t cannot be docked "middle" — left, right or bottom"#]
+        );
+
+        // And a command is not a panel, so there is nothing of it to dock.
+        let file: FilePlugin = serde_json::from_str(
+            r#"{"id":"p","host":{"command":"x"},"commands":[{"name":"go","dock":"left"}]}"#,
+        )
+        .unwrap();
+        let (_, problems) = file.into_plugin("p", Source::BuiltIn);
+        assert_eq!(problems, ["p: go is a command, so it cannot be docked"]);
     }
 
     #[test]

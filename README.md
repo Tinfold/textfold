@@ -1185,7 +1185,7 @@ is read, so `"python/ruff": false` goes on meaning what it meant.
 | `tools` | programs to run on the file: formatters, linters, test runs — see [Tools](#tools) |
 | `host` | a program of its own that stays running — see [A plugin that is a program](#a-plugin-that-is-a-program) |
 | `commands` | things that program answers to, each a command like any other |
-| `panels` | buffers that program fills — see [A panel of its own](#a-panel-of-its-own) |
+| `panels` | buffers that program fills, in a tab or docked to an edge — see [A panel of its own](#a-panel-of-its-own) |
 | `host.settings` | whatever the plugin wants to be told about itself |
 | `themes` | sets of colours, in the shape a [theme file](#colours) is in |
 | `keys` | keys it would like bound, by command name |
@@ -1752,6 +1752,10 @@ switch it off and on again.
 | `confirm` | ask a yes-or-no question |
 | `open` | open a file, optionally at a line |
 | `panel/set` | fill a panel of its own with styled, clickable lines |
+| `panel/dock` | move a panel to an edge, resize it, or put it back in a tab |
+| `file/create` | make a file, or a directory |
+| `file/rename` | move one, and take the open buffers with it |
+| `file/delete` | take one away, and close what was open in it |
 | `hint/set` | offer some text where the cursor is — shown, not inserted |
 
 …and what the editor tells it: `buffer/opened` · `changed` · `saved` ·
@@ -1843,10 +1847,74 @@ the editor hands it straight back and never looks inside it. That is the whole
 interaction model, and it is enough for a tree, a form, a toolbar or a list of
 problems.
 
-A panel **is a buffer**. It is a tab, it splits, it scrolls, it has a border,
-and `Alt-,` gets you back to it — because it is the same `Document` as
-everything else, with two differences: it is read-only, and its colours come
-from the plugin instead of from a grammar.
+A panel **is a buffer**. It splits, it scrolls, it has a border, and `Alt-,`
+gets you back to it — because it is the same `Document` as everything else,
+with two differences: it is read-only, and its colours come from the plugin
+instead of from a grammar.
+
+#### Docking one
+
+A panel with an edge is not a tab. It is a column pinned down a side at a
+width of its own, or a row along the bottom at a height of its own, taking its
+room off the edge and leaving the middle to the code:
+
+```json
+{ "panels": [
+  { "name": "tree", "about": "The project, as a tree down the side",
+    "dock": "left", "size": 32 }
+] }
+```
+
+`left`, `right` or `bottom`. Said in the manifest rather than announced by the
+running program, for the same reason the command is: the editor should be able
+to lay the thing out before the plugin has ever been started.
+
+A docked panel is a **switch**. Running its command again puts it away — that
+is what collapsible means from a keyboard — and the plugin is told
+(`panel/closed`) rather than being left redrawing into nothing. It comes back
+where it was next time you open the project.
+
+In every other respect it is an ordinary pane: a cursor, the focus rule, Tab
+in and out, `close-pane`. That is deliberate — a sidebar that was its own kind
+of surface would need its own answer to every question a pane has already
+answered. It differs in three small ways, each because a sidebar is not a
+file: no line numbers down it, no row in the tab strip, and closing the last
+pane showing a *file* is still refused while closing a dock never is.
+
+A plugin can move or resize its own panel while running:
+
+```json
+{ "method": "panel/dock",
+  "params": { "panel": "files/tree", "edge": "bottom", "size": 12 } }
+```
+
+`"edge": "none"` puts it back in a tab.
+
+[`files`](https://github.com/Tinfold/textfold-plugins/tree/main/plugins/files)
+is the worked example — a browsable, renamable tree of the project in about
+two hundred lines of Python.
+
+#### Changing files
+
+A plugin that rearranges the project asks the editor rather than running `mv`:
+
+```json
+{ "method": "file/rename",
+  "params": { "from": "src/old.rs", "to": "src/new.rs" } }
+```
+
+Not tidiness. A buffer open on a file that was renamed underneath it is a
+buffer that will save to the old name, and a language server still being told
+about a path that no longer exists — going on reporting problems in a file
+nobody can open. Only the editor can carry the buffers and the servers across,
+so only the editor should be doing the move.
+
+Every path is resolved and checked to be inside the project first, because a
+file explorer is a thing that sends paths back and a plugin that could be
+talked into `../../.ssh/id_rsa` by a directory name is a plugin nobody should
+run. Deleting refuses outright if anything inside has unsaved changes — a
+plugin may not throw away work nobody has been asked about, and `confirm` is
+there for the asking.
 
 **Keys in a panel.** A panel is handed the keystrokes that would otherwise have
 *changed the text* — which, in a buffer that is not yours to change, are going

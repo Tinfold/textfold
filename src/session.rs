@@ -61,6 +61,15 @@ pub struct Session {
     pub tabs: Vec<Tab>,
     #[serde(default)]
     pub panes: Vec<Pane>,
+    /// Which plugin panels were docked, by command id — `files/tree`.
+    ///
+    /// The ids rather than the panes, because a docked panel is not a file:
+    /// its buffer belongs to a plugin, and bringing it back means asking the
+    /// plugin for it again rather than reopening something off the disk. What
+    /// is worth remembering is that the sidebar was open, which is what this
+    /// is.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub docks: Vec<String>,
     /// Which pane had the keyboard.
     #[serde(default)]
     pub focus: usize,
@@ -194,6 +203,7 @@ mod tests {
             focus: 1,
             side_by_side: false,
             at: 1_700_000_000,
+            docks: vec!["files/tree".into()],
         };
         let text = serde_json::to_string(&session).expect("written");
         let back: Session = serde_json::from_str(&text).expect("read");

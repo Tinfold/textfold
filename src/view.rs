@@ -41,8 +41,83 @@ pub struct Jump {
 }
 
 /// A pane.
+/// Which edge of the editor a docked pane is pinned to.
+///
+/// Not a direction so much as a shape: the two sides are a column of a fixed
+/// width and the bottom is a row of a fixed height, because that is what the
+/// things people dock are — a tree of files down one side, a list of problems
+/// along the bottom.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Edge {
+    Left,
+    Right,
+    Bottom,
+}
+
+impl Edge {
+    /// What a manifest or a plugin calls it.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text.trim().to_lowercase().as_str() {
+            "left" => Some(Edge::Left),
+            "right" => Some(Edge::Right),
+            "bottom" => Some(Edge::Bottom),
+            _ => None,
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Edge::Left => "left",
+            Edge::Right => "right",
+            Edge::Bottom => "bottom",
+        }
+    }
+
+    /// Whether it takes a width out of the body rather than a height.
+    pub fn is_side(&self) -> bool {
+        matches!(self, Edge::Left | Edge::Right)
+    }
+}
+
+/// A pane pinned to an edge at a size of its own, rather than taking an equal
+/// share of the middle.
+///
+/// This is what lets a plugin add to the editor's shape rather than only to
+/// its contents. A dock is an ordinary pane in every other respect — it has a
+/// buffer, a cursor, the focus rule, and the keys — which is deliberate: a
+/// sidebar that was a special kind of surface would need its own answer to
+/// every question a pane has already answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Dock {
+    pub edge: Edge,
+    /// Columns for a side, rows for the bottom. Clamped when it is laid out,
+    /// so a plugin asking for eighty columns on a forty-column terminal gets
+    /// something usable rather than an editor with no room left in it.
+    pub size: u16,
+}
+
+/// What a dock is when nobody says: wide enough for a tree of file names,
+/// narrow enough to leave the code readable.
+pub const DEFAULT_DOCK_WIDTH: u16 = 30;
+/// And the same along the bottom, where the useful unit is rows.
+pub const DEFAULT_DOCK_HEIGHT: u16 = 10;
+
+impl Dock {
+    pub fn new(edge: Edge, size: Option<u16>) -> Self {
+        let size = size.unwrap_or(match edge.is_side() {
+            true => DEFAULT_DOCK_WIDTH,
+            false => DEFAULT_DOCK_HEIGHT,
+        });
+        Self { edge, size }
+    }
+}
+
 pub struct View {
     pub doc: DocId,
+    /// Where this pane is pinned, if it is pinned at all. `None` is an
+    /// ordinary pane, which is what all of them used to be.
+    pub dock: Option<Dock>,
     pub sel: Selections,
     /// The first line on screen, and how far into it when a folded line is cut
     /// across the top of the pane.
@@ -83,6 +158,7 @@ impl View {
     pub fn new(doc: DocId, wrap: bool) -> Self {
         Self {
             doc,
+            dock: None,
             sel: Selections::default(),
             top: 0,
             top_row: 0,

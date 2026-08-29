@@ -1471,6 +1471,9 @@ impl App {
         let panes: Vec<crate::session::Pane> = self
             .panes
             .iter()
+            // A dock shows a plugin's own buffer, which is not a file and not
+            // a tab. It comes back by its id below rather than as a pane.
+            .filter(|pane| pane.dock.is_none())
             .filter_map(|pane| {
                 Some(crate::session::Pane {
                     tab: *of_doc.get(&pane.doc)?,
@@ -1478,12 +1481,19 @@ impl App {
                 })
             })
             .collect();
+        let docks: Vec<String> = self
+            .panes
+            .iter()
+            .filter(|pane| pane.dock.is_some())
+            .filter_map(|pane| self.doc(pane.doc)?.panel.as_ref().map(|p| p.id.clone()))
+            .collect();
         crate::session::Session {
             focus: here.min(panes.len().saturating_sub(1)),
             side_by_side: self.side_by_side,
             at: crate::session::now(),
             tabs,
             panes,
+            docks
         }
     }
 
@@ -1577,6 +1587,43 @@ impl App {
                 self.panes[at].wrap = *wrap;
             }
             self.focus = session.focus.min(self.panes.len() - 1);
+        }
+        // And the sidebars, last, so that restoring them does not renumber
+        // the panes the layout above just built. Opening one starts the
+        // plugin behind it, which is what a panel command does anywhere —
+        // asking for the thing is what makes it run.
+        //
+        // Which pane had the focus is remembered as its place among the panes
+        // showing a file, because inserting a sidebar on the left renumbers
+        // everything after it.
+        let focused = self
+            .panes
+            .iter()
+            .take(self.focus)
+            .filter(|p| p.dock.is_none())
+            .count();
+        for id in &session.docks {
+            let Some(command) = crate::plugin::active()
+                .flat_map(|p| &p.commands)
+                .find(|c| &c.id == id && c.opens_panel && c.dock.is_some())
+            else {
+                continue;
+            };
+            self.run_plugin_command(command);
+        }
+        // Opening a sidebar takes the focus, which is right when you have just
+        // asked for one and wrong when it is only being put back where it was.
+        // The pane that had it gets it back.
+        if !session.docks.is_empty()
+            && let Some(at) = self
+                .panes
+                .iter()
+                .enumerate()
+                .filter(|(_, p)| p.dock.is_none())
+                .map(|(at, _)| at)
+                .nth(focused)
+        {
+            self.focus = at;
         }
         self.scroll_into_view();
         self.session_dirty = true;
@@ -3097,7 +3144,16 @@ impl App {
             // Opening a panel is not something the plugin does; it is
             // something the editor does, and then tells the plugin about so
             // that it has somewhere to put its lines.
-            self.open_panel(command);
+            //
+            // Running a docked panel's command again puts it away, and then
+            // there is nothing to tell it to fill. Saying `panel/opened` here
+            // would be telling a plugin its sidebar had just appeared at the
+            // moment it went.
+            if !self.open_panel(command) {
+                let (plugin, id) = (command.plugin.clone(), command.id.clone());
+                self.tell_panel(&plugin, "panel/closed", json!({ "panel": id }));
+                return self.take_plugin_problems();
+            }
         }
         self.hosts.run(command, Some(&from), context);
         self.take_plugin_problems();
@@ -3108,33 +3164,83 @@ impl App {
     ///
     /// The same buffer each time, so opening it twice is going back to it
     /// rather than ending up with two.
-    fn open_panel(&mut self, command: &'static crate::plugin::Command) {
-        let existing = self
+    ///
+    /// Answers whether the panel is on the screen afterwards, which for a
+    /// docked one is not always yes: running its command again is how you put
+    /// it away.
+    fn open_panel(&mut self, command: &'static crate::plugin::Command) -> bool {
+        let id = self.panel_buffer(command);
+        let Some(dock) = command.dock else {
+            // An ordinary panel is a tab, which is the right answer for
+            // something you read and then leave.
+            self.show(id);
+            return true;
+        };
+        // A docked panel is a switch, not a tab: running its command again is
+        // how you get rid of it. That is what "collapsible" means from the
+        // keyboard, and a sidebar you can only open would be a sidebar
+        // everybody closes by quitting.
+        if let Some(at) = self.pane_showing_docked(id) {
+            self.panes.remove(at);
+            self.focus = self.focus.min(self.panes.len().saturating_sub(1));
+            self.session_changed();
+            return false;
+        }
+        self.dock_panel(id, dock);
+        true
+    }
+
+    /// The buffer behind a panel, made the first time it is asked for.
+    fn panel_buffer(&mut self, command: &'static crate::plugin::Command) -> DocId {
+        if let Some(id) = self
             .docs
             .iter()
             .find(|d| d.panel.as_ref().is_some_and(|p| p.id == command.id))
-            .map(|d| d.id);
-        let id = match existing {
-            Some(id) => id,
-            None => {
-                let id = self.new_scratch();
-                if let Some(doc) = self.doc_mut(id) {
-                    doc.name = command.name.clone();
-                    // Nothing types into a panel: what is in it belongs to the
-                    // plugin, and a half-typed-in panel would be a buffer
-                    // whose text and whose colours disagree.
-                    doc.read_only = true;
-                    doc.panel = Some(crate::doc::Panel {
-                        plugin: command.plugin.clone(),
-                        id: command.id.clone(),
-                        spans: Vec::new(),
-                        actions: Vec::new(),
-                    });
-                }
-                id
-            }
+            .map(|d| d.id)
+        {
+            return id;
+        }
+        let id = self.new_scratch();
+        if let Some(doc) = self.doc_mut(id) {
+            doc.name = command.name.clone();
+            // Nothing types into a panel: what is in it belongs to the
+            // plugin, and a half-typed-in panel would be a buffer whose text
+            // and whose colours disagree.
+            doc.read_only = true;
+            doc.panel = Some(crate::doc::Panel {
+                plugin: command.plugin.clone(),
+                id: command.id.clone(),
+                spans: Vec::new(),
+                actions: Vec::new(),
+            });
+        }
+        id
+    }
+
+    /// Which pane is showing this buffer as a dock, if one is.
+    fn pane_showing_docked(&self, id: DocId) -> Option<usize> {
+        self.panes
+            .iter()
+            .position(|pane| pane.doc == id && pane.dock.is_some())
+    }
+
+    /// Put a buffer in a pane pinned to an edge, and go there.
+    ///
+    /// Beside the middle rather than in it: the pane it opens next to keeps
+    /// what it was showing, which is the whole point of a dock — you asked
+    /// for a tree of files, not for the file you were reading to go away.
+    fn dock_panel(&mut self, id: DocId, dock: crate::view::Dock) {
+        let mut pane = crate::view::View::new(id, false);
+        pane.dock = Some(dock);
+        // On the side it belongs to, so the order of the panes matches the
+        // order they are drawn in and Tab walks them left to right.
+        let at = match dock.edge {
+            crate::view::Edge::Left => 0,
+            _ => self.panes.len(),
         };
-        self.show(id);
+        self.panes.insert(at, pane);
+        self.focus = at;
+        self.session_changed();
     }
 
     /// Start a tool, quietly. Answers whether it is on its way — a step in a
@@ -3795,26 +3901,39 @@ impl App {
     // ---- Panes ----
 
     fn split(&mut self) {
-        if self.panes.len() >= 4 {
+        if self.ordinary_panes() >= 4 {
             return self.say("four panes is as many as fit");
         }
         let mut copy = View::new(self.view().doc, self.view().wrap);
         copy.sel = self.view().sel.clone();
         copy.top = self.view().top;
-        let at = self.focus.min(self.panes.len() - 1);
+        // Never a copy of the dock. Splitting a sidebar would give you two
+        // sidebars, which is not what anybody means by it.
+        copy.dock = None;
+        let at = self.focus.min(self.panes.len().saturating_sub(1));
         self.panes.insert(at + 1, copy);
         self.focus = at + 1;
         self.session_changed();
     }
 
     fn close_pane(&mut self) {
-        if self.panes.len() < 2 {
+        let at = self.focus.min(self.panes.len().saturating_sub(1));
+        let docked = self.panes.get(at).is_some_and(|p| p.dock.is_some());
+        // A dock is always closable — it is a thing you put there, and the
+        // editor is still an editor without it. What has to survive is the
+        // last pane showing a file.
+        if !docked && self.ordinary_panes() < 2 {
             return self.say("that is the only pane");
         }
-        let at = self.focus.min(self.panes.len() - 1);
         self.panes.remove(at);
-        self.focus = at.min(self.panes.len() - 1);
+        self.focus = at.min(self.panes.len().saturating_sub(1));
         self.session_changed();
+    }
+
+    /// How many panes are showing a buffer in the middle rather than sitting
+    /// on an edge.
+    fn ordinary_panes(&self) -> usize {
+        self.panes.iter().filter(|p| p.dock.is_none()).count()
     }
 
     fn focus_pane(&mut self, by: isize) {
@@ -4536,11 +4655,18 @@ impl App {
             self.diff = None;
             return self.say("comparing: off");
         }
-        if self.panes.len() < 2 {
+        // Only panes showing a file. Comparing the code against a tree of
+        // file names is not a thing anybody means by "compare the two panes".
+        let ordinary: Vec<usize> = (0..self.panes.len())
+            .filter(|at| self.panes[*at].dock.is_none())
+            .collect();
+        if ordinary.len() < 2 {
             return self.say("two panes to compare — Alt-V opens another");
         }
         let here = self.focus.min(self.panes.len() - 1);
-        let there = (here + 1) % self.panes.len();
+        let at = ordinary.iter().position(|p| *p == here).unwrap_or(0);
+        let here = ordinary[at];
+        let there = ordinary[(at + 1) % ordinary.len()];
         let (left, right) = (here.min(there), here.max(there));
         let Some(diff) = self.compare(left, right) else {
             return self.say("nothing to compare");
@@ -7024,6 +7150,219 @@ impl App {
         Ok(json!({ "lines": lines }))
     }
 
+    /// Move a panel to an edge, resize it, or take it off one.
+    ///
+    /// The manifest says where a panel goes by default, so that the editor can
+    /// lay it out before the plugin has ever run. This is the other half: a
+    /// plugin that wants to widen its tree because somebody has opened a deep
+    /// directory, or to move to the bottom because what it is showing is a
+    /// list rather than a tree, can say so while it is running.
+    fn plugin_dock(&mut self, id: HostId, params: &Value) -> Result<Value, String> {
+        let plugin = self
+            .hosts
+            .get(id)
+            .map(|h| h.plugin.clone())
+            .ok_or("that plugin is not running")?;
+        let wanted = params
+            .get("panel")
+            .and_then(Value::as_str)
+            .ok_or("which panel?")?
+            .to_string();
+        let doc = self
+            .docs
+            .iter()
+            .find(|d| {
+                d.panel
+                    .as_ref()
+                    .is_some_and(|p| p.id == wanted && p.plugin == plugin)
+            })
+            .map(|d| d.id)
+            .ok_or_else(|| format!("{wanted} is not open"))?;
+
+        let size = params
+            .get("size")
+            .and_then(Value::as_u64)
+            .map(|n| n.clamp(1, u16::MAX as u64) as u16);
+        // `"none"` is how a plugin says "put it back in a tab", which is the
+        // only way to say it that is not a second method.
+        let edge = match params.get("edge").and_then(Value::as_str) {
+            None => None,
+            Some(said) if said.trim().eq_ignore_ascii_case("none") => {
+                if let Some(at) = self.pane_showing_docked(doc) {
+                    self.panes.remove(at);
+                    self.focus = self.focus.min(self.panes.len().saturating_sub(1));
+                }
+                self.show(doc);
+                self.session_changed();
+                return Ok(json!({ "edge": Value::Null }));
+            }
+            Some(said) => Some(
+                crate::view::Edge::parse(said)
+                    .ok_or_else(|| format!("{said:?} is not an edge — left, right or bottom"))?,
+            ),
+        };
+
+        match self.pane_showing_docked(doc) {
+            // Already docked: change what was asked about and leave the rest.
+            Some(at) => {
+                let dock = self.panes[at].dock.get_or_insert(crate::view::Dock::new(
+                    crate::view::Edge::Left,
+                    None,
+                ));
+                if let Some(edge) = edge {
+                    // A dock that changes edge changes what its size means, so
+                    // one that was not also given a size gets the default for
+                    // where it is going rather than a width used as a height.
+                    *dock = crate::view::Dock::new(edge, size);
+                } else if let Some(size) = size {
+                    dock.size = size;
+                }
+            }
+            None => {
+                let edge = edge.ok_or("which edge?")?;
+                self.dock_panel(doc, crate::view::Dock::new(edge, size));
+            }
+        }
+        self.session_changed();
+        let at = self.pane_showing_docked(doc);
+        let dock = at.and_then(|at| self.panes[at].dock);
+        Ok(json!({
+            "edge": dock.map(|d| d.edge.label()),
+            "size": dock.map(|d| d.size),
+        }))
+    }
+
+    /// The path a plugin named, under the project.
+    ///
+    /// Always under it. A file explorer is a thing that sends paths back, and
+    /// a plugin that could be talked into `../../.ssh/id_rsa` by a directory
+    /// name is a plugin nobody should run. Everything here is resolved and
+    /// then checked to be inside the project textfold was opened on.
+    fn plugin_path(&self, params: &Value, key: &str) -> Result<PathBuf, String> {
+        let said = params
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| format!("{key}: which path?"))?;
+        let full = crate::doc::absolute(&self.project.join(expand_path(said)));
+        let root = crate::doc::absolute(&self.project);
+        if !full.starts_with(&root) {
+            return Err(format!("{said} is outside {}", root.display()));
+        }
+        Ok(full)
+    }
+
+    /// Make a file, or a directory where the name ends in a separator.
+    fn plugin_file_create(&mut self, params: &Value) -> Result<Value, String> {
+        let path = self.plugin_path(params, "path")?;
+        let directory = params
+            .get("directory")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if path.exists() {
+            return Err(format!("{} is already there", path.display()));
+        }
+        if directory {
+            std::fs::create_dir_all(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+            return Ok(json!({ "path": path.display().to_string() }));
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        // Left empty rather than opened. What to do with a file you have just
+        // made is the person's business, and a plugin that made forty of them
+        // should not have opened forty tabs.
+        std::fs::write(&path, "").map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(json!({ "path": path.display().to_string() }))
+    }
+
+    /// Move a file or a directory, and take the buffers with it.
+    ///
+    /// The reason this is the editor's job and not `mv`: a buffer open on a
+    /// file that has been renamed underneath it is a buffer that will save to
+    /// the old name, and a language server still being told about a path that
+    /// no longer exists. A plugin shelling out could not fix either.
+    fn plugin_file_rename(&mut self, params: &Value) -> Result<Value, String> {
+        let from = self.plugin_path(params, "from")?;
+        let to = self.plugin_path(params, "to")?;
+        if !from.exists() {
+            return Err(format!("there is no {}", from.display()));
+        }
+        if to.exists() {
+            return Err(format!("{} is already there", to.display()));
+        }
+        if let Some(parent) = to.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+        }
+        std::fs::rename(&from, &to).map_err(|e| format!("{}: {e}", from.display()))?;
+
+        // Everything open under the old name, whether it was the file itself
+        // or something inside the directory.
+        let moved: Vec<(DocId, PathBuf, PathBuf)> = self
+            .docs
+            .iter()
+            .filter_map(|doc| {
+                let was = doc.path.clone()?;
+                let rest = was.strip_prefix(&from).ok()?.to_path_buf();
+                Some((doc.id, was, to.join(rest)))
+            })
+            .collect();
+        for (id, was, now) in &moved {
+            // Told under the name it knows, then told again under the new one.
+            // A language server left holding a path that no longer exists goes
+            // on reporting problems in a file nobody can open.
+            self.lsp.did_close(was);
+            self.hosts.closed(was);
+            if let Some(doc) = self.doc_mut(*id) {
+                doc.rename_to(now.clone());
+            }
+            self.lsp_open(*id);
+        }
+        self.session_changed();
+        Ok(json!({
+            "path": to.display().to_string(),
+            "buffers": moved.len(),
+        }))
+    }
+
+    /// Take a file or a directory away, and close what was open in it.
+    fn plugin_file_delete(&mut self, params: &Value) -> Result<Value, String> {
+        let path = self.plugin_path(params, "path")?;
+        if !path.exists() {
+            return Err(format!("there is no {}", path.display()));
+        }
+        // Anything with unsaved changes in it stops this. A plugin may not
+        // throw away work nobody has been asked about — and the plugin has
+        // `confirm` for asking, which is a box the person can read.
+        let unsaved: Vec<&str> = self
+            .docs
+            .iter()
+            .filter(|doc| {
+                doc.path.as_ref().is_some_and(|p| p.starts_with(&path)) && doc.is_modified()
+            })
+            .map(|doc| doc.name.as_str())
+            .collect();
+        if !unsaved.is_empty() {
+            return Err(format!("{} has unsaved changes", unsaved.join(", ")));
+        }
+        let inside: Vec<DocId> = self
+            .docs
+            .iter()
+            .filter(|doc| doc.path.as_ref().is_some_and(|p| p.starts_with(&path)))
+            .map(|doc| doc.id)
+            .collect();
+        match path.is_dir() {
+            true => std::fs::remove_dir_all(&path),
+            false => std::fs::remove_file(&path),
+        }
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+        for id in &inside {
+            self.close_doc(*id);
+        }
+        Ok(json!({ "buffers": inside.len() }))
+    }
+
     /// Do whatever the plugin marked the text under the cursor as doing.
     ///
     /// Answers whether there was anything there, so that Enter in a panel with
@@ -7296,6 +7635,10 @@ impl App {
             },
             "buffer/edit" => self.plugin_edit(params).into(),
             "panel/set" => self.plugin_panel(id, params).into(),
+            "panel/dock" => self.plugin_dock(id, params).into(),
+            "file/create" => self.plugin_file_create(params).into(),
+            "file/rename" => self.plugin_file_rename(params).into(),
+            "file/delete" => self.plugin_file_delete(params).into(),
             "hint/set" => self.plugin_hint(id, params).into(),
             // The editor's own list, prompt and yes/no, lent out. A plugin
             // asking "which board?" gets the same box, the same keys and the
@@ -10758,6 +11101,7 @@ mod tests {
             focus: 0,
             side_by_side: true,
             at: 0,
+            docks: Vec::new(),
         };
         assert_eq!(app.apply_session(&session, false), 2);
 
@@ -10834,6 +11178,7 @@ mod tests {
             focus: 1,
             side_by_side: false,
             at: 0,
+            docks: Vec::new(),
         };
         app.apply_session(&session, false);
         assert_eq!(app.panes.len(), 2);
@@ -12243,6 +12588,135 @@ mod tests {
         assert!(!app.unsettled);
         assert_eq!(app.doc(id).map(|d| d.rope.to_string()).as_deref(), Some("line\nline\nline\nline\n\n"));
         std::fs::remove_file(&path).ok();
+    }
+
+    /// A panel a plugin declared, as a `&'static Command` the editor can be
+    /// handed. Leaked, because that is what the registry hands out and the
+    /// command tables hold.
+    fn docked_panel(id: &str, edge: Option<&str>, size: Option<u16>) -> &'static crate::plugin::Command {
+        let dock = edge.map(|e| {
+            crate::view::Dock::new(crate::view::Edge::parse(e).expect("an edge"), size)
+        });
+        Box::leak(Box::new(crate::plugin::Command {
+            id: id.to_string(),
+            name: id.split('/').next_back().unwrap_or(id).to_string(),
+            about: "a panel".into(),
+            plugin: id.split('/').next().unwrap_or(id).to_string(),
+            behaviour: crate::cmd::Behaviour::Passive,
+            languages: Vec::new(),
+            opens_panel: true,
+            dock,
+        }))
+    }
+
+    #[test]
+    fn a_docked_panel_opens_beside_the_code_rather_than_over_it() {
+        // The whole point of a dock: you asked for a tree of files, not for
+        // the file you were reading to go away.
+        let (mut app, _rx) = editor();
+        let was = app.view().doc;
+        app.open_panel(docked_panel("files/tree", Some("left"), Some(30)));
+
+        assert_eq!(app.panes.len(), 2);
+        // On the left, and it has the focus, because you just asked for it.
+        assert_eq!(app.focus, 0);
+        assert_eq!(
+            app.panes[0].dock.map(|d| (d.edge, d.size)),
+            Some((crate::view::Edge::Left, 30))
+        );
+        // And the code is still there, still showing what it was showing.
+        assert!(app.panes[1].dock.is_none());
+        assert_eq!(app.panes[1].doc, was);
+
+        // Its buffer belongs to the plugin and nothing types into it.
+        let panel = app.doc(app.panes[0].doc).expect("a buffer");
+        assert!(panel.read_only);
+        assert_eq!(panel.panel.as_ref().map(|p| p.id.as_str()), Some("files/tree"));
+    }
+
+    #[test]
+    fn running_a_docked_panels_command_again_puts_it_away() {
+        // That is what collapsible means from the keyboard. A sidebar you can
+        // only open is a sidebar everybody closes by quitting.
+        let (mut app, _rx) = editor();
+        let panel = docked_panel("files/tree", Some("left"), None);
+        app.open_panel(panel);
+        assert_eq!(app.panes.len(), 2);
+        app.open_panel(panel);
+        assert_eq!(app.panes.len(), 1, "it should have gone away");
+        assert!(app.panes[0].dock.is_none());
+        // And opening it again gets the same buffer rather than a second one.
+        app.open_panel(panel);
+        assert_eq!(app.panes.len(), 2);
+        assert_eq!(
+            app.docs.iter().filter(|d| d.panel.is_some()).count(),
+            1,
+            "a second buffer was made for the same panel"
+        );
+    }
+
+    #[test]
+    fn a_panel_with_no_edge_is_still_a_tab() {
+        // Which is what a panel used to always be, and is still right for
+        // something you read and then leave.
+        let (mut app, _rx) = editor();
+        app.open_panel(docked_panel("cargo/report", None, None));
+        assert_eq!(app.panes.len(), 1, "a tab is not a pane");
+        assert!(app.here().panel.is_some(), "and it is what the pane shows");
+    }
+
+    #[test]
+    fn the_last_pane_showing_a_file_cannot_be_closed_but_a_dock_always_can() {
+        let (mut app, _rx) = editor();
+        app.open_panel(docked_panel("files/tree", Some("left"), None));
+        // Standing in the dock: closing it is fine, even though it is one of
+        // only two panes.
+        assert_eq!(app.focus, 0);
+        app.run(Cmd::CLOSE_PANE);
+        assert_eq!(app.panes.len(), 1);
+
+        // Standing in the only pane showing a file, with a dock open: still
+        // refused, because what has to survive is somewhere to read code.
+        app.open_panel(docked_panel("files/tree", Some("left"), None));
+        app.focus = 1;
+        app.run(Cmd::CLOSE_PANE);
+        assert_eq!(app.panes.len(), 2);
+        assert_eq!(app.status.text, "that is the only pane");
+    }
+
+    #[test]
+    fn splitting_a_sidebar_does_not_give_you_two_sidebars() {
+        let (mut app, _rx) = editor();
+        app.open_panel(docked_panel("files/tree", Some("left"), None));
+        assert_eq!(app.focus, 0);
+        app.run(Cmd::SPLIT);
+        assert_eq!(app.panes.len(), 3);
+        assert_eq!(
+            app.panes.iter().filter(|p| p.dock.is_some()).count(),
+            1,
+            "the copy was docked too"
+        );
+    }
+
+    #[test]
+    fn comparing_two_panes_ignores_the_sidebar() {
+        // Comparing the code against a tree of file names is not a thing
+        // anybody means by "compare the two panes".
+        let (mut app, _rx) = editor();
+        app.open_panel(docked_panel("files/tree", Some("left"), None));
+        app.focus = 1;
+        // One dock and one file pane is not two panes to compare.
+        app.run(Cmd::DIFF_PANES);
+        assert!(app.diff.is_none(), "{}", app.status.text);
+        assert!(app.status.text.contains("two panes"), "{}", app.status.text);
+
+        // With a real second pane it compares those two and leaves the dock
+        // out of it.
+        app.run(Cmd::SPLIT);
+        app.run(Cmd::DIFF_PANES);
+        let (left, right) = app.diff.as_ref().expect("compared").panes();
+        assert!(app.panes[left].dock.is_none());
+        assert!(app.panes[right].dock.is_none());
     }
 
     #[test]

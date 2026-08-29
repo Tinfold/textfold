@@ -1064,6 +1064,29 @@ impl Document {
         Ok(())
     }
 
+    /// Follow a file that has been moved on disk.
+    ///
+    /// Not a save: the text is untouched and whether it has unsaved changes is
+    /// untouched. What changes is where it will be saved *to*, what it is
+    /// called in the tab row, and — since a name is how textfold decides what
+    /// a file is — possibly what language it is.
+    ///
+    /// The stamp is taken afresh because it is about the file on disk, and the
+    /// file on disk is somewhere else now. Without that the next check would
+    /// see a path it has never stamped and report the file as changed
+    /// underneath you the moment it was renamed.
+    pub fn rename_to(&mut self, path: PathBuf) {
+        let path = absolute(&path);
+        self.name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.display().to_string());
+        self.language = crate::lang::detect(&path, &self.rope);
+        self.stamp = Stamp::of(&path);
+        self.on_disk = OnDisk::Same;
+        self.path = Some(path);
+    }
+
     /// Look at the file and say whether somebody else has written it.
     ///
     /// A `stat`, which is cheap, rather than a read. Called on a timer for
