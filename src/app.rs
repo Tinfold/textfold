@@ -61,6 +61,9 @@ pub enum Event {
     /// An install or an uninstall has got somewhere. Boxed for the same
     /// reason: `npm install` has a great deal to say for itself.
     Package(Box<crate::pack::Progress>),
+    /// The package repositories have been asked what they have, with whatever
+    /// could not be reached. Nothing has been installed by it.
+    Refreshed(Vec<String>),
 }
 
 /// A plugin waiting on an answer from the person at the keyboard.
@@ -307,6 +310,9 @@ pub struct Suggestion {
     pub suffix: Option<String>,
     pub detail: Option<String>,
     pub kind: &'static str,
+    /// The colour that word is drawn in: the one the thing itself has in the
+    /// file. See [`completion_role`].
+    pub role: Role,
     /// What actually goes in, and over what — a server usually says exactly
     /// which characters it means to replace, and taking its word for it is
     /// what makes completing in the middle of a word work.
@@ -595,7 +601,18 @@ fn subsequence(haystack: &str, needle: &str) -> bool {
 /// A box of text floating over the editor: what something is, or what
 /// arguments it takes.
 pub struct Popup {
+    /// What is drawn: the text folded to the width the box turned out to be.
+    /// Everything that answers a click or a scroll works in these, because
+    /// these are the rows a person is looking at.
     pub lines: Vec<DocLine>,
+    /// The same text before it was folded, kept so that a box which changes
+    /// width — the terminal is resized, or a glance becomes something you
+    /// asked to read — folds the original again rather than folding what was
+    /// already folded.
+    source: Vec<DocLine>,
+    /// The width `lines` was folded to, so that redrawing at the same width
+    /// costs nothing.
+    folded_at: usize,
     /// Where in the document it is about, so it can be drawn beside it and
     /// closed when you move away.
     pub at: usize,
@@ -632,6 +649,8 @@ pub type Spot = (usize, usize);
 impl Popup {
     pub fn new(lines: Vec<DocLine>, at: usize) -> Self {
         Self {
+            source: lines.clone(),
+            folded_at: 0,
             lines,
             at,
             scroll: 0,
@@ -641,6 +660,52 @@ impl Popup {
             pointer: None,
             select: None,
         }
+    }
+
+    /// Fold the text to the width the box has turned out to be.
+    ///
+    /// Called by the drawing, which is the only thing that knows how wide the
+    /// box is. Where a line was already scrolled to, it stays put: the row
+    /// you were reading is found again in the folded text rather than the
+    /// box jumping back to the top every time the terminal is resized.
+    pub fn fold_to(&mut self, width: usize) {
+        if self.folded_at == width {
+            return;
+        }
+        // Which line of the unfolded text is on the top row now, so that it
+        // can be put back on the top row afterwards.
+        let was = self.unfolded_at(self.scroll);
+        self.lines = self.source.iter().flat_map(|line| line.wrap(width)).collect();
+        self.folded_at = width;
+        self.scroll = self.folded_at_line(was);
+        // A selection is in the folded text's coordinates and there is no
+        // honest way to carry it across a refold, so it goes.
+        self.select = None;
+    }
+
+    /// Which line of the unfolded text a folded row came from.
+    fn unfolded_at(&self, row: usize) -> usize {
+        let mut seen = 0;
+        for (at, line) in self.source.iter().enumerate() {
+            let folded = match self.folded_at {
+                0 => 1,
+                width => line.wrap(width).len(),
+            };
+            if seen + folded > row {
+                return at;
+            }
+            seen += folded;
+        }
+        self.source.len().saturating_sub(1)
+    }
+
+    /// And back again: the first row of the folded text that line turned into.
+    fn folded_at_line(&self, line: usize) -> usize {
+        self.source
+            .iter()
+            .take(line)
+            .map(|l| l.wrap(self.folded_at).len())
+            .sum()
     }
 
     /// How many rows of text the box shows.
@@ -1011,6 +1076,10 @@ pub struct App {
     /// Where the caret was last drawn, for anything that opens beside it.
     pub caret: Option<(u16, u16)>,
     tx: Sender<Event>,
+    /// Whether the package repositories have been asked what they have yet.
+    /// The difference between "there is nothing newer" and "nobody has looked
+    /// yet", which are different answers to the same question.
+    checked_for_updates: bool,
 
     /// What was cut or copied. Kept here as well as handed to the terminal,
     /// because the terminal will not hand it back.
@@ -1121,6 +1190,7 @@ impl App {
         // in by reference because ids that have been renamed are brought up to
         // date here rather than being half-obeyed forever.
         crate::plugin::init(&mut config.plugins);
+        crate::jdk::configure(config.java_home.as_deref());
         lang::init();
         // The commands have to be settled before the keys are read: a plugin
         // can bring one, and a binding for it has to find something to bind to.
@@ -1148,6 +1218,7 @@ impl App {
             side_by_side: true,
             overlay: Overlay::None,
             completion: None,
+            checked_for_updates: false,
             hover: None,
             signature: None,
             status: Status::quiet(),
@@ -1980,6 +2051,7 @@ impl App {
             Event::Lsp(id, message) => self.on_lsp(id, message),
             Event::Plugin(id, message) => self.on_plugin(id, message),
             Event::Package(progress) => self.on_package(*progress),
+            Event::Refreshed(problems) => self.refreshed(problems),
             Event::PluginRan(ran) => {
                 let ran = *ran;
                 if let Some(host) = self.hosts.get_mut(ran.host) {
@@ -4940,7 +5012,12 @@ impl App {
             rows.push(
                 Row::new(plugin.name.clone(), Choice::Plugin(plugin.id.clone()))
                     .detail(match missing.is_empty() {
-                        true => format!("{} — {}", plugin.id, plugin.detail()),
+                        true => match plugin.version_label() {
+                            Some(version) => {
+                                format!("{} {version} — {}", plugin.id, plugin.detail())
+                            }
+                            None => format!("{} — {}", plugin.id, plugin.detail()),
+                        },
                         // A row that says `on` beside a language server nobody
                         // has installed is a row that lies, and the lie is the
                         // one people spend an afternoon on.
@@ -4995,34 +5072,7 @@ impl App {
                         .tag(if ready { "on" } else { "off" }),
                 );
             }
-            for server in &plugin.servers {
-                // A plugin that *is* one server is one row, not a row and an
-                // indented copy of itself with the same switch on it.
-                if server.id == plugin.id {
-                    continue;
-                }
-                // Off with its plugin, and said so, rather than shown as on
-                // and quietly doing nothing.
-                let running = on && crate::plugin::is_on(&server.id);
-                rows.push(
-                    Row::new(
-                        format!("  {}", server.name),
-                        Choice::Plugin(server.id.clone()),
-                    )
-                    .detail(match plugin.languages.len() > 1 {
-                        // Which of the plugin's languages it is for, where
-                        // that is a question at all.
-                        true => format!(
-                            "{} — runs {} for {}",
-                            server.id,
-                            server.command,
-                            server.for_what()
-                        ),
-                        false => format!("{} — runs {}", server.id, server.command),
-                    })
-                    .tag(if running { "on" } else { "off" }),
-                );
-            }
+            rows.extend(server_rows(plugin, |id| on && crate::plugin::is_on(id)));
         }
         self.overlay = Overlay::Picker(Picker::new(Kind::Plugins, rows));
     }
@@ -5091,17 +5141,23 @@ impl App {
     /// Everything textfold could fetch: a plugin that is here and needs a
     /// program, and a package sitting somewhere nobody has installed from yet.
     ///
+    ///
     /// One list, because from where you are sitting "install pyright" and
     /// "install this plugin somebody gave me" are the same sentence. Which of
     /// the two a row happens to be is textfold's business.
     fn open_install_picker(&mut self) {
-        let found = crate::pack::available(self.config.package_paths());
+        let found = crate::pack::available(crate::pack::Sources::of(&self.config));
         if found.is_empty() {
             return self.say(format!(
-                "nothing to install — every plugin has what it needs, and there are no packages in {}",
-                crate::pack::package_dirs(self.config.package_paths())
+                "nothing to install — every plugin has what it needs, and there is nothing new in {}",
+                crate::repo::repositories(self.config.package_repositories())
                     .iter()
-                    .map(|d| d.display().to_string())
+                    .map(|r| r.name.clone())
+                    .chain(
+                        crate::pack::package_dirs(self.config.package_paths())
+                            .iter()
+                            .map(|d| d.display().to_string())
+                    )
                     .collect::<Vec<_>>()
                     .join(" or ")
             ));
@@ -5140,8 +5196,83 @@ impl App {
         self.overlay = Overlay::Picker(Picker::new(Kind::Uninstall, rows));
     }
 
+    /// What has a newer version to be had than the one installed.
+    ///
+    /// A list rather than a button, because updating is the one thing in here
+    /// that changes what runs on your machine without your having asked for
+    /// that particular plugin today. What is offered is said, and choosing is
+    /// yours; there is no arm of this that installs anything on its own.
+    fn open_update_picker(&mut self) {
+        let found = crate::pack::updates(crate::pack::Sources::of(&self.config));
+        if found.is_empty() {
+            // Which is the ordinary answer, and worth telling apart from a
+            // refresh that never happened.
+            return self.say(match self.checked_for_updates {
+                true => "everything is at the newest version there is".to_string(),
+                false => "nothing newer has been heard of yet — the repositories are still being asked".to_string(),
+            });
+        }
+        let rows: Vec<Row> = found
+            .iter()
+            .map(|p| {
+                Row::new(p.name.clone(), Choice::Install(p.id.clone()))
+                    .detail(format!("{} — {}", p.id, p.detail()))
+                    .tag(p.tag())
+            })
+            .collect();
+        self.overlay = Overlay::Picker(Picker::new(Kind::Install, rows));
+    }
+
+    /// Ask the repositories what they have, on a thread.
+    ///
+    /// Nothing waits for it and nothing is installed by it. What it changes is
+    /// whether the plugins list has an `update` beside anything, and whether
+    /// there is a line in the status bar saying so — an editor that fetched
+    /// and ran new versions of things on its own at startup would be a
+    /// different and much worse program.
+    pub fn check_for_updates(&mut self) {
+        if !self.config.check_for_updates() {
+            return;
+        }
+        let repositories = self.config.package_repositories().to_vec();
+        let tx = self.tx.clone();
+        std::thread::Builder::new()
+            .name("refresh-packages".into())
+            .spawn(move || {
+                let problems = crate::pack::refresh(&repositories);
+                tx.send(Event::Refreshed(problems)).ok();
+            })
+            .ok();
+    }
+
+    /// The repositories have been asked. Say if there is anything new, once.
+    fn refreshed(&mut self, problems: Vec<String>) {
+        self.checked_for_updates = true;
+        let updates = crate::pack::updates(crate::pack::Sources::of(&self.config));
+        if !updates.is_empty() {
+            let key = self
+                .keys
+                .shortcut(Cmd::UPDATE_PLUGINS)
+                .map(|key| format!(" ({key})"))
+                .unwrap_or_default();
+            let names: Vec<&str> = updates.iter().map(|p| p.id.as_str()).take(3).collect();
+            let rest = updates.len().saturating_sub(names.len());
+            let listed = match rest {
+                0 => names.join(", "),
+                n => format!("{} and {n} more", names.join(", ")),
+            };
+            return self.say(format!("newer: {listed} — update-plugins{key}"));
+        }
+        // A repository that could not be reached is worth saying once, and
+        // only where there was nothing better to say: somebody who is offline
+        // knows, and does not need telling every time they open the editor.
+        if let Some(first) = problems.into_iter().next() {
+            self.say(first);
+        }
+    }
+
     fn start_install(&mut self, id: &str) {
-        let found = crate::pack::find(id, self.config.package_paths());
+        let found = crate::pack::find(id, crate::pack::Sources::of(&self.config));
         let plan = found.and_then(|package| crate::pack::install(&package));
         self.start_plan(plan);
     }
@@ -7089,6 +7220,12 @@ impl App {
     /// on.
     fn take_plugin_problems(&mut self) {
         let problems = std::mem::take(&mut self.hosts.problems);
+        // A grammar is compiled the first time a file of its language is
+        // shown, so a plugin that brought one broken says so here rather than
+        // at startup — and says so at all, which it did not before.
+        let problems = problems
+            .into_iter()
+            .chain(crate::lang::take_grammar_problems());
         if let Some(first) = problems.into_iter().next() {
             self.say_bad(first);
         }
@@ -7658,7 +7795,6 @@ impl App {
         if lines.is_empty() {
             return;
         }
-        let mut popup = Popup::new(lines, at);
         // A hover over something red is a hover over something you may be
         // about to fix. Saying so here is where a person is already looking.
         if let Some(fixes) = self.fixes.as_ref().filter(|f| f.doc == doc)
@@ -7668,10 +7804,10 @@ impl App {
                 .keys
                 .shortcut(Cmd::FIX_IT)
                 .unwrap_or_else(|| "Alt-i".into());
-            popup.lines.push(DocLine::prose(RULE.to_string()));
-            popup.lines.push(DocLine::prose(format!("{key}: {title}")));
+            lines.push(DocLine::prose(RULE.to_string()));
+            lines.push(DocLine::prose(format!("{key}: {title}")));
         }
-        self.hover = Some(popup);
+        self.hover = Some(Popup::new(lines, at));
     }
 
     fn take_signature(&mut self, doc: DocId, at: usize, value: Value) {
@@ -8229,6 +8365,45 @@ fn panel_role(name: &str) -> Option<crate::theme::Role> {
     }
 }
 
+/// The rows one plugin's servers get in the plugins list.
+///
+/// `on` says whether a server id is switched on, which is the plugin's switch
+/// and the server's own together. Handed in rather than asked for, so that
+/// this can be read against a plugin that is not in the registry — which every
+/// language server now is, since they are fetched rather than built in.
+fn server_rows(plugin: &crate::plugin::Plugin, on: impl Fn(&str) -> bool) -> Vec<Row> {
+    plugin
+        .servers
+        .iter()
+        // A plugin that *is* one server is one row, not a row and an indented
+        // copy of itself with the same switch on it.
+        .filter(|server| server.id != plugin.id)
+        .map(|server| {
+            Row::new(
+                format!("  {}", server.name),
+                Choice::Plugin(server.id.clone()),
+            )
+            .detail(match plugin.languages.len() > 1 {
+                // Which of the plugin's languages it is for, where that is a
+                // question at all.
+                true => format!(
+                    "{} — runs {} for {}",
+                    server.id,
+                    server.command,
+                    server.for_what()
+                ),
+                false => format!("{} — runs {}", server.id, server.command),
+            })
+            // Off with its plugin, and said so, rather than shown as on and
+            // quietly doing nothing.
+            .tag(match on(&server.id) {
+                true => "on",
+                false => "off",
+            })
+        })
+        .collect()
+}
+
 /// A line that is nothing but this is a horizontal rule, to be drawn as one.
 pub const RULE: &str = "\u{2500}";
 
@@ -8276,6 +8451,150 @@ impl DocLine {
     pub fn is_empty(&self) -> bool {
         self.text.is_empty()
     }
+
+    /// Break a line too wide for the box into as many lines as it takes.
+    ///
+    /// Documentation arrives with the line breaks whoever wrote it chose, and
+    /// a server sends a signature as one line however long it is. Cutting one
+    /// off with an ellipsis loses exactly the half that says what the
+    /// arguments are, and a box that only scrolls downwards has nowhere to
+    /// put the rest — so it folds, the way the editor folds a long line.
+    ///
+    /// A fold keeps the indentation of the line it came from, so a bulleted
+    /// list stays a list and a wrapped line of code stays under its own
+    /// block. It breaks at a space where there is one and mid-word where
+    /// there is not, because a Rust type with no spaces in it is a thing that
+    /// happens and a row holding one character is not an improvement.
+    pub fn wrap(&self, width: usize) -> Vec<DocLine> {
+        // Below this there is no room for an indent and a word both, and the
+        // folding turns into a column of single letters.
+        let width = width.max(8);
+        if self.text == RULE || crate::text::str_width(&self.text) <= width {
+            return vec![self.clone()];
+        }
+        let chars: Vec<(usize, char)> = self.text.char_indices().collect();
+        // What a fold is indented by: whatever the line itself was, unless
+        // that leaves too little of the row to be worth folding into.
+        let leading = chars.iter().take_while(|(_, c)| c.is_whitespace()).count();
+        let indent: String = self.text[..byte_at(&chars, &self.text, leading)].to_string();
+        let indent = match crate::text::str_width(&indent) + 8 <= width {
+            true => indent,
+            false => String::new(),
+        };
+        let indent_columns = crate::text::str_width(&indent);
+
+        let mut out = Vec::new();
+        let mut start = 0;
+        let mut first = true;
+        while start < chars.len() {
+            let room = match first {
+                true => width,
+                false => width.saturating_sub(indent_columns).max(1),
+            };
+            // How far along the row we can get, and the last place a space
+            // offered to break.
+            let mut used = 0;
+            let mut at = start;
+            let mut after_space = None;
+            while at < chars.len() {
+                let mut buf = [0u8; 4];
+                let wide = crate::text::str_width(chars[at].1.encode_utf8(&mut buf)).max(1);
+                if used + wide > room {
+                    break;
+                }
+                used += wide;
+                at += 1;
+                if chars[at - 1].1 == ' ' {
+                    after_space = Some(at);
+                }
+            }
+            let end = match at >= chars.len() {
+                // The rest of it fits, so there is nothing left to break at.
+                // Looking for a space here is what would fold `and on` after
+                // `and` for no reason at all.
+                true => chars.len(),
+                // A break at the start of the row is no break at all: it
+                // would hand the next row the same problem and never finish.
+                false => match after_space {
+                    Some(after) if after > start => after,
+                    _ => at.max(start + 1).min(chars.len()),
+                },
+            };
+            out.push(self.slice(&chars, start..end, &indent, first));
+            if end >= chars.len() {
+                break;
+            }
+            start = end;
+            // A fold does not begin with the spaces it broke on.
+            while start < chars.len() && chars[start].1 == ' ' {
+                start += 1;
+            }
+            first = false;
+        }
+        // The whole line was spaces past the first row, which is nothing to
+        // show and would otherwise be an empty row hanging off the bottom.
+        if out.is_empty() {
+            out.push(self.clone());
+        }
+        out
+    }
+
+    /// One row of a folded line: the characters `range` covers, under the
+    /// indent, with the colours and the names that were on that stretch
+    /// carried across and moved to where they now sit.
+    fn slice(
+        &self,
+        chars: &[(usize, char)],
+        range: std::ops::Range<usize>,
+        indent: &str,
+        first: bool,
+    ) -> DocLine {
+        let lead = match first {
+            true => "",
+            false => indent,
+        };
+        let from = byte_at(chars, &self.text, range.start);
+        let to = byte_at(chars, &self.text, range.end);
+        // Trailing spaces were how the break was chosen, not something to
+        // draw.
+        let body = self.text[from..to].trim_end();
+        let text = format!("{lead}{body}");
+        let bytes = from..from + body.len();
+        let spans = self
+            .spans
+            .iter()
+            .filter_map(|(span, role)| {
+                let start = span.start.max(bytes.start);
+                let end = span.end.min(bytes.end);
+                (start < end).then(|| {
+                    (
+                        start - bytes.start + lead.len()..end - bytes.start + lead.len(),
+                        *role,
+                    )
+                })
+            })
+            .collect();
+        let lead_columns = lead.chars().count();
+        let body_chars = body.chars().count();
+        let links = self
+            .links
+            .iter()
+            .filter_map(|link| {
+                let start = link.start.max(range.start);
+                let end = link.end.min(range.start + body_chars);
+                (start < end).then(|| {
+                    start - range.start + lead_columns..end - range.start + lead_columns
+                })
+            })
+            .collect();
+        DocLine { text, spans, links }
+    }
+}
+
+/// Where character `at` begins in the string, with the end of it standing in
+/// for one character past the last.
+fn byte_at(chars: &[(usize, char)], text: &str, at: usize) -> usize {
+    chars.get(at).map_or(text.len(), |(byte, _)| *byte)
 }
 
 /// A `MarkupContent`, a `MarkedString`, or a list of either, as lines a
@@ -8620,6 +8939,7 @@ fn suggestion_from(item: &Value, doc: &Document, at: usize) -> Option<Suggestion
 
     Some(Suggestion {
         kind: completion_kind(item.get("kind").and_then(Value::as_u64).unwrap_or(0)),
+        role: completion_role(item.get("kind").and_then(Value::as_u64).unwrap_or(0)),
         // Where the name lives beats what type it has, when a server says
         // both: the reason to be looking at this list is often that you do
         // not remember which module the name is in.
@@ -8702,6 +9022,46 @@ fn strip_snippet(text: &str) -> String {
         }
     }
     out
+}
+
+/// What colour a completion is drawn in, from LSP's numbering.
+///
+/// The same colour the thing itself would have in the file. A list of forty
+/// suggestions all in one colour is a list you have to read a word at a time
+/// to find the method among the fields; give each kind the colour it already
+/// has three lines up in the editor and the shape of the list is legible
+/// before any of it has been read.
+///
+/// It is not a decoration and it is not a new vocabulary — a class in the
+/// list is the colour a class is, a keyword is the colour a keyword is — so
+/// there is nothing here to learn that reading the file has not taught
+/// already, and a theme that has been thought about is thought about here too.
+fn completion_role(n: u64) -> Role {
+    match n {
+        2 | 3 => Role::Function,      // method, function
+        4 => Role::Constructor,       // constructor
+        5 | 10 => Role::Property,     // field, property
+        6 => Role::Variable,          // variable
+        7 | 22 => Role::Type,         // class, struct
+        8 => Role::Type,              // interface
+        9 => Role::Namespace,         // module
+        11 | 12 => Role::Constant,    // unit, value
+        13 => Role::Type,             // enum
+        14 => Role::Keyword,          // keyword
+        15 => Role::Macro,            // snippet
+        16 => Role::String,           // colour
+        17 | 19 => Role::String,      // file, folder
+        18 => Role::Variable,         // reference
+        20 => Role::Constant,         // enum member
+        21 => Role::Constant,         // constant
+        23 => Role::Attribute,        // event
+        24 => Role::Operator,         // operator
+        25 => Role::Type,             // type parameter
+        // Plain text, and anything a later LSP invents. Neither is a thing
+        // with a colour of its own, and guessing one would be worse than the
+        // ordinary foreground.
+        _ => Role::Variable,
+    }
 }
 
 /// What a completion is, in a word, from LSP's numbering.
@@ -9782,6 +10142,8 @@ commands! {
         |app| app.open_install_picker();
     UNINSTALL_PLUGIN => "uninstall-plugin", View, Passive, "Take a plugin off this machine",
         |app| app.open_uninstall_picker();
+    UPDATE_PLUGINS => "update-plugins", View, Passive, "Fetch a newer version of any plugin that has one",
+        |app| app.open_update_picker();
     CONTEXT_MENU => "context-menu", Edit, Passive, "What can be done where the cursor is",
         |app| app.open_context_menu();
     ESCAPE => "escape", Help, Passive, "Close what is open, or drop back to one cursor",
@@ -11467,6 +11829,123 @@ mod tests {
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
+    #[test]
+    fn a_suggestion_is_drawn_in_the_colour_that_kind_of_thing_has_in_the_file() {
+        // A list of forty suggestions all in one colour is a list you have to
+        // read a word at a time to find the method among the fields.
+        let role = |n| completion_role(n);
+        // A method is a function, a field is a property, a class is a type,
+        // and a keyword is a keyword. Nothing here is a new vocabulary.
+        assert_eq!(role(2), Role::Function);
+        assert_eq!(role(3), Role::Function);
+        assert_eq!(role(5), Role::Property);
+        assert_eq!(role(7), Role::Type);
+        assert_eq!(role(14), Role::Keyword);
+        assert_eq!(role(21), Role::Constant);
+        // The four kinds that get asked about most are four different
+        // colours, which is the whole point of doing this at all.
+        let four = [role(3), role(5), role(7), role(14)];
+        for (at, one) in four.iter().enumerate() {
+            assert!(
+                !four[at + 1..].contains(one),
+                "{four:?} has two of the same colour in it"
+            );
+        }
+        // Something a later LSP invents is drawn as ordinary text rather than
+        // as a guess.
+        assert_eq!(role(99), Role::Variable);
+    }
+
+    #[test]
+    fn a_line_too_wide_for_the_box_folds_rather_than_being_cut_off() {
+        // The whole complaint: a box that only scrolls downwards and elides
+        // sideways is showing you the first half of every sentence in it.
+        let line = DocLine::prose("the quick brown fox jumps over the lazy dog");
+        let folded = line.wrap(20);
+        let text: Vec<&str> = folded.iter().map(|l| l.text.as_str()).collect();
+        assert_eq!(text, ["the quick brown fox", "jumps over the lazy", "dog"]);
+        // Nothing was lost and nothing was added.
+        assert_eq!(text.join(" "), "the quick brown fox jumps over the lazy dog");
+        for row in &folded {
+            assert!(crate::text::str_width(&row.text) <= 20);
+        }
+    }
+
+    #[test]
+    fn a_line_that_already_fits_is_left_exactly_as_it_was() {
+        let line = DocLine::prose("short enough");
+        assert_eq!(line.wrap(40), vec![line.clone()]);
+        // And a rule stays one character, because the drawing is what
+        // stretches it and only the drawing knows how wide the box turned out.
+        let rule = DocLine::prose(RULE.to_string());
+        assert_eq!(rule.wrap(4), vec![rule.clone()]);
+    }
+
+    #[test]
+    fn a_fold_keeps_the_indentation_of_the_line_it_came_from() {
+        // Otherwise a bulleted list stops being a list at its first long item.
+        let line = DocLine::prose("    an indented sentence that runs on and on");
+        let text: Vec<String> = line.wrap(20).into_iter().map(|l| l.text).collect();
+        assert_eq!(
+            text,
+            ["    an indented", "    sentence that", "    runs on and on"]
+        );
+    }
+
+    #[test]
+    fn a_word_with_no_spaces_in_it_is_broken_rather_than_left_hanging() {
+        // A Rust type is one long word constantly, and a row holding a single
+        // character is not an improvement on eliding.
+        let line = DocLine::prose("BTreeMap<String,Vec<Something::Awfully::Long>>");
+        let text: Vec<String> = line.wrap(16).into_iter().map(|l| l.text).collect();
+        assert_eq!(text.concat(), "BTreeMap<String,Vec<Something::Awfully::Long>>");
+        for row in &text {
+            assert!(crate::text::str_width(row) <= 16, "{row:?}");
+        }
+    }
+
+    #[test]
+    fn folding_carries_the_colours_and_the_names_across_to_where_they_now_sit() {
+        // A folded line whose spans still pointed at the unfolded offsets
+        // would colour the wrong letters, and a name you could no longer
+        // click is a name you can no longer go to the definition of.
+        let mut lines = Vec::new();
+        push_code(
+            &mut lines,
+            "let mapping: BTreeMap<String, u32> = BTreeMap::new();
+",
+            lang::by_name("rust"),
+        );
+        let line = lines.first().expect("one line of code");
+        assert!(!line.spans.is_empty(), "the code was coloured to begin with");
+        for row in line.wrap(24) {
+            for (span, _) in &row.spans {
+                assert!(row.text.get(span.clone()).is_some(), "{row:?} {span:?}");
+            }
+            for link in &row.links {
+                assert!(link.end <= row.text.chars().count(), "{row:?} {link:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_folded_hover_can_be_read_all_the_way_down_and_keeps_its_place() {
+        let long = "a sentence long enough that it has to be folded more than once to fit";
+        let mut popup = Popup::new(vec![DocLine::prose(long); 4], 0);
+        popup.fold_to(20);
+        assert!(popup.lines.len() > 4, "it folded");
+        // Every row is inside the box, which is the point.
+        for row in &popup.lines {
+            assert!(crate::text::str_width(&row.text) <= 20);
+        }
+        // Scrolled to the third line's first row, then folded again at
+        // another width: the same line of text is still on the top row.
+        popup.scroll = popup.folded_at_line(2);
+        popup.fold_to(30);
+        assert_eq!(popup.scroll, popup.folded_at_line(2));
+        assert_eq!(popup.unfolded_at(popup.scroll), 2);
+    }
+
     /// The parts of a rendered line a pointer would offer to follow.
     fn followable(line: &DocLine) -> Vec<String> {
         line.links
@@ -11771,33 +12250,52 @@ mod tests {
         // It used to be a row for the plugin and an indented copy of itself
         // underneath with the same switch on it, which is one switch shown
         // twice and a list twice as long as it needs to be.
-        let (mut app, _rx) = editor();
-        app.open_plugins_picker();
-        let Overlay::Picker(picker) = &app.overlay else {
-            panic!("the list did not open");
+        //
+        // Read against manifests rather than against the registry, because a
+        // language server is fetched from a package repository now and a test
+        // cannot assume one has been.
+        let read = |manifest: &str, id: &str| {
+            let file: crate::plugin::FilePlugin = serde_json::from_str(manifest).expect("read");
+            file.into_plugin(id, crate::plugin::Source::BuiltIn).0
         };
-        let rows: Vec<(&str, &str)> = picker
-            .visible()
-            .map(|(row, _)| {
-                (
-                    row.label.as_str(),
-                    row.detail.as_deref().unwrap_or_default(),
-                )
-            })
-            .collect();
-        let pyright: Vec<&(&str, &str)> = rows
-            .iter()
-            .filter(|(_, detail)| detail.starts_with("pyright "))
-            .collect();
-        assert_eq!(pyright.len(), 1, "{pyright:?}");
-        assert_eq!(pyright[0].0, "Pyright");
 
-        // And one that has several things in it still shows them, indented.
-        assert!(
-            rows.iter()
-                .any(|(label, _)| *label == "  css-language-server"),
-            "a plugin with three servers should list all three"
+        let pyright = read(
+            r#"{"id":"pyright","name":"Pyright","languages":{"python":{"servers":[
+                 {"name":"pyright","command":"pyright-langserver"}]}}}"#,
+            "pyright",
         );
+        assert!(
+            server_rows(&pyright, |_| true).is_empty(),
+            "a plugin that is one server got a second row of itself"
+        );
+
+        // And one that has several things in it still shows them, indented,
+        // and says which language each is for.
+        let vscode = read(
+            r#"{"id":"vscode-langservers","name":"VS Code's servers","languages":{
+                 "css":{"servers":[{"name":"css-language-server","command":"vscode-css-language-server"}]},
+                 "html":{"servers":[{"name":"html-language-server","command":"vscode-html-language-server"}]},
+                 "json":{"servers":[{"name":"json-language-server","command":"vscode-json-language-server"}]}}}"#,
+            "vscode-langservers",
+        );
+        let rows = server_rows(&vscode, |_| true);
+        let labels: Vec<&str> = rows.iter().map(|r| r.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            [
+                "  css-language-server",
+                "  html-language-server",
+                "  json-language-server"
+            ]
+        );
+        assert_eq!(
+            rows[0].detail.as_deref(),
+            Some("vscode-langservers/css-language-server — runs vscode-css-language-server for css")
+        );
+
+        // A server switched off says so, rather than sitting there looking on
+        // and quietly doing nothing.
+        assert_eq!(server_rows(&vscode, |_| false)[0].tag.as_deref(), Some("off"));
     }
 
     #[test]
@@ -11851,6 +12349,7 @@ mod tests {
                 arch: Vec::new(),
                 system: false,
             }],
+            steps_from: None,
             needs: Vec::new(),
             see: None,
         }));

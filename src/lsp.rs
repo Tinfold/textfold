@@ -1567,9 +1567,7 @@ mod tests {
         std::fs::write(bin.join("python3"), "").expect("written");
         std::fs::write(project.join("pyproject.toml"), "").expect("written");
 
-        lang::init();
-        let python = lang::by_name("python").expect("shipped");
-        let config = lang::get(python).servers[0].clone();
+        let config = server_from(PYRIGHT, "python");
         assert_eq!(config.command, "pyright-langserver");
 
         let (tx, _rx) = std::sync::mpsc::channel();
@@ -1605,9 +1603,7 @@ mod tests {
         std::fs::create_dir_all(&project).expect("made");
         std::fs::write(project.join("pyproject.toml"), "").expect("written");
 
-        lang::init();
-        let python = lang::by_name("python").expect("shipped");
-        let config = lang::get(python).servers[0].clone();
+        let config = server_from(PYRIGHT, "python");
         let (tx, _rx) = std::sync::mpsc::channel();
         let servers = Servers::new(tx);
         // `VIRTUAL_ENV` from whatever ran the tests would be a real answer, and
@@ -1645,10 +1641,28 @@ mod tests {
 
     #[test]
     fn a_server_with_no_placeholders_is_left_exactly_as_it_was() {
-        lang::init();
-        let rust = lang::by_name("rust").expect("shipped");
-        let config = lang::get(rust).servers[0].clone();
-        assert!(!wants_filling(&config));
+        assert!(!wants_filling(&server_from(RUST_ANALYZER, "rust")));
+        // And one that does mention a placeholder is not.
+        assert!(wants_filling(&server_from(PYRIGHT, "python")));
+    }
+
+    /// One server, read out of the manifest that would have brought it.
+    ///
+    /// The servers are fetched from a package repository rather than built
+    /// into the binary, so a test cannot ask the registry for one and be sure
+    /// it is there. What is under test here is what textfold does with a
+    /// server's configuration, not where the configuration came from, so the
+    /// manifest is written out — and written out as a manifest, so that it
+    /// still reads as the thing the repository publishes.
+    fn server_from(manifest: &str, language: &str) -> lang::Server {
+        #[derive(serde::Deserialize)]
+        struct Only {
+            languages: std::collections::BTreeMap<String, lang::FileLang>,
+        }
+        let read: Only = serde_json::from_str(manifest).expect("a manifest");
+        let def = read.languages.get(language).expect("that language");
+        let said = def.servers.as_ref().expect("a server")[0].clone();
+        said.into_server("test")
     }
 
     #[test]
@@ -1676,15 +1690,7 @@ mod tests {
         // Not decoration: jdtls imports the project off the back of
         // `initialize`, and a `downloadSources` that arrives afterwards
         // arrives too late to put documentation on a library.
-        lang::init();
-        let java = lang::by_name("java").expect("shipped");
-        let config = lang::get(java)
-            .servers
-            .iter()
-            .find(|s| s.command == "jdtls")
-            .expect("shipped")
-            .clone();
-        let options = initialization_options(&config);
+        let options = initialization_options(&server_from(JDTLS, "java"));
         assert_eq!(
             options.pointer("/settings/java/maven/downloadSources"),
             Some(&json!(true)),
@@ -1700,12 +1706,48 @@ mod tests {
     fn a_server_that_asked_for_no_options_is_given_none() {
         // rust-analyzer reads `initializationOptions` as its configuration
         // directly, so a `settings` key posted into it is a stray.
-        lang::init();
-        let rust = lang::by_name("rust").expect("shipped");
-        let config = lang::get(rust).servers[0].clone();
+        let config = server_from(RUST_ANALYZER, "rust");
         assert!(config.settings.is_some());
         assert_eq!(initialization_options(&config), Value::Null);
     }
+
+    /// The three manifests these tests are about, cut down to the parts under
+    /// test. They are the ones the package repository publishes; what is left
+    /// out is everything that would only be noise here.
+    const PYRIGHT: &str = r#"{
+      "id": "pyright",
+      "languages": { "python": { "servers": [{
+        "name": "pyright",
+        "command": "pyright-langserver",
+        "args": ["--stdio"],
+        "env": { "PATH": "${venv_bin}:${env:PATH}" },
+        "settings": { "python": {
+          "pythonPath": "${venv}/bin/python3",
+          "analysis": { "autoSearchPaths": true }
+        } }
+      }] } }
+    }"#;
+
+    const RUST_ANALYZER: &str = r#"{
+      "id": "rust-analyzer",
+      "languages": { "rust": { "servers": [{
+        "name": "rust-analyzer",
+        "command": "rust-analyzer",
+        "settings": { "rust-analyzer": { "check": { "command": "clippy" } } }
+      }] } }
+    }"#;
+
+    const JDTLS: &str = r#"{
+      "id": "jdtls",
+      "languages": { "java": { "servers": [{
+        "name": "jdtls",
+        "command": "jdtls",
+        "settings": { "java": { "maven": { "downloadSources": true } } },
+        "init_options": { "extendedClientCapabilities": {
+          "classFileContentsSupport": true
+        } }
+      }] } }
+    }"#;
 
     #[test]
     fn settings_are_handed_back_by_the_section_asked_for() {

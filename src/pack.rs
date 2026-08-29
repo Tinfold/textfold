@@ -16,17 +16,30 @@
 //! ```text
 //! textfold --list-packages
 //! textfold --install ./examples/cargo     a directory with a plugin.json in it
-//! textfold --install pyright              something textfold already knows of
+//! textfold --install pyright              something a repository is offering
+//! textfold --refresh                      ask the repositories what they have
+//! textfold --update                       fetch a newer version of anything
 //! textfold --uninstall cargo
 //! ```
 //!
-//! Nothing is fetched from anywhere. There is no index, no registry and no
-//! network: a package comes from a path on this machine, and the list of them
-//! is whatever is sitting in `~/.config/textfold/packages` — or in any other
-//! directory you have named in `package_paths`, which is how a checkout of
-//! somebody's plugins becomes a list to choose from. When there is somewhere
-//! to fetch packages from, it becomes another [`Origin`] and the rest of this
-//! is unchanged.
+//! A package comes from one of three places, and they are one list from where
+//! you are sitting. It is sitting in `~/.config/textfold/packages`, or in any
+//! other directory named in `package_paths` — which is how a checkout of
+//! somebody's plugins becomes rows to choose from. Or it is in a package
+//! repository, which is a URL with an `index.json` under it: see
+//! [`crate::repo`], and [`Origin::Remote`] for what installing one does.
+//!
+//! ## Versions and updates
+//!
+//! A manifest may say what version it is. What is installed is remembered in
+//! the receipt beside it, and a repository offering a higher number is an
+//! update — one row in the plugins list with `update` in the margin, and one
+//! `--update` to take it. Nothing is ever fetched and run on its own: the
+//! refresh at startup changes what the lists say and nothing else.
+//!
+//! A plugin that declines to number itself is one nothing is ever an update
+//! to, which is better than reinstalling somebody's plugin forever for a
+//! version it never claimed.
 //!
 //! ## Steps
 //!
@@ -81,7 +94,25 @@ pub enum Origin {
     /// Here, but not by us: something you wrote or linked into the plugins
     /// directory yourself. Its steps can be run; its files are yours.
     Yours,
+    /// A package repository has it. Installing it fetches the tarball, checks
+    /// it against what the index said, and unpacks it where a package from a
+    /// directory would have been copied.
+    Remote(Box<Remote>),
 }
+
+/// A package a repository is offering, and which repository is offering it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Remote {
+    pub repository: crate::repo::Repository,
+    pub entry: crate::repo::Entry,
+}
+
+impl PartialEq for crate::repo::Entry {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.version == other.version && self.url == other.url
+    }
+}
+impl Eq for crate::repo::Entry {}
 
 impl Origin {
     pub fn label(&self) -> String {
@@ -90,6 +121,7 @@ impl Origin {
             Origin::Path(path) => path.display().to_string(),
             Origin::Here(path) => path.display().to_string(),
             Origin::Yours => "yours".into(),
+            Origin::Remote(remote) => remote.repository.name.clone(),
         }
     }
 }
@@ -106,6 +138,24 @@ pub struct Package {
     /// Whether the plugin itself is already here — as against its files still
     /// sitting in the directory you would install them from.
     pub here: bool,
+    /// What version is here, where one is installed and says.
+    pub installed: Option<String>,
+    /// What version could be here, where a repository is offering one.
+    pub offered: Option<String>,
+}
+
+impl Package {
+    /// Whether there is a newer version to be had than the one installed.
+    pub fn has_update(&self) -> bool {
+        match (&self.installed, &self.offered) {
+            (Some(installed), Some(offered)) => crate::repo::is_newer(offered, installed),
+            // Nothing said about what is here. An update is a thing you can
+            // only offer against a version, and guessing would mean
+            // reinstalling somebody's plugin because it declined to number
+            // itself.
+            _ => false,
+        }
+    }
 }
 
 impl Package {
@@ -113,6 +163,13 @@ impl Package {
     /// will read what a package is and what state it is in.
     pub fn detail(&self) -> String {
         let mut said = self.about.clone();
+        if self.has_update()
+            && let (Some(installed), Some(offered)) = (&self.installed, &self.offered)
+        {
+            said = format!("{said} — {installed} → {offered}");
+        } else if let Some(version) = self.offered.as_ref().or(self.installed.as_ref()) {
+            said = format!("{said} — v{version}");
+        }
         if !self.missing.is_empty() {
             said = format!("{said} — needs {}", self.missing.join(", "));
         }
@@ -121,10 +178,35 @@ impl Package {
 
     /// The word in the margin.
     pub fn tag(&self) -> &'static str {
+        if self.has_update() {
+            return "update";
+        }
         match (self.here, self.missing.is_empty()) {
             (false, _) => "new",
             (true, false) => "needs",
             (true, true) => "ready",
+        }
+    }
+}
+
+/// Where packages may come from: the directories to look in, and the
+/// repositories to fetch from.
+///
+/// One argument rather than two, because every question about packages needs
+/// both and threading them separately through the editor would mean finding
+/// every call site again the next time there is a third kind of source.
+#[derive(Clone, Copy)]
+pub struct Sources<'a> {
+    pub paths: &'a [String],
+    pub repositories: &'a [crate::repo::Repository],
+}
+
+impl<'a> Sources<'a> {
+    /// From the settings file, which is where both of them live.
+    pub fn of(config: &'a crate::config::Config) -> Self {
+        Self {
+            paths: config.package_paths(),
+            repositories: config.package_repositories(),
         }
     }
 }
@@ -380,13 +462,42 @@ struct Named {
     name: Option<String>,
     #[serde(default)]
     about: Option<String>,
+    #[serde(default)]
+    version: Option<String>,
 }
 
 /// A receipt: what textfold put here, and where it came from.
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Default)]
 struct Receipt {
-    /// The path it was copied from, for the list and for reinstalling.
+    /// The path or URL it came from, for the list and for reinstalling.
     from: String,
+    /// Which repository, where it came from one. What makes an update a
+    /// question about the place it was got from rather than about whichever
+    /// repository happens to be offering the id today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    repository: Option<String>,
+    /// What version was installed, which is the whole of what an update is
+    /// decided by. Absent for a package installed before versions existed, or
+    /// one whose manifest declines to number itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    version: Option<String>,
+}
+
+/// The receipt beside an installed plugin, if textfold left one.
+fn receipt_of(id: &str) -> Option<Receipt> {
+    let path = plugins_dir()?.join(id).join(RECEIPT);
+    serde_json::from_str(&std::fs::read_to_string(path).ok()?).ok()
+}
+
+/// What version of a plugin is installed: what its own manifest says, and
+/// failing that what the receipt remembers being fetched.
+///
+/// The manifest first, because that is the copy actually on the disk — a
+/// receipt can be left behind by an install that was later edited by hand.
+fn installed_version(id: &str) -> Option<String> {
+    crate::plugin::find(id)
+        .and_then(|p| p.version.clone())
+        .or_else(|| receipt_of(id)?.version)
 }
 
 /// Whether a plugin's directory is one textfold may take away again.
@@ -413,29 +524,49 @@ fn removable(id: &str) -> Option<PathBuf> {
 /// I was given" are the same sentence from where you are sitting, and having
 /// to know which kind of thing you are asking for before you can ask is a
 /// distinction the editor should be keeping to itself.
-pub fn available(also: &[String]) -> Vec<Package> {
+pub fn available(from: Sources) -> Vec<Package> {
     let mut out: Vec<Package> = Vec::new();
+    let offered = crate::repo::offered(from.repositories);
 
     // Plugins that are here and are not going to work until something is
-    // fetched. A plugin with nothing to fetch is not offered — there would be
-    // nothing to do.
+    // fetched, and plugins that are here with a newer version to be had.
     for plugin in crate::plugin::all() {
         let missing = plugin.missing();
-        if missing.is_empty() || !plugin.can_install() {
+        let installed = installed_version(&plugin.id);
+        let newer = offered
+            .iter()
+            .find(|(_, entry)| entry.id == plugin.id)
+            .filter(|(_, entry)| {
+                installed
+                    .as_deref()
+                    .is_some_and(|had| crate::repo::is_newer(&entry.version, had))
+            });
+        // Nothing to fetch and nothing newer is nothing to offer.
+        if newer.is_none() && (missing.is_empty() || !plugin.can_install()) {
             continue;
         }
         out.push(Package {
             id: plugin.id.clone(),
             name: plugin.name.clone(),
             about: plugin.detail(),
-            origin: origin_of(plugin),
+            // An update is a fetch from where it came from, so where there is
+            // one the origin is the repository rather than the disk.
+            origin: match newer {
+                Some((repository, entry)) => Origin::Remote(Box::new(Remote {
+                    repository: repository.clone(),
+                    entry: entry.clone(),
+                })),
+                None => origin_of(plugin),
+            },
             missing: missing.into_iter().map(str::to_string).collect(),
             here: true,
+            offered: newer.map(|(_, entry)| entry.version.clone()),
+            installed,
         });
     }
 
     // And packages nobody has installed yet.
-    for dir in package_dirs(also) {
+    for dir in package_dirs(from.paths) {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -465,11 +596,62 @@ pub fn available(also: &[String]) -> Vec<Package> {
                 // reading it properly is what installing it does.
                 missing: Vec::new(),
                 here: false,
+                installed: None,
+                offered: None,
                 id,
             });
         }
     }
+
+    // And everything the repositories have that is not here at all. Last, so
+    // that a package sitting in a directory you named beats a fetch — what is
+    // on the machine already is what somebody meant.
+    for (repository, entry) in offered {
+        if out.iter().any(|p| p.id == entry.id) || crate::plugin::find(&entry.id).is_some() {
+            continue;
+        }
+        out.push(Package {
+            id: entry.id.clone(),
+            name: entry.name.clone().unwrap_or_else(|| entry.id.clone()),
+            about: entry
+                .about
+                .clone()
+                .unwrap_or_else(|| format!("from {}", repository.name)),
+            // What it will want, said before anything has been downloaded —
+            // which is the point of the index carrying it.
+            missing: entry
+                .needs
+                .iter()
+                .filter(|command| !on_path(command))
+                .cloned()
+                .collect(),
+            here: false,
+            installed: None,
+            offered: Some(entry.version.clone()),
+            origin: Origin::Remote(Box::new(Remote { repository, entry })),
+        });
+    }
     out
+}
+
+/// Everything installed that a repository has a newer version of.
+pub fn updates(from: Sources) -> Vec<Package> {
+    available(from)
+        .into_iter()
+        .filter(Package::has_update)
+        .collect()
+}
+
+/// Ask every repository what it has now.
+///
+/// Returns what went wrong with each one that did, rather than stopping: one
+/// repository being unreachable is not a reason to have nothing from the
+/// others.
+pub fn refresh(from: &[crate::repo::Repository]) -> Vec<String> {
+    crate::repo::repositories(from)
+        .iter()
+        .filter_map(|repository| crate::repo::refresh(repository).err())
+        .collect()
 }
 
 /// Where a plugin that is already here came from.
@@ -499,12 +681,14 @@ pub fn removable_plugins() -> Vec<Package> {
                 return None;
             }
             Some(Package {
-                id: plugin.id.clone(),
-                name: plugin.name.clone(),
                 about: plugin.detail(),
                 missing: plugin.missing().into_iter().map(str::to_string).collect(),
                 here: true,
+                installed: installed_version(&plugin.id),
+                offered: None,
                 origin,
+                id: plugin.id.clone(),
+                name: plugin.name.clone(),
             })
         })
         .collect()
@@ -512,7 +696,7 @@ pub fn removable_plugins() -> Vec<Package> {
 
 /// The package something on the command line names: a path if it is one, and
 /// otherwise the id of a plugin or a package.
-pub fn find(what: &str, also: &[String]) -> Result<Package, String> {
+pub fn find(what: &str, from: Sources) -> Result<Package, String> {
     let named = expand(what);
     if manifest_in(&named).is_some() {
         let id = id_at(&named).ok_or_else(|| format!("{what}: cannot tell what this is called"))?;
@@ -522,6 +706,8 @@ pub fn find(what: &str, also: &[String]) -> Result<Package, String> {
             origin: Origin::Path(named),
             missing: Vec::new(),
             here: false,
+            installed: None,
+            offered: None,
             id,
         });
     }
@@ -530,19 +716,21 @@ pub fn find(what: &str, also: &[String]) -> Result<Package, String> {
     }
 
     let id = what.trim().to_lowercase();
-    if let Some(found) = available(also).into_iter().find(|p| p.id == id) {
+    if let Some(found) = available(from).into_iter().find(|p| p.id == id) {
         return Ok(found);
     }
     // Already here and already working. Worth saying so rather than saying
     // there is no such thing.
     if let Some(plugin) = crate::plugin::find(&id) {
         return Ok(Package {
-            id: plugin.id.clone(),
-            name: plugin.name.clone(),
             about: plugin.detail(),
             origin: origin_of(plugin),
             missing: Vec::new(),
             here: true,
+            installed: installed_version(&plugin.id),
+            offered: None,
+            id: plugin.id.clone(),
+            name: plugin.name.clone(),
         });
     }
     Err(format!("there is no package called {what}"))
@@ -559,6 +747,9 @@ pub enum Files {
     Leave,
     /// Copy a package in, and leave a receipt saying we did.
     Copy { from: PathBuf, to: PathBuf },
+    /// Fetch a package from a repository, check it against what the index
+    /// said, and unpack it where a copy would have gone.
+    Fetch { remote: Box<Remote>, to: PathBuf },
     /// Take away what we put here.
     Remove(PathBuf),
 }
@@ -584,6 +775,16 @@ pub struct Plan {
     pub needs: Vec<String>,
     /// Where to go when none of the steps could manage it.
     pub see: Option<String>,
+    /// Where the manifest that says what to run will be, for a package that
+    /// is being fetched.
+    ///
+    /// A package still in a repository has no steps to show, because its
+    /// steps are in its manifest and its manifest is inside the tarball. So a
+    /// fetch is planned on its own, and what it turns out to want is read off
+    /// the disk once it is on the disk. Nothing else works: an index that
+    /// listed the steps would be a second copy of every manifest, going stale
+    /// on its own schedule.
+    pub steps_from: Option<PathBuf>,
 }
 
 impl Plan {
@@ -591,7 +792,7 @@ impl Plan {
     /// already here and already working is worth saying so about rather than
     /// pretending to do.
     pub fn is_empty(&self) -> bool {
-        self.files == Files::Leave && self.steps.is_empty()
+        self.files == Files::Leave && self.steps.is_empty() && self.steps_from.is_none()
     }
 
     /// The lines to show somebody who wants to know what this will do.
@@ -602,7 +803,20 @@ impl Plan {
             Files::Copy { from, to } => {
                 out.push(format!("copy {} to {}", from.display(), to.display()))
             }
+            Files::Fetch { remote, to } => out.push(format!(
+                "fetch {} {} from {} into {}",
+                remote.entry.id,
+                remote.entry.version,
+                remote.repository.name,
+                to.display()
+            )),
             Files::Remove(dir) => out.push(format!("remove {}", dir.display())),
+        }
+        if self.steps_from.is_some() {
+            // Honest about what is not yet known. The alternative is a list
+            // that looks complete and then runs three programs nobody was
+            // shown, which is the one thing showing the list is for.
+            out.push("then whatever its manifest says it needs, once it is here".into());
         }
         for step in &self.steps {
             // Filled in, because the point of showing somebody what is about
@@ -656,38 +870,50 @@ pub fn install(package: &Package) -> Result<Plan, String> {
     // A package from a path has not been read as a plugin yet, so its steps
     // are read out of its manifest here. One already here has been read, and
     // asking the registry gets the version with `${plugin}` filled in.
+    //
+    // One that is still in a repository has not been downloaded, so there is
+    // nothing to read at all: its steps are whatever its manifest turns out to
+    // say once it is here, which is why the fetch runs before them.
     let read;
-    let plugin: &Plugin = match &package.origin {
+    let plugin: Option<&Plugin> = match &package.origin {
         Origin::Path(path) => {
             read = from_manifest(path)?;
-            &read
+            Some(&read)
         }
-        _ => crate::plugin::find(&package.id)
-            .ok_or_else(|| format!("{} is not here to install", package.id))?,
+        Origin::Remote(_) => None,
+        _ => Some(
+            crate::plugin::find(&package.id)
+                .ok_or_else(|| format!("{} is not here to install", package.id))?,
+        ),
     };
-    let (steps, needs, see, name) = (
-        plugin.install.clone(),
-        plugin.needs.clone(),
-        plugin.see.clone(),
-        plugin.name.clone(),
-    );
+    let (steps, needs, see, name) = match plugin {
+        Some(plugin) => (
+            plugin.install.clone(),
+            plugin.needs.clone(),
+            plugin.see.clone(),
+            plugin.name.clone(),
+        ),
+        // What the index said, which is enough to say what will be checked
+        // for afterwards and where to go if it is not there.
+        None => (
+            Vec::new(),
+            package.missing.clone(),
+            None,
+            package.name.clone(),
+        ),
+    };
 
+    let mut fetched_to: Option<PathBuf> = None;
     let files = match &package.origin {
-        Origin::Path(from) => {
-            let to = plugins_dir()
-                .ok_or("there is nowhere to install plugins on this machine")?
-                .join(&package.id);
-            // Installing over a directory somebody wrote by hand would throw
-            // away work nobody asked us to touch.
-            if to.exists() && removable(&package.id).is_none() {
-                return Err(format!(
-                    "{} is already there and textfold did not put it there",
-                    to.display()
-                ));
-            }
-            Files::Copy {
-                from: from.clone(),
-                to,
+        Origin::Path(from) => Files::Copy {
+            from: from.clone(),
+            to: install_to(&package.id)?,
+        },
+        Origin::Remote(remote) => {
+            fetched_to = Some(install_to(&package.id)?);
+            Files::Fetch {
+                remote: remote.clone(),
+                to: fetched_to.clone().expect("just set"),
             }
         }
         _ => Files::Leave,
@@ -702,6 +928,7 @@ pub fn install(package: &Package) -> Result<Plan, String> {
         // at the last moment — it is not part of the plan at all, so what
         // textfold says it is about to do is what it is about to do.
         steps: steps.into_iter().filter(Step::here).collect(),
+        steps_from: fetched_to,
         needs,
         see,
     })
@@ -729,10 +956,28 @@ pub fn uninstall(id: &str) -> Result<Plan, String> {
         name: plugin.name.clone(),
         removing: true,
         steps: plugin.uninstall.iter().filter(|s| s.here()).cloned().collect(),
+        steps_from: None,
         needs: Vec::new(),
         see: None,
         files,
     })
+}
+
+/// Where a package's files go, refusing to write over a directory somebody
+/// made by hand.
+fn install_to(id: &str) -> Result<PathBuf, String> {
+    let to = plugins_dir()
+        .ok_or("there is nowhere to install plugins on this machine")?
+        .join(id);
+    // Installing over a directory somebody wrote by hand would throw away
+    // work nobody asked us to touch.
+    if to.exists() && removable(id).is_none() {
+        return Err(format!(
+            "{} is already there and textfold did not put it there",
+            to.display()
+        ));
+    }
+    Ok(to)
 }
 
 /// Read the steps out of a manifest that has not been loaded as a plugin.
@@ -767,8 +1012,35 @@ impl Plan {
             return false;
         }
 
-        let of = self.steps.len();
-        for (at, step) in self.steps.iter().enumerate() {
+        // A package that was just fetched brought its own instructions with
+        // it, and they are the ones to follow — the index says what a plugin
+        // is, not what it does to your machine.
+        let fetched = match &self.steps_from {
+            Some(dir) => match from_manifest(dir) {
+                Ok(plugin) => Some(plugin),
+                Err(why) => {
+                    say(Note::Done { ok: false, why });
+                    return false;
+                }
+            },
+            None => None,
+        };
+        let (steps, needs, see) = match &fetched {
+            Some(plugin) => (
+                plugin
+                    .install
+                    .iter()
+                    .filter(|s| s.here())
+                    .cloned()
+                    .collect::<Vec<Step>>(),
+                plugin.needs.clone(),
+                plugin.see.clone(),
+            ),
+            None => (self.steps.clone(), self.needs.clone(), self.see.clone()),
+        };
+
+        let of = steps.len();
+        for (at, step) in steps.iter().enumerate() {
             if let Some(already) = &step.unless
                 && on_path(already)
             {
@@ -832,15 +1104,14 @@ impl Plan {
 
         // And the only question that actually matters: is the thing here now?
         // Exit codes are what a step claims; this is what is true.
-        let missing: Vec<&str> = self
-            .needs
+        let missing: Vec<&str> = needs
             .iter()
             .map(String::as_str)
             .filter(|c| !on_path(c))
             .collect();
         if !missing.is_empty() {
             let mut why = format!("still no {}", missing.join(", "));
-            if let Some(see) = &self.see {
+            if let Some(see) = &see {
                 why.push_str(&format!(" — see {see}"));
             }
             say(Note::Done { ok: false, why });
@@ -872,14 +1143,33 @@ impl Plan {
                     std::fs::remove_dir_all(to).map_err(|e| format!("{}: {e}", to.display()))?;
                 }
                 copy_in(from, to)?;
-                let receipt = Receipt {
-                    from: from.display().to_string(),
-                };
-                let text = serde_json::to_string_pretty(&receipt)
-                    .map_err(|e| e.to_string())?;
-                std::fs::write(to.join(RECEIPT), text)
-                    .map_err(|e| format!("{}: {e}", to.display()))?;
-                Ok(())
+                write_receipt(
+                    to,
+                    Receipt {
+                        from: from.display().to_string(),
+                        version: id_version_at(from),
+                        repository: None,
+                    },
+                )
+            }
+            Files::Fetch { remote, to } => {
+                say(Note::Doing {
+                    at: 0,
+                    of: self.steps.len(),
+                    about: format!(
+                        "fetching {} {} from {}",
+                        remote.entry.id, remote.entry.version, remote.repository.name
+                    ),
+                });
+                fetch_in(remote, to)?;
+                write_receipt(
+                    to,
+                    Receipt {
+                        from: remote.entry.url.clone(),
+                        version: Some(remote.entry.version.clone()),
+                        repository: Some(remote.repository.name.clone()),
+                    },
+                )
             }
             Files::Remove(dir) => {
                 let linked = std::fs::symlink_metadata(dir)
@@ -959,6 +1249,97 @@ fn run_step(step: &Step) -> (bool, String) {
         }
         Err(e) => (false, format!("{program}: {e}")),
     }
+}
+
+/// Leave the note saying textfold put this here, which is the whole of
+/// uninstall's safety and now of update's too.
+fn write_receipt(to: &Path, receipt: Receipt) -> Result<(), String> {
+    let text = serde_json::to_string_pretty(&receipt).map_err(|e| e.to_string())?;
+    std::fs::write(to.join(RECEIPT), text).map_err(|e| format!("{}: {e}", to.display()))
+}
+
+/// What version a package at a path says it is, for the receipt.
+fn id_version_at(path: &Path) -> Option<String> {
+    let manifest = manifest_in(path)?;
+    let text = std::fs::read_to_string(manifest).ok()?;
+    serde_json::from_str::<Named>(&text).ok()?.version
+}
+
+/// Fetch a package from a repository and put it where it goes.
+///
+/// Into a directory of its own first, and moved into place only once the
+/// download has been checked and unpacked. A tarball that arrived truncated,
+/// or that does not match the digest the index gave for it, must never have
+/// been anywhere near the plugins directory: what is unpacked from it is a
+/// manifest whose install steps run programs.
+fn fetch_in(remote: &Remote, to: &Path) -> Result<(), String> {
+    let holding = to.with_extension("fetching");
+    std::fs::remove_dir_all(&holding).ok();
+    std::fs::create_dir_all(&holding).map_err(|e| format!("{}: {e}", holding.display()))?;
+
+    let tidy = |why: String| {
+        std::fs::remove_dir_all(&holding).ok();
+        why
+    };
+    let tarball = holding.join("package.tar.gz");
+    crate::repo::fetch(&remote.repository, &remote.entry, &tarball).map_err(tidy)?;
+
+    let unpacked = holding.join("unpacked");
+    std::fs::create_dir_all(&unpacked)
+        .map_err(|e| tidy(format!("{}: {e}", unpacked.display())))?;
+    let done = std::process::Command::new("tar")
+        .arg("-xzf")
+        .arg(&tarball)
+        .arg("-C")
+        .arg(&unpacked)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output();
+    match done {
+        Ok(out) if out.status.success() => {}
+        Ok(out) => {
+            let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
+            return Err(tidy(format!("could not unpack {}: {said}", remote.entry.id)));
+        }
+        Err(e) => return Err(tidy(format!("tar: {e}"))),
+    }
+
+    // A tarball made of the plugin's directory has the manifest at the top; a
+    // tarball made of the directory *itself* has it one level down. Both are
+    // things people produce, and the difference is not worth an error message.
+    let root = match unpacked.join(MANIFEST).is_file() {
+        true => unpacked.clone(),
+        false => one_directory_in(&unpacked)
+            .filter(|dir| dir.join(MANIFEST).is_file())
+            .ok_or_else(|| tidy(format!("{} has no {MANIFEST} in it", remote.entry.id)))?,
+    };
+
+    // The replacement, as late as possible: everything that could fail has
+    // failed by now, so the window in which the plugin is neither the old one
+    // nor the new one is two file system calls wide.
+    if to.exists() {
+        std::fs::remove_dir_all(to).map_err(|e| tidy(format!("{}: {e}", to.display())))?;
+    }
+    let moved = std::fs::rename(&root, to).is_ok();
+    if !moved {
+        // A rename across file systems does not work, and a cache and a
+        // config directory are on different ones often enough to matter.
+        copy_in(&root, to).map_err(tidy)?;
+    }
+    std::fs::remove_dir_all(&holding).ok();
+    Ok(())
+}
+
+/// The single directory inside `dir`, if that is all there is in it.
+fn one_directory_in(dir: &Path) -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    found.retain(|p| p.is_dir());
+    (found.len() == 1).then(|| found.remove(0))
 }
 
 /// Copy a package in.
@@ -1057,6 +1438,7 @@ mod tests {
             removing: false,
             files: Files::Leave,
             steps,
+            steps_from: None,
             needs: needs.iter().map(|s| s.to_string()).collect(),
             see: None,
         }
@@ -1224,6 +1606,7 @@ mod tests {
                 },
                 step(&["true"], None),
             ],
+            steps_from: None,
             needs: Vec::new(),
             see: None,
         };
@@ -1343,6 +1726,7 @@ mod tests {
                 to: to.clone(),
             },
             steps: Vec::new(),
+            steps_from: None,
             needs: Vec::new(),
             see: None,
         };
@@ -1372,6 +1756,81 @@ mod tests {
         copy_in(&from, &to).expect("copied");
         assert!(to.join(MANIFEST).is_file());
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_update_is_offered_only_where_both_sides_say_what_version_they_are() {
+        let package = |installed: Option<&str>, offered: Option<&str>| Package {
+            id: "zls".into(),
+            name: "zls".into(),
+            about: "Zig".into(),
+            origin: Origin::Yours,
+            missing: Vec::new(),
+            here: true,
+            installed: installed.map(str::to_string),
+            offered: offered.map(str::to_string),
+        };
+        assert!(package(Some("1.0.0"), Some("1.1.0")).has_update());
+        assert!(!package(Some("1.1.0"), Some("1.1.0")).has_update());
+        assert!(!package(Some("1.2.0"), Some("1.1.0")).has_update());
+        // A plugin that declines to number itself is one nothing is ever an
+        // update to. Guessing would mean reinstalling somebody's plugin over
+        // and over for a version it never claimed.
+        assert!(!package(None, Some("1.1.0")).has_update());
+        assert!(!package(Some("1.0.0"), None).has_update());
+
+        // And what the row says, which is where anybody actually reads this.
+        assert_eq!(package(Some("1.0.0"), Some("1.1.0")).tag(), "update");
+        assert!(
+            package(Some("1.0.0"), Some("1.1.0"))
+                .detail()
+                .contains("1.0.0 → 1.1.0")
+        );
+        assert_eq!(package(Some("1.1.0"), Some("1.1.0")).tag(), "ready");
+    }
+
+    #[test]
+    fn a_fetch_says_that_more_will_follow_once_it_knows_what() {
+        // A package still in a repository has no steps to show: they are in
+        // its manifest, and its manifest is inside the tarball. A list that
+        // looked complete and then ran three programs nobody was shown would
+        // defeat the point of showing the list.
+        let plan = Plan {
+            id: "zls".into(),
+            name: "zls".into(),
+            removing: false,
+            files: Files::Fetch {
+                remote: Box::new(Remote {
+                    repository: crate::repo::Repository {
+                        name: "r".into(),
+                        url: "https://example.invalid/p".into(),
+                    },
+                    entry: crate::repo::Entry {
+                        id: "zls".into(),
+                        name: None,
+                        about: None,
+                        version: "1.0.0".into(),
+                        url: "dist/zls-1.0.0.tar.gz".into(),
+                        sha256: None,
+                        size: None,
+                        needs: vec!["zls".into()],
+                        see: None,
+                    },
+                }),
+                to: PathBuf::from("/home/me/.config/textfold/plugins/zls"),
+            },
+            steps: Vec::new(),
+            steps_from: Some(PathBuf::from("/home/me/.config/textfold/plugins/zls")),
+            needs: vec!["zls".into()],
+            see: None,
+        };
+        assert!(!plan.is_empty(), "a fetch is something to do");
+        let lines = plan.lines();
+        assert_eq!(
+            lines[0],
+            "fetch zls 1.0.0 from r into /home/me/.config/textfold/plugins/zls"
+        );
+        assert!(lines[1].contains("once it is here"), "{lines:?}");
     }
 
     #[test]
@@ -1405,6 +1864,7 @@ mod tests {
                 to: PathBuf::from("/home/me/.config/textfold/plugins/zls"),
             },
             steps: vec![step(&["brew", "install", "zls"], Some("zls"))],
+            steps_from: None,
             needs: vec!["zls".into()],
             see: None,
         };

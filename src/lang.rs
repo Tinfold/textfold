@@ -61,6 +61,17 @@ pub struct Lang {
     pub extensions: Vec<String>,
     /// Whole file names, for the many files with no extension at all.
     pub filenames: Vec<String>,
+    /// Names matched as a pattern, for the files that are neither a whole
+    /// name nor an extension. `Dockerfile.dev` and `prod.Dockerfile` are both
+    /// everywhere and neither is reachable any other way. `*` stands for
+    /// anything, so `"Dockerfile*"` catches the first and `"*.Dockerfile"`
+    /// the second.
+    ///
+    /// Tried after whole names and extensions, both of which say exactly what
+    /// they mean, and among themselves the longest pattern wins so that a
+    /// plugin can be more specific than another one without having to be read
+    /// first.
+    pub filename_patterns: Vec<String>,
     /// Words that, in a `#!` line, mean this language.
     pub shebangs: Vec<String>,
 
@@ -131,6 +142,17 @@ impl Lang {
     pub fn grammar(&self) -> Option<&'static crate::syntax::Grammar> {
         *self.compiled.get_or_init(|| {
             let source = self.grammar.as_ref()?;
+            // A grammar that will not load has always meant no colours and no
+            // word about why, which for a plugin bringing its own is an
+            // afternoon: the symbol is misspelled, or the library was built
+            // against another tree-sitter, and nothing anywhere says so.
+            let complain = |why: String| {
+                grammar_problems()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push(format!("{}: {why}", self.name));
+                None::<&'static crate::syntax::Grammar>
+            };
             let (language, highlights) = match source {
                 GrammarSource::BuiltIn {
                     language,
@@ -141,12 +163,31 @@ impl Lang {
                     symbol,
                     highlights,
                 } => {
-                    let language = load_library_grammar(path, symbol)?;
-                    let query = std::fs::read_to_string(highlights).ok()?;
+                    let language = match load_library_grammar(path, symbol) {
+                        Some(language) => language,
+                        None => {
+                            return complain(format!(
+                                "no {symbol} in {} — is that the right symbol?",
+                                path.display()
+                            ));
+                        }
+                    };
+                    let query = match std::fs::read_to_string(highlights) {
+                        Ok(query) => query,
+                        Err(e) => {
+                            return complain(format!("{}: {e}", highlights.display()));
+                        }
+                    };
                     (language, query)
                 }
             };
-            let grammar = crate::syntax::Grammar::new(language, &highlights)?;
+            let Some(grammar) = crate::syntax::Grammar::new(language, &highlights) else {
+                return complain(
+                    "the grammar and its highlights do not go together — usually a \
+                     library built against another tree-sitter"
+                        .to_string(),
+                );
+            };
             // The registry outlives the process, and a grammar is wanted for
             // as long as a file of its language is open, which is the same
             // thing. Leaking it is what makes it `'static`, and there is
@@ -179,6 +220,23 @@ fn load_library_grammar(path: &Path, symbol: &str) -> Option<Language> {
         std::mem::forget(library);
         Some(language)
     }
+}
+
+/// What went wrong loading a grammar, said the moment it goes wrong rather
+/// than at startup — a grammar is compiled when a file of its language is
+/// first shown, which may be an hour in.
+///
+/// Drained by the editor, which is why it is a list and not a log: the point
+/// is that somebody is told once.
+static GRAMMAR_PROBLEMS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+fn grammar_problems() -> &'static Mutex<Vec<String>> {
+    &GRAMMAR_PROBLEMS
+}
+
+/// Anything that has gone wrong loading a grammar since this was last asked.
+pub fn take_grammar_problems() -> Vec<String> {
+    std::mem::take(&mut grammar_problems().lock().unwrap_or_else(|e| e.into_inner()))
 }
 
 /// Every language there is.
@@ -257,6 +315,28 @@ pub fn detect(path: &Path, rope: &Rope) -> LangId {
                 && best.is_none_or(|(len, _)| ext.len() > len)
             {
                 best = Some((ext.len(), lang.id));
+            }
+        }
+    }
+    if let Some((_, id)) = best {
+        return id;
+    }
+
+    // Neither a whole name nor an extension. `Dockerfile.dev` is a Dockerfile
+    // and there is no other way to say so. The longest pattern wins, so a
+    // plugin can be more specific than another one without having to be read
+    // first.
+    let mut best: Option<(usize, LangId)> = None;
+    let bare = std::path::Path::new(&name);
+    for lang in &langs.langs {
+        for pattern in &lang.filename_patterns {
+            // Against the name already lowered, and with the pattern lowered
+            // to meet it: `Dockerfile*` is written the way the file is
+            // usually spelled and has to find `dockerfile.dev` as well.
+            if crate::plugin::matches_glob(&pattern.to_lowercase(), bare)
+                && best.is_none_or(|(len, _)| pattern.len() > len)
+            {
+                best = Some((pattern.len(), lang.id));
             }
         }
     }
@@ -479,6 +559,7 @@ fn blank(id: LangId, name: &str) -> Lang {
         lsp_id: name.to_string(),
         extensions: Vec::new(),
         filenames: Vec::new(),
+        filename_patterns: Vec::new(),
         shebangs: Vec::new(),
         line_comment: None,
         block_comment: None,
@@ -515,6 +596,9 @@ fn apply(lang: &mut Lang, plugin: &str, def: &FileLang, problems: &mut Vec<Strin
     }
     if let Some(v) = &def.filenames {
         lang.filenames = v.clone();
+    }
+    if let Some(v) = &def.filename_patterns {
+        lang.filename_patterns = v.clone();
     }
     if let Some(v) = &def.shebangs {
         lang.shebangs = v.clone();
@@ -556,22 +640,7 @@ fn apply(lang: &mut Lang, plugin: &str, def: &FileLang, problems: &mut Vec<Strin
             if !crate::plugin::is_on(&id) {
                 continue;
             }
-            lang.servers.push(Server {
-                id,
-                name,
-                command: s.command.clone(),
-                args: s.args.clone(),
-                roots: if s.roots.is_empty() {
-                    // Every project has one of these somewhere above it, and
-                    // stopping at a repository root is nearly always right.
-                    vec![".git".into()]
-                } else {
-                    s.roots.clone()
-                },
-                init_options: s.init_options.clone(),
-                settings: s.settings.clone(),
-                env: s.env.clone(),
-            });
+            lang.servers.push(s.clone().into_server(plugin));
         }
     }
     if let Some(g) = &def.grammar {
@@ -637,6 +706,11 @@ fn built_in_grammar(name: &str) -> Option<GrammarSource> {
             tree_sitter_c_sharp::HIGHLIGHTS_QUERY,
         ],
         "css" => tree_sitter_css::LANGUAGE, [tree_sitter_css::HIGHLIGHTS_QUERY],
+        // Containerfile's grammar, which is the same language under the name
+        // the people who are not Docker use for it.
+        "dockerfile" => tree_sitter_containerfile::LANGUAGE, [
+            tree_sitter_containerfile::HIGHLIGHTS_QUERY,
+        ],
         "go" => tree_sitter_go::LANGUAGE, [tree_sitter_go::HIGHLIGHTS_QUERY],
         "html" => tree_sitter_html::LANGUAGE, [tree_sitter_html::HIGHLIGHTS_QUERY],
         // Same as C#: the grammar's file opens with a catch-all that takes
@@ -678,12 +752,20 @@ fn built_in_grammar(name: &str) -> Option<GrammarSource> {
 #[derive(Deserialize, Clone, Debug)]
 #[serde(deny_unknown_fields)]
 pub struct FileLang {
+    /// Notes to whoever opens the file, as [`crate::plugin::FilePlugin`] has
+    /// them. JSON has nowhere to put a comment, so it gets a key and is read
+    /// into nothing.
+    #[serde(default, rename = "_about")]
+    _about: Option<serde_json::Value>,
     #[serde(default)]
     lsp_id: Option<String>,
     #[serde(default)]
     extensions: Option<Vec<String>>,
     #[serde(default)]
     filenames: Option<Vec<String>>,
+    /// Names as patterns: `["Dockerfile*", "*.Dockerfile"]`.
+    #[serde(default)]
+    filename_patterns: Option<Vec<String>>,
     #[serde(default)]
     shebangs: Option<Vec<String>>,
     #[serde(default)]
@@ -701,6 +783,29 @@ pub struct FileLang {
 }
 
 impl FileLang {
+    /// Fill in the `${plugin}` in a grammar's paths.
+    ///
+    /// A plugin that brings a grammar with it keeps it beside its manifest,
+    /// and a manifest has no way to say where that is: it is installed
+    /// wherever textfold installs plugins, which the person writing it does
+    /// not know. `${plugin}` is that directory, and this is what puts it in —
+    /// the same substitution a plugin's own program already gets for the same
+    /// reason. See [`crate::plugin`].
+    ///
+    /// Only the grammar. Everything else a language definition holds is a
+    /// name or a piece of punctuation rather than a path.
+    pub fn fill_paths(&mut self, fill: impl Fn(&str) -> String) {
+        if let Some(FileGrammar::Library {
+            library,
+            highlights,
+            ..
+        }) = &mut self.grammar
+        {
+            *library = fill(library);
+            *highlights = fill(highlights);
+        }
+    }
+
     /// Whether this says anything about what the language *is*, as against
     /// what to run for it. A definition that is nothing but `servers` is a
     /// plugin attaching itself to somebody else's language.
@@ -708,6 +813,7 @@ impl FileLang {
         self.lsp_id.is_some()
             || self.extensions.is_some()
             || self.filenames.is_some()
+            || self.filename_patterns.is_some()
             || self.shebangs.is_some()
             || self.line_comment.is_some()
             || self.block_comment.is_some()
@@ -747,6 +853,29 @@ impl FileServer {
             .unwrap_or(&self.command)
             .to_lowercase()
     }
+
+    /// What a manifest's server becomes in the table, given the plugin it came
+    /// from. One place that says it, so a test can build one the same way the
+    /// registry does rather than a slightly different way.
+    pub fn into_server(self, plugin: &str) -> Server {
+        let name = self.plugin_name();
+        Server {
+            id: crate::plugin::server_id(plugin, &name),
+            command: self.command,
+            args: self.args,
+            roots: if self.roots.is_empty() {
+                // Every project has one of these somewhere above it, and
+                // stopping at a repository root is nearly always right.
+                vec![REPOSITORY.into()]
+            } else {
+                self.roots
+            },
+            init_options: self.init_options,
+            settings: self.settings,
+            env: self.env,
+            name,
+        }
+    }
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -768,6 +897,39 @@ enum FileGrammar {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dockerfile_is_a_dockerfile_whatever_it_is_called_after_the_dot() {
+        // `Dockerfile.dev` and `prod.Dockerfile` are the two ways everybody
+        // writes a second one, and neither is a whole name or an extension.
+        let rope = Rope::from_str("FROM ubuntu:24.04\n");
+        let dockerfile = by_name("dockerfile").expect("the plugin ships");
+        for name in [
+            "Dockerfile",
+            "Containerfile",
+            "Dockerfile.dev",
+            "Dockerfile.prod",
+            "prod.Dockerfile",
+            "app.dockerfile",
+        ] {
+            assert_eq!(
+                detect(Path::new(name), &rope),
+                dockerfile,
+                "{name} is a Dockerfile"
+            );
+        }
+        // And a pattern does not swallow things it was not written for.
+        assert_ne!(detect(Path::new("docker-compose.yml"), &rope), dockerfile);
+        assert_ne!(detect(Path::new("Dockerignore.md"), &rope), dockerfile);
+    }
+
+    #[test]
+    fn a_dockerfile_is_coloured() {
+        // It had no grammar at all, which is most of what "the Dockerfile
+        // support does not work" turns out to mean.
+        let dockerfile = by_name("dockerfile").expect("the plugin ships");
+        assert!(get(dockerfile).grammar().is_some());
+    }
 
     #[test]
     fn the_grammars_the_plugins_ask_for_are_all_here_and_all_compile() {
@@ -1002,4 +1164,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+
 

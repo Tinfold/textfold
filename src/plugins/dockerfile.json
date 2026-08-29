@@ -11,7 +11,21 @@
       "extensions": [
         "dockerfile"
       ],
-      "line_comment": "#"
+      "_about": [
+        "Dockerfile.dev and prod.Dockerfile are both everywhere, and neither",
+        "is a whole file name or an extension. The patterns are what catch",
+        "them."
+      ],
+      "filename_patterns": [
+        "Dockerfile*",
+        "Containerfile*",
+        "*.Dockerfile",
+        "*.Containerfile"
+      ],
+      "line_comment": "#",
+      "grammar": {
+        "built_in": "dockerfile"
+      }
     }
   }
 }

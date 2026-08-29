@@ -13,6 +13,7 @@ mod doc;
 mod edit;
 mod git;
 mod host;
+mod jdk;
 mod keys;
 mod lang;
 mod lsp;
@@ -20,6 +21,7 @@ mod menu;
 mod pack;
 mod picker;
 mod plugin;
+mod repo;
 mod rpc;
 mod session;
 mod syntax;
@@ -108,6 +110,15 @@ struct Args {
     #[arg(long, value_name = "ID")]
     uninstall: Option<String>,
 
+    /// Ask the package repositories what they have now, and stop
+    #[arg(long)]
+    refresh: bool,
+
+    /// Install a newer version of everything that has one — or of the one
+    /// plugin named — and stop
+    #[arg(long, value_name = "ID", num_args = 0..=1, default_missing_value = "")]
+    update: Option<String>,
+
     /// Say where language servers' complaints are written and stop
     #[arg(long)]
     log_path: bool,
@@ -125,6 +136,8 @@ fn main() -> Result<()> {
     // before anything asks after one — including the `--list-…` answers,
     // which should say what this machine would actually do.
     plugin::init(&mut config.plugins);
+    // Before anything can open a Java file and ask which JDK it is for.
+    jdk::configure(config.java_home.as_deref());
 
     if args.list_themes {
         let themes = theme::Themes::load();
@@ -189,9 +202,15 @@ fn main() -> Result<()> {
         }
         return Ok(());
     }
+    if args.refresh {
+        return do_refresh(&config);
+    }
+    if let Some(what) = &args.update {
+        return do_update(&config, what.trim());
+    }
     if args.list_packages {
         let here = pack::receipts();
-        for package in pack::available(config.package_paths()) {
+        for package in pack::available(pack::Sources::of(&config)) {
             println!(
                 "{:<7} {:<24} {}",
                 package.tag(),
@@ -208,7 +227,9 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if let Some(what) = &args.install {
-        return do_package(pack::find(what, config.package_paths()).and_then(|p| pack::install(&p)));
+        return do_package(
+            pack::find(what, pack::Sources::of(&config)).and_then(|p| pack::install(&p)),
+        );
     }
     if let Some(what) = &args.uninstall {
         return do_package(pack::uninstall(&what.trim().to_lowercase()));
@@ -254,6 +275,10 @@ fn main() -> Result<()> {
 
     let (tx, rx) = mpsc::channel::<Event>();
     let mut app = App::new(config, tx.clone());
+    // Ask the package repositories what they have, on a thread. Nothing waits
+    // for it and nothing is installed by it: what it changes is whether the
+    // plugins list has an `update` beside anything.
+    app.check_for_updates();
 
     let mut terminal = start(wants_mouse, wants_keys)?;
     // Whatever happens from here — a panic in a widget, a bug in a grammar —
@@ -309,6 +334,58 @@ fn main() -> Result<()> {
     app.hosts.shutdown_all();
     stop(wants_mouse, wants_keys);
     result
+}
+
+/// Ask every repository what it has now, and say so.
+fn do_refresh(config: &Config) -> Result<()> {
+    let repositories = repo::repositories(config.package_repositories());
+    let mut bad = false;
+    for repository in &repositories {
+        match repo::refresh(repository) {
+            Ok(count) => println!("{}: {count} plugins", repository.name),
+            Err(why) => {
+                eprintln!("{}: {why}", repository.name);
+                bad = true;
+            }
+        }
+    }
+    // One repository being unreachable is worth an exit code, since this is
+    // the command a script would run — but the others were still refreshed.
+    match bad {
+        true => std::process::exit(1),
+        false => Ok(()),
+    }
+}
+
+/// Install a newer version of everything with one, or of the one named.
+///
+/// The index is asked first. `--update` that acted on what was cached last
+/// week would report nothing to do on the day a release came out, which is the
+/// one day anybody runs it.
+fn do_update(config: &Config, what: &str) -> Result<()> {
+    for why in pack::refresh(config.package_repositories()) {
+        eprintln!("{why}");
+    }
+    let sources = pack::Sources::of(config);
+    let mut updates = pack::updates(sources);
+    if !what.is_empty() {
+        let wanted = what.to_lowercase();
+        updates.retain(|p| p.id == wanted);
+        if updates.is_empty() {
+            println!("{what} is already at the newest version there is");
+            return Ok(());
+        }
+    }
+    if updates.is_empty() {
+        println!("everything is at the newest version there is");
+        return Ok(());
+    }
+    for package in updates {
+        println!("
+{}", package.detail());
+        do_package(pack::install(&package))?;
+    }
+    Ok(())
 }
 
 /// Carry out an install or an uninstall from the command line.

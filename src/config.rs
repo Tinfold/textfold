@@ -159,6 +159,42 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub package_paths: Vec<String>,
 
+    /// Which Java to run a Java language server with, and to offer a Java
+    /// project as a runtime to build against.
+    ///
+    /// Absent means look: `JAVA_HOME`, then the places JDKs are installed on
+    /// this kind of machine, then the `java` on the `PATH` — see
+    /// [`crate::jdk`]. This is here for the machine where that finds the
+    /// wrong one, which is any machine with several JDKs on it and an opinion
+    /// about which of them is the one.
+    ///
+    /// It is the top of a JDK, the directory with `bin/java` in it, and not
+    /// the program: `"/usr/lib/jvm/java-21-openjdk"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub java_home: Option<String>,
+
+    /// Where to fetch plugins from.
+    ///
+    /// Absent means the one textfold ships with — see
+    /// [`crate::repo::DEFAULT_URL`]. Naming any repository *replaces* that
+    /// rather than adding to it, so that what you get is what you said; keep
+    /// it by writing it out alongside your own.
+    ///
+    /// ```json
+    /// "package_repositories": [
+    ///   { "name": "mine", "url": "https://example.invalid/plugins" }
+    /// ]
+    /// ```
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub package_repositories: Vec<crate::repo::Repository>,
+
+    /// Whether to ask the package repositories what they have when textfold
+    /// starts. Absent means it does — on a thread, so nothing waits for it,
+    /// and nothing is installed by it: what a refresh changes is whether the
+    /// plugins list has an `update` beside anything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub check_for_updates: Option<bool>,
+
     /// Keys of your own, by what they do: `"save": ["ctrl-s", "f2"]`.
     ///
     /// Only what you have changed is written here; everything else keeps the
@@ -332,6 +368,14 @@ impl Config {
     /// Where else to look for packages.
     pub fn package_paths(&self) -> &[String] {
         &self.package_paths
+    }
+
+    pub fn package_repositories(&self) -> &[crate::repo::Repository] {
+        &self.package_repositories
+    }
+
+    pub fn check_for_updates(&self) -> bool {
+        self.check_for_updates.unwrap_or(true)
     }
 }
 

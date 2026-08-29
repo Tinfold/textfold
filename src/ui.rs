@@ -1230,6 +1230,9 @@ struct Row {
     suffix: Option<String>,
     detail: Option<String>,
     kind: &'static str,
+    /// The colour the kind is drawn in: the one that kind of thing has in the
+    /// file. See [`crate::app::Suggestion::role`].
+    role: crate::theme::Role,
 }
 
 fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color) {
@@ -1288,6 +1291,7 @@ fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color
             suffix: item.suffix.clone(),
             detail: right_of(item),
             kind: item.kind,
+            role: item.role,
         })
         .collect();
     let about = completion.selected().and_then(|item| item.about.clone());
@@ -1301,6 +1305,7 @@ fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color
         suffix,
         detail,
         kind,
+        role,
     }) in items.iter().enumerate()
     {
         let y = area.y + row as u16;
@@ -1316,12 +1321,15 @@ fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, ground: Color
         // characters and would otherwise run straight into the label.
         let kind_width = 10.min((area.width as usize / 3).max(4));
         let kind = text::truncate(kind, kind_width.saturating_sub(2));
+        // In the colour the thing itself has in the file, so that the shape
+        // of the list — three methods, then the fields — is legible before
+        // any of it has been read. See `completion_role`.
         buf.set_stringn(
             area.x,
             y,
             format!(" {kind:<w$}", w = kind_width.saturating_sub(1)),
             kind_width,
-            style.fg(theme.faint),
+            style.fg(theme.role(*role)),
         );
         let room = area.width as usize - kind_width - 1;
         let mut label_width = text::str_width(label).min(room);
@@ -1417,15 +1425,21 @@ fn draw_hover(frame: &mut Frame, app: &mut App, at: Position, ground: Color) {
     let at = screen_position_of(app, hover.at).unwrap_or(at);
     let theme = app.theme;
     let screen = app.screen;
+    // Wide enough to read, no wider than the screen, and no wider than a
+    // comfortable line of prose. Worked out before the text is looked at,
+    // because it is what the text is folded to: a documentation box that ran
+    // off the side and could only be scrolled downwards would be showing you
+    // the first half of every sentence in it.
+    let room = screen.width.saturating_sub(4).min(84);
+    let Some(hover) = &mut app.hover else { return };
+    hover.fold_to((room.saturating_sub(2)).max(8) as usize);
+    let hover = &*hover;
     let widest = hover
         .lines
         .iter()
         .map(|line| text::str_width(&line.text))
         .max()
         .unwrap_or(20);
-    // Wide enough to read, no wider than the screen, and no wider than a
-    // comfortable line of prose.
-    let room = screen.width.saturating_sub(4).min(84);
     let width = ((widest + 2) as u16).min(room).max(24.min(room));
     // A glance gets fourteen rows; something you have asked to read gets as
     // much of the screen as there is, because scrolling a paragraph at a time
@@ -2744,6 +2758,42 @@ mod tests {
         app.hover = Some(popup);
         let terminal = Terminal::new(TestBackend::new(60, 24)).expect("a terminal");
         (app, terminal)
+    }
+
+    #[test]
+    fn a_hover_line_wider_than_the_screen_is_folded_rather_than_elided() {
+        // What the box does about a long line, drawn: no ellipsis, nothing
+        // running off the side, and every word still there to read.
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut app = App::new(Config::default(), tx);
+        app.here_mut().rope = ropey::Rope::from_str("fn main() {}\n");
+        app.screen = Rect::new(0, 0, 60, 24);
+        let long = "pub fn something(first: &BTreeMap<String, usize>, second: usize) \
+                    -> Result<Vec<String>, Error>";
+        let mut popup = crate::app::Popup::new(vec![crate::app::DocLine::prose(long)], 0);
+        popup.focused = true;
+        app.hover = Some(popup);
+        let mut terminal = Terminal::new(TestBackend::new(60, 24)).expect("a terminal");
+        terminal.draw(|frame| super::draw(frame, &mut app)).expect("drawn");
+
+        let buffer = terminal.backend().buffer();
+        let drawn: String = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!drawn.contains('\u{2026}'), "it was cut off:\n{drawn}");
+        // Every word of it is on the screen somewhere, which is the whole
+        // point — the half that says what the arguments are is the half an
+        // ellipsis used to take.
+        for word in ["BTreeMap<String,", "second:", "Result<Vec<String>,", "Error>"] {
+            assert!(drawn.contains(word), "{word:?} was lost:\n{drawn}");
+        }
+        // And the box is more than one row of text now.
+        assert!(hover_height(terminal.backend().buffer()) > 3);
     }
 
     /// How tall the drawn hover is, measured by its rounded corners.

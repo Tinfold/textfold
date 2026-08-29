@@ -389,6 +389,11 @@ pub struct Plugin {
     /// What to call it on the screen.
     pub name: String,
     pub about: Option<String>,
+    /// What version of it this is, where it says. Compared against what a
+    /// package repository is offering to decide whether there is an update —
+    /// see [`crate::repo::is_newer`]. A plugin that says nothing has no
+    /// version, and nothing is ever an update to it.
+    pub version: Option<String>,
     pub source: Source,
     /// Whether it is on when nobody has said. A plugin can ship turned off.
     pub on_by_default: bool,
@@ -432,6 +437,11 @@ impl Plugin {
             Some(about) => about.clone(),
             None => self.source.label(),
         }
+    }
+
+    /// The version, for a list that has room to say it.
+    pub fn version_label(&self) -> Option<String> {
+        self.version.as_ref().map(|v| format!("v{v}"))
     }
 
     /// The programs it needs that are not on this machine.
@@ -648,43 +658,27 @@ const LANGUAGES: &[(&str, &str)] = built_in![
     "git",
 ];
 
-/// The language servers, one plugin each, every one of them with an id, a
-/// switch, and instructions for getting it.
+/// The language servers do not ship in the binary. They live in a package
+/// repository — see [`crate::repo`] — and are fetched, which is what makes
+/// `pyright` a plugin in the ordinary sense rather than a special case with a
+/// switch: one directory, one manifest, one version, fetched and updated by
+/// the same machinery as anything anybody else publishes.
 ///
-/// This is what "the language servers are plugins" finally means. `pyright` is
-/// not a line in the Python plugin that happens to name a program; it is a
-/// plugin, with its own row in the list, its own entry in the settings file,
-/// and its own answer to *and how do I get it*. Removing it is removing a
-/// plugin, not editing the definition of Python.
+/// What is left built in is what a language *is*: how to colour it, how to
+/// comment it out, and which files are one. Those need nothing fetched and
+/// nothing running, so a textfold that has never seen a network still opens a
+/// Rust file and colours it, which is the promise worth keeping offline.
 ///
-/// One plugin can serve several languages, which is the other thing the split
-/// buys: `clangd` was written out twice, once in C and once in C++, and
-/// `tsserver` three times. Now each is written once and says which languages
-/// it is for.
-const SERVERS: &[(&str, &str)] = built_in![
-    "rust-analyzer",
-    "pyright",
-    "ruff",
-    "tsserver",
-    "gopls",
-    "clangd",
-    "omnisharp",
-    "jdtls",
-    "bash-language-server",
-    "vscode-langservers",
-    "taplo",
-    "yaml-language-server",
-    "marksman",
-    "docker-langserver",
-];
-
+/// The two halves were already separate before this — a language plugin and a
+/// server plugin are different files with different ids — so nothing about
+/// how they are read changed. Only where they are read from.
 fn load() -> Registry {
     let mut it = Registry {
         plugins: Vec::new(),
         problems: Vec::new(),
     };
 
-    for (id, text) in LANGUAGES.iter().chain(SERVERS) {
+    for (id, text) in LANGUAGES.iter() {
         let file: FilePlugin = serde_json::from_str(text)
             .expect("the plugins textfold ships are checked by a test");
         let (plugin, problems) = file.into_plugin(id, Source::BuiltIn);
@@ -800,13 +794,16 @@ impl Registry {
 /// A manifest, as its file writes it.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FilePlugin {
+pub struct FilePlugin {
     #[serde(default)]
     id: Option<String>,
     #[serde(default)]
     name: Option<String>,
     #[serde(default)]
     about: Option<String>,
+    /// `"1.2.0"`. What an update is decided by.
+    #[serde(default)]
+    version: Option<String>,
     /// Whether it is on when nobody has said. Absent means on.
     #[serde(default)]
     enabled: Option<bool>,
@@ -949,7 +946,7 @@ impl FilePlugin {
     /// Turn a manifest into a plugin, along with anything wrong with it worth
     /// telling somebody about. A manifest is written by hand, so a mistake in
     /// one is a thing to say out loud rather than a thing to swallow.
-    fn into_plugin(self, fallback_id: &str, source: Source) -> (Plugin, Vec<String>) {
+    pub fn into_plugin(self, fallback_id: &str, source: Source) -> (Plugin, Vec<String>) {
         let mut problems = Vec::new();
         let id = self
             .id
@@ -1125,11 +1122,23 @@ impl FilePlugin {
         let install = steps(self.install, "install");
         let uninstall = steps(self.uninstall, "uninstall");
 
+        // A grammar a plugin brings with it lives beside its manifest, and the
+        // manifest cannot know where that is — so it says `${plugin}`, as a
+        // plugin's own program does, and this is where that becomes a path.
+        // Without it a plugin can only name a grammar somebody installed by
+        // hand, which is the difference between "plugins can add a language"
+        // and "plugins can add a language you have already set up yourself".
+        let mut languages = self.languages;
+        for def in languages.values_mut() {
+            def.fill_paths(fill);
+        }
+
         let plugin = Plugin {
             name: self.name.unwrap_or_else(|| id.clone()),
             about: self.about,
+            version: self.version.filter(|v| !v.trim().is_empty()),
             on_by_default: self.enabled.unwrap_or(true),
-            languages: self.languages,
+            languages,
             themes: self.themes,
             keys: self.keys,
             needs: self
@@ -1159,7 +1168,7 @@ mod tests {
     #[test]
     fn the_plugins_textfold_ships_all_read() {
         let registry = load();
-        for (id, _) in LANGUAGES.iter().chain(SERVERS) {
+        for (id, _) in LANGUAGES.iter() {
             let plugin = registry
                 .plugins
                 .iter()
@@ -1191,46 +1200,61 @@ mod tests {
     }
 
     #[test]
-    fn every_language_server_that_ships_says_how_to_get_it() {
-        // A row in a list that says "you have not got this" and does not say
-        // what to do about it is a row that wastes an afternoon.
+    fn nothing_that_ships_in_the_binary_needs_fetching_to_work() {
+        // The line the split is drawn along, and the promise worth keeping
+        // offline: a textfold that has never seen a network opens a Rust file
+        // and colours it. Everything that has to be downloaded lives in a
+        // package repository, which is where the language servers went.
         let registry = load();
-        for (id, _) in SERVERS {
+        for (id, _) in LANGUAGES {
             let plugin = registry.plugins.iter().find(|p| &p.id == id).unwrap();
-            assert!(!plugin.servers.is_empty(), "{id} runs no server");
-            assert!(!plugin.needs.is_empty(), "{id} does not say what it needs");
-            assert!(plugin.can_install(), "{id} does not say how to get it");
-            assert!(
-                plugin.see.is_some(),
-                "{id} does not say where to get it by hand"
-            );
-            // What it needs is what it runs. A `needs` naming something other
-            // than the command would report a server as ready that cannot
-            // start, which is worse than saying nothing.
-            for server in &plugin.servers {
-                assert!(
-                    plugin.needs.contains(&server.command),
-                    "{id} runs {} and does not say it needs it",
-                    server.command
-                );
-            }
+            assert!(plugin.needs.is_empty(), "{id} needs a program fetching");
+            assert!(plugin.install.is_empty(), "{id} has something to install");
+            assert!(plugin.host.is_none(), "{id} brings a program with it");
         }
     }
 
     #[test]
     fn a_plugin_that_is_one_server_is_named_once() {
         // `pyright/pyright` is a name nobody would write, and it would be the
-        // name in everybody's settings file.
-        let registry = load();
-        let pyright = registry.plugins.iter().find(|p| p.id == "pyright").unwrap();
-        let ids: Vec<&str> = pyright.servers.iter().map(|s| s.id.as_str()).collect();
+        // name in everybody's settings file. Read here rather than out of the
+        // registry, because the servers are fetched now rather than built in.
+        let file: FilePlugin = serde_json::from_str(
+            r#"{"id":"pyright","languages":{"python":{"servers":[
+                 {"name":"pyright","command":"pyright-langserver"}]}}}"#,
+        )
+        .unwrap();
+        let (plugin, _) = file.into_plugin("pyright", Source::BuiltIn);
+        let ids: Vec<&str> = plugin.servers.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, ["pyright"]);
 
         // And one server for three languages is one switch, not three.
-        let ts = registry.plugins.iter().find(|p| p.id == "tsserver").unwrap();
-        assert_eq!(ts.servers.len(), 1);
-        assert_eq!(ts.servers[0].id, "tsserver");
-        assert_eq!(ts.servers[0].for_what(), "javascript, tsx, typescript");
+        let file: FilePlugin = serde_json::from_str(
+            r#"{"id":"tsserver","languages":{
+                 "javascript":{"servers":[{"name":"tsserver","command":"typescript-language-server"}]},
+                 "typescript":{"servers":[{"name":"tsserver","command":"typescript-language-server"}]},
+                 "tsx":{"servers":[{"name":"tsserver","command":"typescript-language-server"}]}}}"#,
+        )
+        .unwrap();
+        let (plugin, _) = file.into_plugin("tsserver", Source::BuiltIn);
+        assert_eq!(plugin.servers.len(), 1);
+        assert_eq!(plugin.servers[0].id, "tsserver");
+        assert_eq!(plugin.servers[0].for_what(), "javascript, tsx, typescript");
+    }
+
+    #[test]
+    fn a_version_is_read_and_a_plugin_without_one_has_none() {
+        // What an update is decided by. A plugin that declines to number
+        // itself is one nothing is ever an update to, which is the safe
+        // answer rather than reinstalling it forever.
+        let file: FilePlugin =
+            serde_json::from_str(r#"{"id":"zls","version":"1.2.0"}"#).unwrap();
+        let (plugin, _) = file.into_plugin("zls", Source::BuiltIn);
+        assert_eq!(plugin.version.as_deref(), Some("1.2.0"));
+        assert_eq!(plugin.version_label().as_deref(), Some("v1.2.0"));
+
+        let file: FilePlugin = serde_json::from_str(r#"{"id":"zls","version":"  "}"#).unwrap();
+        assert_eq!(file.into_plugin("zls", Source::BuiltIn).0.version, None);
     }
 
     #[test]
@@ -1460,6 +1484,35 @@ mod tests {
             host.args,
             ["/home/me/.config/textfold/plugins/p/run.py".to_string()]
         );
+    }
+
+    #[test]
+    fn a_plugin_can_bring_a_grammar_of_its_own_without_knowing_where_it_lands() {
+        // The other half of `${plugin}`, and the difference between "plugins
+        // can add a language" and "plugins can add a language you have
+        // already built and installed yourself". A grammar lives beside the
+        // manifest, and the manifest cannot know where textfold put it.
+        let file: FilePlugin = serde_json::from_str(
+            r#"{"id":"zig","languages":{"zig":{"extensions":["zig"],
+                "grammar":{"library":"${plugin}/zig.so","symbol":"tree_sitter_zig",
+                           "highlights":"${plugin}/highlights.scm"}}}}"#,
+        )
+        .unwrap();
+        let (plugin, problems) = file.into_plugin(
+            "zig",
+            Source::File(PathBuf::from("/home/me/.config/textfold/plugins/zig/plugin.json")),
+        );
+        assert!(problems.is_empty(), "{problems:?}");
+        let said = format!("{:?}", plugin.languages.get("zig").expect("the language"));
+        assert!(
+            said.contains("/home/me/.config/textfold/plugins/zig/zig.so"),
+            "the library was not found: {said}"
+        );
+        assert!(
+            said.contains("/home/me/.config/textfold/plugins/zig/highlights.scm"),
+            "the highlights were not found: {said}"
+        );
+        assert!(!said.contains("${plugin}"), "something was left unfilled: {said}");
     }
 
     #[test]

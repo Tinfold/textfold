@@ -220,7 +220,15 @@ impl Vars {
                 // `${env:PATH}` — what the editor was started with, so a
                 // server's `PATH` can be extended rather than replaced.
                 Some(var) => out.push_str(&std::env::var(var).unwrap_or_default()),
-                None => out.push_str(self.values.get(name)?),
+                None => match self.values.get(name) {
+                    Some(value) => out.push_str(value),
+                    // Not a fact about this project. `${java_home}` is worked
+                    // out from the machine rather than from the directory,
+                    // and only when something asks — most projects are not
+                    // Java and finding the JDKs on a machine is a walk of
+                    // several directories.
+                    None => out.push_str(&crate::jdk::var(name)?),
+                },
             }
             rest = &rest[end + 1..];
         }
@@ -236,7 +244,15 @@ impl Vars {
     /// rather than saying something wrong.
     pub fn fill_value(&self, value: &Value) -> Option<Value> {
         match value {
-            Value::String(text) => self.fill(text).map(Value::String),
+            // A string that is nothing but one placeholder may stand for a
+            // whole value rather than for some text. It is the only way a
+            // manifest can ask for a list whose length it cannot know —
+            // `java.configuration.runtimes` is however many JDKs this machine
+            // turns out to have.
+            Value::String(text) => match whole_placeholder(text) {
+                Some(name) => crate::jdk::value(name).or_else(|| self.fill(text).map(Value::String)),
+                None => self.fill(text).map(Value::String),
+            },
             Value::Array(items) => Some(Value::Array(
                 items.iter().filter_map(|v| self.fill_value(v)).collect(),
             )),
@@ -250,6 +266,13 @@ impl Vars {
             other => Some(other.clone()),
         }
     }
+}
+
+/// The name in a string that is nothing but `${…}`, which is what may stand
+/// for a whole value. `"${root}/x"` is text with a placeholder in it and is
+/// not one of these.
+fn whole_placeholder(text: &str) -> Option<&str> {
+    text.strip_prefix("${")?.strip_suffix('}')
 }
 
 #[cfg(test)]

@@ -37,6 +37,8 @@ textfold                         # an empty buffer
 - [Reading what a language server says](#reading-what-a-language-server-says)
 - [Plugins](#plugins)
   - [Installing a plugin](#installing-a-plugin)
+  - [Where packages come from](#where-packages-come-from)
+  - [Updates](#updates)
 - [Where you left off](#where-you-left-off)
 - [When something is wrong](#when-something-is-wrong)
 - [How it is put together](#how-it-is-put-together)
@@ -470,6 +472,13 @@ server that is slow, wedged, or busy indexing half a million lines cannot make
 the cursor stutter, because the cursor is not waiting on it. While one is busy,
 the top right says what it is doing.
 
+The suggestion list is coloured by what each row *is* — a method in the colour
+a method has, a field in the colour a field has, a keyword in the colour a
+keyword has — in the colours of whichever theme you are using. There is nothing
+new to learn from it: it is what the same thing looks like three lines up in
+the file, so the shape of a list of forty is legible before any of it has been
+read.
+
 What is wired up: completion (as you type, on the characters the server says
 should trigger it, and again as you keep typing when the server said its answer
 was partial — which is what puts names your file has not imported yet in the
@@ -510,6 +519,10 @@ Every one of these is a [plugin](#plugins), with a row in the plugins list, a
 line in your settings file, and an answer to *and how do I get it*. None of
 them is written into the definition of a language: `pyright` is a plugin that
 says it is for Python, in the same way a plugin of yours would.
+
+They are fetched rather than built in — they live in
+[textfold-plugins](https://github.com/Tinfold/textfold-plugins), and
+`--install` gets the plugin and then what the plugin needs, in that order.
 
 | Plugin | Language | Runs | `--install` fetches it with | Linux |
 |---|---|---|---|---|
@@ -684,6 +697,41 @@ project's own `pyrightconfig.json` or in a [plugin](#plugins) of your own:
 ] } } }
 ```
 
+### Java
+
+Java asks the same question twice and the two answers are different. jdtls is
+itself a Java program and wants a recent JDK to run at all; the project it is
+being asked about wants whatever *that* project targets, which on a great many
+real code bases is 8 or 11. Started under 8 it does not start; told only about
+21 it reports every line of an 8 project as an error.
+
+Both are worked out from the machine, and neither needs configuring. textfold
+looks for JDKs in `JAVA_HOME`, in the places they are installed on this kind of
+machine (`/usr/lib/jvm`, `/Library/Java/JavaVirtualMachines`, `C:\Program
+Files\Java`), in the directories the version managers use (sdkman, asdf, jenv,
+jabba), and finally by following the `java` on your `PATH` to where it really
+lives. What each one is comes out of the `release` file at the top of it, so
+nothing here starts a JVM to ask.
+
+The newest that can run the server becomes `${java_home}`, which is handed over
+as `JAVA_HOME`. Every JDK that can *compile* becomes an entry in
+`${java_runtimes}`, which is what tells jdtls a project may be built against
+11 even though 21 is running it. A JRE is offered for the first and not the
+second: a runtime that cannot compile is a project whose standard library jdtls
+reports as missing.
+
+Where that picks the wrong one — which is any machine with several JDKs and an
+opinion about which of them is *the* one:
+
+```json
+{ "java_home": "/usr/lib/jvm/java-21-openjdk" }
+```
+
+It is the top of a JDK, the directory with `bin/java` in it, not the program.
+On a machine with no Java at all the settings that name one disappear rather
+than being filled in with an empty path, and jdtls falls back to whatever
+`java` is on the `PATH`.
+
 ### Colouring
 
 Colouring is tree-sitter, with the grammar kept in step with your text
@@ -692,7 +740,7 @@ keystroke re-reads the few nodes that changed. Colours are worked out for the
 part of the file on screen and no further.
 
 Grammars built in: Rust, Python, JavaScript, TypeScript, TSX, Go, C (which C++
-borrows), C#, Java, Bash, JSON, TOML, YAML, Markdown, HTML, CSS. Three of the
+borrows), C#, Java, Bash, JSON, TOML, YAML, Markdown, HTML, CSS, Dockerfile. Three of the
 shipped highlight queries are wrong upstream and textfold reads its own
 correction on top of them: Rust's has a typo that stops every SCREAMING_CASE
 constant from being coloured as one, and C#'s and Java's each open with a
@@ -772,7 +820,10 @@ than repeating forty things you did not.
 | `enhanced_keys` | ask for the extended keyboard protocol |
 | `underline_colour` | `auto`, `on`, or `off` — see [When something is wrong](#when-something-is-wrong) |
 | `plugins` | what is switched off — see [Plugins](#plugins) |
-| `package_paths` | where else to look for plugins you could install — see [Installing a plugin](#installing-a-plugin) |
+| `package_paths` | where else to look for plugins you could install — see [Where packages come from](#where-packages-come-from) |
+| `package_repositories` | where to fetch plugins from — see [Where packages come from](#where-packages-come-from) |
+| `check_for_updates` | whether to ask the repositories what they have at startup — see [Updates](#updates) |
+| `java_home` | which JDK to run a Java language server with — see [Java](#java) |
 | `keys` | see [Keys](#keys) |
 
 Most of these are also in the palette under `settings`, where changing one
@@ -998,6 +1049,17 @@ The box keeps its size while you read it — it does not shrink as you scroll,
 and it stops with the last line on the bottom row rather than emptying itself
 out from the top.
 
+**Long lines fold rather than running off the side.** Documentation arrives with
+whatever line breaks the person who wrote it chose, and a server sends a
+signature as one line however long it is. A box that only scrolls downwards has
+nowhere to put the rest, so cutting it off with an ellipsis loses exactly the
+half that says what the arguments are. It folds instead, the way the editor
+folds a long line: at a space where there is one and mid-word where there is
+not, keeping the indentation of the line it came from, so a bulleted list stays
+a list and a wrapped line of code stays under its own block. The colours and
+the followable names come with it. Resizing the terminal folds it again and
+keeps the line you were reading on the top row.
+
 Copying out of it is the same gesture as copying out of code: drag across the
 part you want and press Ctrl-C. Nothing about it is a special "copy the
 documentation" command, because it did not need to be one.
@@ -1068,10 +1130,21 @@ Everything textfold knows that is not the editor itself arrives as a plugin,
 and every one of them can be switched off: the languages, the grammars, the
 language servers, the colours, and the programs it runs for you.
 
-The ones that ship are the JSON files in `src/plugins/`, built into the binary.
+What a language *is* — its colours, its comment syntax, which files are one —
+is built into the binary: the JSON files in `src/plugins/`. Nothing about them
+has to be fetched or run, so a textfold that has never seen a network still
+opens a Rust file and colours it.
+
+The **language servers are not**. They live in
+[textfold-plugins](https://github.com/Tinfold/textfold-plugins), a package
+repository textfold is configured to fetch from, and each is fetched the first
+time you install it — which is the one command it already took to get
+`rust-analyzer` onto your machine. See
+[Installing a plugin](#installing-a-plugin).
+
 Yours go in `~/.config/textfold/plugins/`, as `name.json` or as
-`name/plugin.json`, and once loaded there is no difference between the two
-kinds: nothing textfold ships is reachable by a route your own plugin cannot
+`name/plugin.json`, and once loaded there is no difference between any of the
+three: nothing textfold ships is reachable by a route your own plugin cannot
 take. A plugin of yours taking an id textfold already uses replaces it, which
 is how you say what Rust means here without editing textfold.
 
@@ -1096,11 +1169,13 @@ stopped and started, and the buffers you have open work out what language they
 are afresh. A file whose language you set by hand keeps what you told it.
 
 **The language servers are plugins.** Not "configured like plugins" — plugins,
-by the same route yours takes, with no way for textfold to reach them that you
-could not reach yourself. Ten minutes with `--list-plugins` and the JSON in
-`src/plugins/` is the whole of what textfold knows about `clangd`. If you had a
-settings file from before this, the ids in it are brought up to date the first
-time it is read, so `"python/ruff": false` goes on meaning what it meant.
+by the same route yours takes, published the same way, with no way for textfold
+to reach them that you could not reach yourself. One directory with one
+manifest in it, a version, a tarball, a line in an index; `clangd` is
+[twenty lines of JSON](https://github.com/Tinfold/textfold-plugins/blob/main/plugins/clangd/plugin.json)
+and that is the whole of what textfold knows about it. If you had a settings
+file from before this, the ids in it are brought up to date the first time it
+is read, so `"python/ruff": false` goes on meaning what it meant.
 
 ### What a plugin can contribute
 
@@ -1115,6 +1190,7 @@ time it is read, so `"python/ruff": false` goes on meaning what it meant.
 | `themes` | sets of colours, in the shape a [theme file](#colours) is in |
 | `keys` | keys it would like bound, by command name |
 | `needs`, `install`, `uninstall`, `see` | what it needs on the machine and how to get it — see [Installing a plugin](#installing-a-plugin) |
+| `version` | what version this is, which is what an update is decided by |
 
 ```json
 { "id": "pytools",
@@ -1132,8 +1208,8 @@ time it is read, so `"python/ruff": false` goes on meaning what it meant.
   "keys": { "pytools/lint": ["f6"] } }
 ```
 
-Per plugin: `id`, `name`, `about`, `enabled` (say `false` to ship one switched
-off), and the contribution tables above.
+Per plugin: `id`, `name`, `about`, `version`, `enabled` (say `false` to ship
+one switched off), and the contribution tables above.
 
 **A plugin's keys are a suggestion, not a claim.** One is bound only if
 nothing already wants that key, so a plugin cannot quietly take Ctrl-S, and a
@@ -1156,11 +1232,13 @@ needs    gopls                Types, completions and fixes for Go — needs gopl
 new      cargo                Build, check, test and clippy, without leaving the editor
 ```
 
-The **needs** rows are plugins that are here and are not going to work until
-something is fetched. The **new** rows are packages sitting in a directory
-nobody has installed from yet. From where you are sitting "install ruff" and
-"install this plugin somebody gave me" are the same sentence, so they are one
-list; which of the two a row happens to be is textfold's business.
+The **new** rows are things nobody has installed yet — a package sitting in a
+directory, or a plugin a repository is offering. The **needs** rows are plugins
+that are here and are not going to work until a program is fetched. The
+**update** rows are plugins with a newer version to be had. From where you are
+sitting "install ruff" and "install this plugin somebody gave me" are the same
+sentence, so they are one list; which kind a row happens to be is textfold's
+business.
 
 `uninstall-plugin` is the other direction: it runs the plugin's `uninstall`
 steps and takes away the files, if the files are ones textfold put there.
@@ -1174,24 +1252,80 @@ From a terminal:
 
 ```
 textfold --list-packages                 what could be installed, and from where
-textfold --install ruff                  something textfold already knows of
+textfold --install ruff                  something a repository is offering
 textfold --install ./examples/cargo      a directory with a plugin.json in it
+textfold --refresh                       ask the repositories what they have
+textfold --update                        fetch a newer version of anything
+textfold --update ruff                   or of just the one
 textfold --uninstall cargo
 ```
 
-**Where packages come from.** Nothing is fetched from anywhere: there is no
-index, no registry and no network. A package is a directory with a
-`plugin.json` in it, sitting on this machine — in
-`~/.config/textfold/packages`, or anywhere else you have named:
+#### Where packages come from
+
+Three places, and they are one list.
+
+**A package repository** is a URL with an `index.json` under it and a tarball
+per plugin beside it. That is deliberately the whole of it: anything that can
+serve a file over HTTPS can be one, so publishing plugins is not a thing
+anybody has to be given permission for, and neither is forking the ones that
+ship. textfold comes configured with one —
+[textfold-plugins](https://github.com/Tinfold/textfold-plugins), which is where
+the language servers live. To use another:
+
+```json
+{ "package_repositories": [
+    { "name": "mine", "url": "https://example.invalid/plugins" }
+] }
+```
+
+Naming any repository *replaces* the default rather than adding to it, so that
+what you get is what you said; keep it by writing it out alongside yours. The
+first repository to offer an id is the one that gets it, so the order they are
+written in is the order they are trusted in.
+
+Fetching is done with `curl`, or `wget` where there is no curl — not with an
+HTTP client of textfold's own, which would be a TLS stack, a certificate store
+and a decade of other people's security advisories inside a program whose job
+is to edit text. What comes down is checked against the SHA-256 the index gave
+for it *before* it is unpacked, because what is unpacked is a manifest whose
+install steps run programs. A tarball that does not match is thrown away and
+the copy you already had is untouched.
+
+**A directory on this machine** — `~/.config/textfold/packages`, or anywhere
+else you have named:
 
 ```json
 { "package_paths": ["~/src/textfold/examples", "~/work/editor-plugins"] }
 ```
 
-which is what makes `install-plugin` a list rather than a path you have to
-remember. Point it at a checkout of somebody's plugins and every directory in
-it becomes a row you can choose. When there is somewhere to fetch packages
-*from*, it will be one more kind of row in the same list.
+Point it at a checkout of somebody's plugins and every directory in it becomes
+a row you can choose. A package sitting on the machine beats a fetch of the
+same id: what is here already is what somebody meant.
+
+**And a path, said outright**, which is what `--install ./examples/cargo` is.
+
+#### Updates
+
+A manifest may say what `version` it is. What was installed is remembered in a
+receipt beside it, and a repository offering a higher number is an update: an
+`update` row in `install-plugin`, an `update-plugins` command that lists just
+those, and `textfold --update` from a terminal.
+
+Versions are compared a number at a time, so `1.10.0` is newer than `1.9.0`,
+and anything that is not a number sorts before one, so `1.0.0-rc1` is older
+than `1.0.0`. A plugin that declines to number itself is one nothing is ever an
+update to — better than reinstalling somebody's plugin forever for a version it
+never claimed.
+
+**Nothing is fetched and run on its own.** textfold asks the repositories what
+they have when it starts, on a thread, and what that changes is one line in the
+status bar and a word in the margin of a list. Taking an update is yours. To
+stop it asking at all:
+
+```json
+{ "check_for_updates": false }
+```
+
 
 #### Where it all goes
 
@@ -1794,12 +1928,43 @@ editor.
 
 Colours come from any tree-sitter grammar built as a shared library —
 `tree-sitter build` produces one — opened at the moment a file of that language
-is first shown.
+is first shown. **A plugin can bring its own**: keep the library and the query
+beside the manifest and name them with `${plugin}`, which is the directory the
+manifest was read from, so the plugin works wherever textfold installed it.
+
+```json
+{ "id": "zig", "version": "1.0.0",
+  "languages": { "zig": {
+    "extensions": ["zig"],
+    "grammar": {
+      "library":    "${plugin}/zig.so",
+      "symbol":     "tree_sitter_zig",
+      "highlights": "${plugin}/highlights.scm"
+    }
+  } } }
+```
+
+That is a new language with its own colours, from a plugin, with no change to
+textfold. `symbol` is the grammar's own name and not necessarily yours — check
+it with `nm -D --defined-only zig.so | grep tree_sitter` rather than guessing.
+A grammar that will not load says why in the status bar; it used to mean no
+colours and no explanation, which is an afternoon.
 
 Per language: `extensions`, `filenames` (for the many files with no extension),
-`shebangs`, `line_comment`, `block_comment`, `brackets`, `lsp_id`, `servers`,
-`grammar`. Per server: `name`, `command`, `args`, `roots`, `settings`,
-`init_options`, `env`.
+`filename_patterns`, `shebangs`, `line_comment`, `block_comment`, `brackets`,
+`lsp_id`, `servers`, `grammar`. Per server: `name`, `command`, `args`, `roots`,
+`settings`, `init_options`, `env`.
+
+`filename_patterns` is for the files that are neither a whole name nor an
+extension. `Dockerfile.dev` and `prod.Dockerfile` are both everywhere and
+neither is reachable any other way:
+
+```json
+{ "filename_patterns": ["Dockerfile*", "*.Dockerfile"] }
+```
+
+A whole name wins over an extension, an extension over a pattern, and among
+patterns the longest one.
 
 A language named by more than one plugin **merges** field by field, in the
 order the plugins load, so adding a server to Rust is three lines and does not
@@ -1858,6 +2023,9 @@ is without any of that being written into the editor as a special case:
 | `${venv_bin}` | the `bin` (or `Scripts`) inside it |
 | `${python}` | the interpreter inside it |
 | `${root}` | the project root |
+| `${java_home}` | a JDK new enough to run a Java language server — see [Java](#java) |
+| `${java}` | the `java` inside it |
+| `${java_runtimes}` | every JDK here, in the shape jdtls' `java.configuration.runtimes` wants |
 | `${env:NAME}` | an environment variable, as textfold was started with |
 
 A value naming an environment on a project that has none is dropped whole
@@ -1865,6 +2033,11 @@ rather than half-filled — the setting simply is not sent, which is right: a
 `pythonPath` pointing at nothing because a substitution left a hole is worse
 than no `pythonPath`. A server that mentions no placeholder is never even
 looked up, so this costs nothing for every other language.
+
+`${java_runtimes}` is a list rather than a string, and a value that is nothing
+but one placeholder is replaced by the whole value. That is the only way a
+manifest can ask for something whose length it cannot know — how many JDKs a
+machine has is not a thing anybody can write down in advance.
 
 `roots` matters more than it looks. It is the marker files that say where a
 project starts; the nearest ancestor holding one is the directory the server is
