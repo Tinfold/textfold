@@ -5292,6 +5292,82 @@ impl App {
         }
     }
 
+    /// Pick a plugin to have an opinion about.
+    fn open_plugin_settings_picker(&mut self) {
+        let rows: Vec<Row> = crate::plugin::all()
+            .iter()
+            .map(|plugin| {
+                let mine = crate::plugin::settings_path(&plugin.id)
+                    .is_some_and(|path| path.is_file());
+                Row::new(
+                    plugin.name.clone(),
+                    Choice::PluginSettings(plugin.id.clone()),
+                )
+                .detail(format!("{} — {}", plugin.id, plugin.detail()))
+                .tag(match mine {
+                    true => "yours",
+                    false => "default",
+                })
+            })
+            .collect();
+        self.overlay = Overlay::Picker(Picker::new(Kind::Plugins, rows));
+    }
+
+    /// What the plugin ships on the left, what you say about it on the right.
+    ///
+    /// Two panes rather than one file, because the question anybody has while
+    /// writing this is *what could I say here* — and the answer is the thing
+    /// on the left, which is why Sublime has shown its defaults beside your
+    /// settings for twenty years. The left one is read-only: it is the
+    /// plugin's, it is replaced whole every time the plugin updates, and
+    /// editing it would be writing into the one file an update throws away.
+    fn edit_plugin_settings(&mut self, id: &str) {
+        let Some(plugin) = crate::plugin::find(id) else {
+            return self.say_bad(format!("there is no plugin called {id}"));
+        };
+        let Some(path) = crate::plugin::settings_path(id) else {
+            return self.say_bad("there is nowhere to keep settings on this machine");
+        };
+        // Made the first time you ask, with the shape of the thing in it, so
+        // that an empty file is not a blank page and a guess.
+        if !path.exists() {
+            if let Some(dir) = path.parent()
+                && let Err(e) = std::fs::create_dir_all(dir)
+            {
+                return self.say_bad(format!("{}: {e}", dir.display()));
+            }
+            if let Err(e) = std::fs::write(&path, crate::plugin::settings_stub(plugin)) {
+                return self.say_bad(format!("{}: {e}", path.display()));
+            }
+        }
+
+        // The shipped half, in a buffer of its own that nothing types into.
+        let shipped = self.new_scratch();
+        if let Some(doc) = self.doc_mut(shipped) {
+            doc.name = format!("{id} (shipped)");
+            doc.rope = ropey::Rope::from_str(&crate::plugin::shipped_manifest(plugin));
+            doc.language = lang::by_name("json").unwrap_or(LangId::PLAIN);
+            doc.read_only = true;
+            doc.mark_saved();
+        }
+        // Side by side, whatever the panes were doing before: this is a
+        // comparison, and a comparison stacked one above the other is two
+        // half-height windows on two long files.
+        while self.ordinary_panes() > 1 {
+            if let Some(at) = self.panes.iter().rposition(|p| p.dock.is_none()) {
+                self.panes.remove(at);
+            }
+        }
+        self.focus = self.beside_the_docks().unwrap_or(0);
+        self.side_by_side = true;
+        self.show(shipped);
+        self.run(Cmd::SPLIT);
+        self.open_path(&path);
+        self.say(format!(
+            "{id}: what it ships on the left, what you say on the right"
+        ));
+    }
+
     // ---- Installing one ----
 
     /// Everything textfold could fetch: a plugin that is here and needs a
@@ -5833,6 +5909,7 @@ impl App {
                 self.toggle_plugin(&id);
                 self.redraw_list(Self::open_plugins_picker);
             }
+            Choice::PluginSettings(id) => self.edit_plugin_settings(&id),
             Choice::Install(id) => self.start_install(&id),
             Choice::Uninstall(id) => self.start_uninstall(&id),
         }
@@ -10620,6 +10697,8 @@ commands! {
         |app| app.bring_back_session();
     PLUGINS => "plugins", View, Passive, "Turn languages and language servers on or off",
         |app| app.open_plugins_picker();
+    PLUGIN_SETTINGS => "plugin-settings", View, Passive, "Change what a plugin is told, and keep it across updates",
+        |app| app.open_plugin_settings_picker();
     INSTALL_PLUGIN => "install-plugin", View, Passive, "Install a plugin, or what one needs to work",
         |app| app.open_install_picker();
     UNINSTALL_PLUGIN => "uninstall-plugin", View, Passive, "Take a plugin off this machine",
@@ -12746,6 +12825,44 @@ mod tests {
             opens_panel: true,
             dock,
         }))
+    }
+
+    #[test]
+    fn plugin_settings_open_beside_what_they_are_overriding() {
+        // The question anybody has while writing this is *what could I say
+        // here*, and the answer is the manifest — which is why it opens
+        // beside, and why the manifest half is read-only: it is the file an
+        // update throws away.
+        let (mut app, _rx) = editor();
+        if crate::plugin::settings_dir().is_none() {
+            return;
+        }
+        // A plugin that is certainly there, and a settings file that is
+        // certainly not, so this makes one and does not tread on a real one.
+        let id = "rust";
+        let path = crate::plugin::settings_path(id).expect("a path");
+        let existed = path.exists();
+        if existed {
+            return;
+        }
+        app.edit_plugin_settings(id);
+
+        assert_eq!(app.ordinary_panes(), 2, "{}", app.status.text);
+        assert!(app.side_by_side, "stacked is two half-height windows");
+        let left = app.doc(app.panes[0].doc).expect("the shipped half");
+        assert!(left.read_only, "the manifest is not yours to edit");
+        assert!(left.name.contains("shipped"), "{}", left.name);
+        assert!(
+            left.rope.to_string().contains("\"id\": \"rust\""),
+            "the left pane is not the manifest"
+        );
+        let right = app.doc(app.panes[1].doc).expect("yours");
+        assert_eq!(right.path.as_deref(), Some(path.as_path()));
+        assert!(!right.read_only, "yours is the half you write in");
+        // Made with the shape of the thing in it, rather than as a blank page.
+        assert!(right.rope.to_string().contains("_about"), "no stub was written");
+
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]

@@ -36,6 +36,7 @@ textfold                         # an empty buffer
 - [Git](#git)
 - [Reading what a language server says](#reading-what-a-language-server-says)
 - [Plugins](#plugins)
+  - [Settings for a plugin](#settings-for-a-plugin)
   - [Installing a plugin](#installing-a-plugin)
   - [Where packages come from](#where-packages-come-from)
   - [Updates](#updates)
@@ -1210,6 +1211,56 @@ is read, so `"python/ruff": false` goes on meaning what it meant.
 
 Per plugin: `id`, `name`, `about`, `version`, `enabled` (say `false` to ship
 one switched off), and the contribution tables above.
+
+### Settings for a plugin
+
+**What you say about a plugin goes in a file of your own, never in the
+plugin.** A plugin's directory is replaced whole when it updates — that is
+what updating is — so anything written in there is gone the next time a newer
+version arrives. Settings a package manager destroys are settings nobody can
+afford to write.
+
+So yours are a layer *over* the manifest:
+
+```
+~/.config/textfold/plugin-settings/jdtls.json
+```
+
+```json
+{
+  "servers": {
+    "jdtls": {
+      "settings": { "java": { "format": { "enabled": false } } },
+      "env": { "JDTLS_JVM_ARGS": "-Xmx2G" }
+    }
+  }
+}
+```
+
+`plugin-settings` in the palette is the way in: pick a plugin and it opens
+**what it ships on the left, what you say on the right**, which is the one
+arrangement that answers *what could I even put here*. The left half is
+read-only — it is the plugin's, and it is the file an update throws away.
+
+Objects merge key by key, so saying something about `java.format` leaves
+`java.completion` exactly as the plugin shipped it, and an update changes the
+parts you never touched. Lists and everything else replace, because otherwise
+there would be no way to *shorten* a list you cannot see.
+
+| | |
+|---|---|
+| `enabled` | whether it is on |
+| `settings` | over what the plugin's own program is told at startup |
+| `servers.<name>` | over one of its language servers: `settings`, `init_options`, `env`, `args`, `roots`, `command` |
+
+`env` merges too, so naming one variable does not drop the others. What you
+cannot say is anything about what a plugin *is* — its id, its commands, what
+it needs, how to install it. Those are the plugin, not your opinion of it, and
+the file is refused rather than half-obeyed if it tries.
+
+Everything else you set already lived outside the plugin and always survived:
+what is switched off (`plugins` in `config.json`), your keys, and
+`languages.json`.
 
 **A plugin's keys are a suggestion, not a claim.** One is bound only if
 nothing already wants that key, so a plugin cannot quietly take Ctrl-S, and a

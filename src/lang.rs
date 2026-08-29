@@ -854,6 +854,28 @@ impl FileServer {
             .to_lowercase()
     }
 
+    /// Lay somebody's own settings over what the plugin shipped for this
+    /// server. See [`crate::plugin::settings_dir`].
+    ///
+    /// Named parts replace, `settings` and `init_options` merge key by key,
+    /// and `env` merges too — naming one variable should not drop the others.
+    pub fn apply_override(&mut self, said: &crate::plugin::FileServerOverride) {
+        if let Some(command) = said.command() {
+            self.command = command.to_string();
+        }
+        if let Some(args) = said.args() {
+            self.args = args.to_vec();
+        }
+        if let Some(roots) = said.roots() {
+            self.roots = roots.to_vec();
+        }
+        crate::plugin::merge_into(&mut self.settings, said.settings());
+        crate::plugin::merge_into(&mut self.init_options, said.init_options());
+        for (name, value) in said.env() {
+            self.env.insert(name.clone(), value.clone());
+        }
+    }
+
     /// What a manifest's server becomes in the table, given the plugin it came
     /// from. One place that says it, so a test can build one the same way the
     /// registry does rather than a slightly different way.
@@ -1164,6 +1186,7 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
 
 
 

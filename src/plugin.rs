@@ -692,8 +692,15 @@ fn load() -> Registry {
     };
 
     for (id, text) in LANGUAGES.iter() {
-        let file: FilePlugin = serde_json::from_str(text)
+        let mut file: FilePlugin = serde_json::from_str(text)
             .expect("the plugins textfold ships are checked by a test");
+        // What ships is settable too. There is no reason a language built into
+        // the binary should be the one thing you cannot have an opinion about.
+        let (said, problem) = read_override(id);
+        it.problems.extend(problem);
+        if let Some(said) = said {
+            file.apply_override(said);
+        }
         let (plugin, problems) = file.into_plugin(id, Source::BuiltIn);
         debug_assert!(problems.is_empty(), "{id}: {problems:?}");
         it.add(plugin);
@@ -705,7 +712,23 @@ fn load() -> Registry {
     for (id, path) in manifests(&dir.join("plugins")) {
         match std::fs::read_to_string(&path) {
             Ok(text) => match serde_json::from_str::<FilePlugin>(&text) {
-                Ok(file) => {
+                Ok(mut file) => {
+                    // Your settings, over the top of what it shipped — see
+                    // [`settings_dir`]. Applied to the manifest as read rather
+                    // than to the plugin afterwards, so that everything
+                    // downstream sees one plugin and none of it has to know
+                    // there were two files.
+                    let id = file
+                        .id
+                        .as_deref()
+                        .map(|said| said.trim().to_lowercase())
+                        .filter(|said| !said.is_empty())
+                        .unwrap_or_else(|| id.clone());
+                    let (said, problem) = read_override(&id);
+                    it.problems.extend(problem);
+                    if let Some(said) = said {
+                        file.apply_override(said);
+                    }
                     let (plugin, problems) = file.into_plugin(&id, Source::File(path));
                     it.problems.extend(problems);
                     it.add(plugin);
@@ -736,6 +759,240 @@ fn load() -> Registry {
         }
     }
     it
+}
+
+// ---------------------------------------------------------------------------
+// What you have said about a plugin
+// ---------------------------------------------------------------------------
+
+/// Where your own settings for a plugin go: one file per plugin, by id.
+///
+/// **Not inside the plugin.** A plugin's directory is replaced whole when it
+/// is updated — that is what updating is — so anything written in there is
+/// gone the next time a newer version arrives. Settings that a package
+/// manager destroys are settings nobody can afford to write, and an editor
+/// that punished you for configuring it would not deserve to be configured.
+///
+/// So yours are a layer *over* the manifest rather than an edit *to* it,
+/// which is how Sublime Text has always done this and is the part of it worth
+/// copying: the plugin ships its defaults, you keep a file of what you
+/// disagree with, and an update changes the first without touching the second.
+pub fn settings_dir() -> Option<PathBuf> {
+    Some(crate::config::config_dir()?.join("plugin-settings"))
+}
+
+/// Your file for one plugin, whether or not it exists yet.
+pub fn settings_path(id: &str) -> Option<PathBuf> {
+    // An id is a lowercased word from a manifest, but a manifest is a thing
+    // people write, and a `../` in one must not name a file elsewhere.
+    let safe = id.replace(['/', '\\'], "-");
+    let safe = safe.trim_matches('.');
+    (!safe.is_empty()).then(|| settings_dir().map(|d| d.join(format!("{safe}.json"))))?
+}
+
+/// What you have said about one plugin, if anything.
+///
+/// The shape mirrors the parts of a manifest that are *configuration* rather
+/// than *identity*: what a plugin's own program is told about itself, and what
+/// each of its servers is told. Nothing here can change what a plugin is —
+/// its id, its commands, what it says it needs — because those are the
+/// plugin, not your opinion of it.
+#[derive(Deserialize, Default, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct FileOverride {
+    /// Notes to yourself. JSON has nowhere to put a comment.
+    #[serde(default, rename = "_about")]
+    _about: Option<serde_json::Value>,
+    /// Whether it is on, said outright. The same thing the plugins list
+    /// writes into `config.json`, allowed here too so that everything about
+    /// one plugin can live in one file.
+    #[serde(default)]
+    enabled: Option<bool>,
+    /// Merged over what the plugin's own program is told at `initialize`.
+    #[serde(default)]
+    settings: Option<serde_json::Value>,
+    /// Merged over what one of its language servers is told, by server name.
+    #[serde(default)]
+    servers: BTreeMap<String, FileServerOverride>,
+}
+
+/// What you have said about one language server inside a plugin.
+#[derive(Deserialize, Default, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct FileServerOverride {
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    #[serde(default)]
+    roots: Option<Vec<String>>,
+    #[serde(default)]
+    settings: Option<serde_json::Value>,
+    #[serde(default)]
+    init_options: Option<serde_json::Value>,
+    /// Merged key by key, so naming one variable does not drop the others.
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+}
+
+impl FileServerOverride {
+    pub fn command(&self) -> Option<&str> {
+        self.command.as_deref()
+    }
+    pub fn args(&self) -> Option<&[String]> {
+        self.args.as_deref()
+    }
+    pub fn roots(&self) -> Option<&[String]> {
+        self.roots.as_deref()
+    }
+    pub fn settings(&self) -> Option<&serde_json::Value> {
+        self.settings.as_ref()
+    }
+    pub fn init_options(&self) -> Option<&serde_json::Value> {
+        self.init_options.as_ref()
+    }
+    pub fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
+    }
+}
+
+/// The manifest a plugin ships, as text.
+///
+/// Read afresh rather than printed back from the registry, because the
+/// registry has already had your own settings merged into it — and the whole
+/// point of showing this is that it is the half you did *not* write.
+pub fn shipped_manifest(plugin: &Plugin) -> String {
+    match &plugin.source {
+        Source::File(path) => std::fs::read_to_string(path)
+            .unwrap_or_else(|e| format!("{}: {e}\n", path.display())),
+        Source::BuiltIn => LANGUAGES
+            .iter()
+            .find(|(id, _)| *id == plugin.id)
+            .map(|(_, text)| (*text).to_string())
+            .unwrap_or_else(|| format!("{} is built in and has no file.\n", plugin.id)),
+    }
+}
+
+/// A first draft of your own settings file for a plugin: the shape of the
+/// thing, with the names it actually has in it.
+///
+/// A file made empty is a blank page and a guess. This is the difference
+/// between "there is somewhere to write this" and "and here is what goes in
+/// it" — and the manifest opened beside it answers the rest.
+pub fn settings_stub(plugin: &Plugin) -> String {
+    let mut about = vec![
+        format!("Your settings for {}, laid over what it ships.", plugin.id),
+        String::new(),
+        "The manifest beside this is what you are overriding. That file is          replaced whole every time the plugin updates; this one is never          touched, which is the point of it being a separate file."
+            .to_string(),
+        String::new(),
+        "Objects merge key by key, so saying something about one setting          leaves the rest alone. Lists and everything else replace."
+            .to_string(),
+    ];
+    let mut body = serde_json::Map::new();
+    if plugin.host.is_some() {
+        about.push(String::new());
+        about.push(
+            "`settings` is what this plugin's own program is told about itself              at startup."
+                .to_string(),
+        );
+        body.insert("settings".into(), serde_json::json!({}));
+    }
+    if !plugin.servers.is_empty() {
+        about.push(String::new());
+        about.push(
+            "`servers` is by server name, and each may say `settings`,              `init_options`, `env`, `args`, `roots` or `command`."
+                .to_string(),
+        );
+        let mut servers = serde_json::Map::new();
+        for server in &plugin.servers {
+            servers.insert(server.name.clone(), serde_json::json!({ "settings": {} }));
+        }
+        body.insert("servers".into(), serde_json::Value::Object(servers));
+    }
+    if body.is_empty() {
+        about.push(String::new());
+        about.push(
+            "This plugin runs nothing, so there is nothing to configure beyond              whether it is on."
+                .to_string(),
+        );
+        body.insert("enabled".into(), serde_json::json!(true));
+    }
+    let mut out = serde_json::Map::new();
+    out.insert("_about".into(), serde_json::json!(about));
+    out.extend(body);
+    serde_json::to_string_pretty(&serde_json::Value::Object(out))
+        .unwrap_or_else(|_| "{}".into())
+        + "\n"
+}
+
+/// Read what you have said about a plugin.
+fn read_override(id: &str) -> (Option<FileOverride>, Option<String>) {
+    let Some(path) = settings_path(id) else {
+        return (None, None);
+    };
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return (None, None);
+    };
+    // An empty file is somebody who opened it and has not written anything
+    // yet, which is not a mistake worth complaining about.
+    if text.trim().is_empty() {
+        return (None, None);
+    }
+    match serde_json::from_str::<FileOverride>(&text) {
+        Ok(said) => (Some(said), None),
+        Err(e) => (None, Some(format!("{}: {}", path.display(), said(&e)))),
+    }
+}
+
+/// Put one JSON value on top of another.
+///
+/// Objects merge key by key, and everything else is replaced whole. That is
+/// the rule Sublime uses and the one people expect: saying something about
+/// `java.format` should not throw away `java.completion`, and giving a list
+/// should give *that* list rather than appending to one you cannot see.
+fn merge(base: &mut serde_json::Value, over: &serde_json::Value) {
+    match (base, over) {
+        (serde_json::Value::Object(base), serde_json::Value::Object(over)) => {
+            for (key, value) in over {
+                match base.get_mut(key) {
+                    Some(slot) => merge(slot, value),
+                    None => {
+                        base.insert(key.clone(), value.clone());
+                    }
+                }
+            }
+        }
+        (base, over) => *base = over.clone(),
+    }
+}
+
+/// Merge one value into an optional one, making it if there was none.
+pub fn merge_into(base: &mut Option<serde_json::Value>, over: Option<&serde_json::Value>) {
+    let Some(over) = over else { return };
+    match base {
+        Some(base) => merge(base, over),
+        None => *base = Some(over.clone()),
+    }
+}
+
+impl FilePlugin {
+    /// Lay your settings over what the plugin shipped.
+    fn apply_override(&mut self, said: FileOverride) {
+        if let Some(enabled) = said.enabled {
+            self.enabled = Some(enabled);
+        }
+        if let Some(host) = &mut self.host {
+            merge_into(&mut host.settings, said.settings.as_ref());
+        }
+        for language in self.languages.values_mut() {
+            for server in language.servers.iter_mut().flatten() {
+                if let Some(over) = said.servers.get(&server.plugin_name()) {
+                    server.apply_override(over);
+                }
+            }
+        }
+    }
 }
 
 /// Read a manifest that has not been installed yet, as the plugin it would be.
@@ -1205,6 +1462,7 @@ impl FilePlugin {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn the_plugins_textfold_ships_all_read() {
@@ -1589,6 +1847,100 @@ mod tests {
         .unwrap();
         let (_, problems) = file.into_plugin("p", Source::BuiltIn);
         assert_eq!(problems, ["p: go is a command, so it cannot be docked"]);
+    }
+
+    #[test]
+    fn your_settings_go_over_the_manifest_rather_than_into_it() {
+        // The whole reason this exists: a plugin's directory is replaced whole
+        // when it updates, so anything written inside it is destroyed. Yours
+        // are a layer over the top, in a file an update never touches.
+        let mut file: FilePlugin = serde_json::from_str(
+            r#"{"id":"jdtls",
+                "languages":{"java":{"servers":[{
+                  "name":"jdtls","command":"jdtls","args":["-data","x"],
+                  "env":{"JAVA_HOME":"/usr/lib/jvm/21"},
+                  "settings":{"java":{
+                    "format":{"enabled":true},
+                    "maven":{"downloadSources":true}}}}]}}}"#,
+        )
+        .unwrap();
+        let said: FileOverride = serde_json::from_str(
+            r#"{"servers":{"jdtls":{
+                 "settings":{"java":{"format":{"enabled":false}}},
+                 "env":{"JDTLS_JVM_ARGS":"-Xmx2G"}}}}"#,
+        )
+        .unwrap();
+        file.apply_override(said);
+        let (plugin, problems) = file.into_plugin("jdtls", Source::BuiltIn);
+        assert!(problems.is_empty(), "{problems:?}");
+
+        let server = plugin.languages["java"].servers.as_ref().unwrap()[0].clone();
+        let server = server.into_server("jdtls");
+        let settings = server.settings.expect("settings");
+        // What you said won.
+        assert_eq!(settings.pointer("/java/format/enabled"), Some(&json!(false)));
+        // And what you did not say is still there — the point of merging key
+        // by key rather than replacing the block.
+        assert_eq!(
+            settings.pointer("/java/maven/downloadSources"),
+            Some(&json!(true)),
+            "saying one thing threw away the rest: {settings}"
+        );
+        // The same for the environment, and for everything not mentioned.
+        assert_eq!(server.env.get("JDTLS_JVM_ARGS").map(String::as_str), Some("-Xmx2G"));
+        assert_eq!(
+            server.env.get("JAVA_HOME").map(String::as_str),
+            Some("/usr/lib/jvm/21"),
+            "naming one variable dropped the others"
+        );
+        assert_eq!(server.args, ["-data", "x"]);
+        assert_eq!(server.command, "jdtls");
+    }
+
+    #[test]
+    fn a_list_you_give_is_the_list_rather_than_one_appended_to() {
+        // Objects merge; everything else replaces. Anything else and there
+        // would be no way to *shorten* a list you cannot see.
+        let mut base = json!({"a": {"b": [1, 2, 3], "c": 1}, "d": "keep"});
+        merge(&mut base, &json!({"a": {"b": [9]}}));
+        assert_eq!(base, json!({"a": {"b": [9], "c": 1}, "d": "keep"}));
+
+        // And a value that was not an object before is simply replaced.
+        let mut base = json!({"a": 1});
+        merge(&mut base, &json!({"a": {"b": 2}}));
+        assert_eq!(base, json!({"a": {"b": 2}}));
+    }
+
+    #[test]
+    fn a_settings_file_can_switch_a_plugin_off_and_cannot_change_what_it_is() {
+        let mut file: FilePlugin =
+            serde_json::from_str(r#"{"id":"ruff","name":"Ruff","needs":["ruff"]}"#).unwrap();
+        file.apply_override(serde_json::from_str(r#"{"enabled":false}"#).unwrap());
+        let (plugin, _) = file.into_plugin("ruff", Source::BuiltIn);
+        assert!(!plugin.on_by_default);
+        // Its identity is the plugin's, not your opinion of it — there is no
+        // way to say any of this, and the parser says so rather than ignoring
+        // it quietly.
+        for wrong in [r#"{"id":"mine"}"#, r#"{"needs":["x"]}"#, r#"{"install":[]}"#] {
+            assert!(
+                serde_json::from_str::<FileOverride>(wrong).is_err(),
+                "{wrong} should not be something a settings file can say"
+            );
+        }
+    }
+
+    #[test]
+    fn a_settings_file_is_never_written_outside_where_settings_go() {
+        // The id comes out of a manifest, and a manifest is a thing people
+        // paste.
+        let Some(dir) = settings_dir() else { return };
+        for id in ["../../etc/passwd", "a/b", "..", "."] {
+            match settings_path(id) {
+                Some(path) => assert_eq!(path.parent(), Some(dir.as_path()), "{id}"),
+                None => {}
+            }
+        }
+        assert_eq!(settings_path("pyright"), Some(dir.join("pyright.json")));
     }
 
     #[test]

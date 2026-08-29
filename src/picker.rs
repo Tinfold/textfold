@@ -48,6 +48,8 @@ pub enum Choice {
     },
     Theme(String),
     Language(LangId),
+    /// Edit your own settings for a plugin, beside what it shipped.
+    PluginSettings(String),
     /// Something a language server offered to do about the code.
     Action(ServerId, Box<Value>),
     /// A row a plugin put in a list of its own. The string is whatever the
