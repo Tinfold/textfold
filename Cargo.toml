@@ -36,6 +36,14 @@ tree-sitter-c-sharp = "0.23.5"
 tree-sitter-java = "0.23.5"
 tree-sitter-containerfile = "0.9.2"
 
+# Only to kill a process *group*. A language server or a plugin is very often
+# a program that starts another program — the Copilot plugin is Python that
+# runs node — and killing the one we spawned leaves the other one running,
+# holding a quarter of a gigabyte, parented to init, for the rest of the day.
+# There is no way to say "and everything it started" in the standard library.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # Dependencies are built with optimisation even in a debug build. Half of
 # textfold's work happens inside tree-sitter's C, and at -O0 that is slow
 # enough to be mistaken for a hang on a large file — which is not a useful

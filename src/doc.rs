@@ -1087,6 +1087,22 @@ impl Document {
         self.path = Some(path);
     }
 
+    /// Throw away everything that could be undone.
+    ///
+    /// For a buffer whose text is not yours: a plugin's panel is replaced
+    /// whole every time the plugin has something new to say, and each of those
+    /// would otherwise push a revision holding the entire old text and the
+    /// entire new one. A file tree that redraws on every keystroke would grow
+    /// a history of every shape it has ever had, and none of it is reachable —
+    /// undo in a read-only buffer has nothing to give you back.
+    pub fn forget_history(&mut self) {
+        self.done.clear();
+        self.undone.clear();
+        // Nothing was undone and nothing is pending, so it is exactly what
+        // was last put in it.
+        self.saved_at = Some(0);
+    }
+
     /// Look at the file and say whether somebody else has written it.
     ///
     /// A `stat`, which is cheap, rather than a read. Called on a timer for
@@ -1268,6 +1284,41 @@ mod tests {
 
     fn sel(at: usize) -> Selections {
         Selections::single(Range::point(at))
+    }
+
+    #[test]
+    fn a_buffer_refilled_a_thousand_times_remembers_none_of_it() {
+        // A plugin's panel is replaced whole every time the plugin has
+        // something new to say. Without this, a file tree that redraws on each
+        // keystroke grows a revision holding the whole old text for every
+        // shape it has ever had — unbounded, and unreachable, since undo in a
+        // buffer you cannot type into has nothing to give back.
+        let mut d = doc("");
+        for round in 0..1000 {
+            let was = d.len_chars();
+            let text = format!("line one of round {round}\nline two\nline three\n");
+            d.apply_atomic(vec![Change::replace(0, was, text)], &sel(0));
+            d.mark_saved();
+            d.forget_history();
+        }
+        assert!(d.done.is_empty(), "{} revisions kept", d.done.len());
+        assert!(d.undone.is_empty());
+        assert!(!d.is_modified(), "it should read as exactly what was put in");
+
+        // And undo has nothing to give back, which is the point: the history
+        // is not merely hidden, it is gone.
+        let before = d.rope.to_string();
+        d.undo();
+        assert_eq!(d.rope.to_string(), before);
+
+        // Without forgetting, the same thousand rounds keep a thousand
+        // revisions — this is what the leak looked like.
+        let mut d = doc("");
+        for round in 0..50 {
+            let was = d.len_chars();
+            d.apply_atomic(vec![Change::replace(0, was, format!("round {round}\n"))], &sel(0));
+        }
+        assert_eq!(d.done.len(), 50, "the history really does grow otherwise");
     }
 
     fn scratch_dir(name: &str) -> PathBuf {

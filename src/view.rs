@@ -138,6 +138,14 @@ pub struct View {
     /// How wide the line numbers were, so a click on them is not read as a
     /// click on the text.
     pub gutter: u16,
+    /// The divider along a docked pane's inner edge: one column down the side
+    /// facing the middle, or one row along the top of a bottom dock.
+    ///
+    /// It is drawn, and it is what you drag to resize. A sidebar whose width
+    /// could only be set in a settings file would be a sidebar of the wrong
+    /// width, because the right width depends on the project and the terminal
+    /// and neither of those is knowable in advance.
+    pub grip: Option<Rect>,
     /// Whether this pane folds long lines. Taken from the settings when the
     /// pane is made, and changed per pane after that.
     pub wrap: bool,
@@ -159,6 +167,7 @@ impl View {
         Self {
             doc,
             dock: None,
+            grip: None,
             sel: Selections::default(),
             top: 0,
             top_row: 0,

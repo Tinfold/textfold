@@ -1772,6 +1772,19 @@ A plugin is handed its own `settings` from the manifest at `initialize`. The
 editor carries that block and does not read it: what a plugin wants to be told
 about itself is the plugin's business.
 
+**Nothing a plugin starts outlives the editor.** Every language server and
+every plugin is spawned into a process group of its own, and stopping one
+signals the whole group — so a plugin that is Python running node, or a script
+running a JVM, takes all of it with it. On Linux each one also carries
+`PDEATHSIG`, so an editor killed outright, with no chance to say goodbye, does
+not leave a language server behind either.
+
+This is not housekeeping. A leaked `copilot-language-server` holds about a
+quarter of a gigabyte and is reparented to init, where nothing will ever
+collect it; seven of them is a laptop that stops responding. A plugin should
+still stop what it started — the editor sweeping up after it is the safety
+net, not the plan — and the `copilot` plugin shows the shape of it.
+
 The last four are the editor's own boxes, lent out. A plugin asking "which
 board?" gets the same fuzzy list as `Ctrl-P`, with the same keys, the same
 colours and the same theme — which is the point: a plugin should look like

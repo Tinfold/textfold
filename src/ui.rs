@@ -117,6 +117,27 @@ fn place_panes(app: &mut App, body: Rect) {
             }
         };
 
+        // A docked pane keeps one cell along the edge facing the middle for
+        // the divider you drag it by. Taken out of the room the text gets,
+        // not added to the room the dock takes, so what a plugin asked for is
+        // what the dock occupies.
+        let (grip, inner) = match app.panes[index].dock.map(|d| d.edge) {
+            _ if frame.width == 0 || frame.height == 0 => (None, frame),
+            Some(Edge::Left) => (
+                Some(Rect::new(frame.right() - 1, frame.y, 1, frame.height)),
+                Rect::new(frame.x, frame.y, frame.width - 1, frame.height),
+            ),
+            Some(Edge::Right) => (
+                Some(Rect::new(frame.x, frame.y, 1, frame.height)),
+                Rect::new(frame.x + 1, frame.y, frame.width - 1, frame.height),
+            ),
+            Some(Edge::Bottom) => (
+                Some(Rect::new(frame.x, frame.y, frame.width, 1)),
+                Rect::new(frame.x, frame.y + 1, frame.width, frame.height - 1),
+            ),
+            None => (None, frame),
+        };
+
         let id = app.panes[index].doc;
         let lines = app.doc(id).map(Document::len_lines).unwrap_or(1);
         let numbers = match app.config.line_numbers() {
@@ -139,20 +160,25 @@ fn place_panes(app: &mut App, body: Rect) {
         // a file long enough would have taken a digit with it.
         // A docked pane is a plugin's own surface. Line numbers down a tree of
         // file names are noise, and the room they take is room the names
-        // needed — so a dock gets the focus rule and nothing else.
-        let numbers = match app.panes[index].dock.is_some() {
+        // needed — and the divider is already the line that says where the
+        // pane ends, so it needs no focus rule either.
+        let docked = app.panes[index].dock.is_some();
+        let gutter = match docked {
             true => 0,
-            false => numbers,
+            false => numbers + rule_width(app.panes.len() as u16),
         };
-        let gutter = numbers + rule_width(app.panes.len() as u16);
         // A scroll bar down the right, except in a pane too narrow to spare it.
-        let bar = if frame.width > 20 { 1 } else { 0 };
-        let text_width = frame.width.saturating_sub(gutter + bar).max(1);
+        let bar = if inner.width > 20 { 1 } else { 0 };
+        let text_width = inner.width.saturating_sub(gutter + bar).max(1);
 
         let pane = &mut app.panes[index];
+        // The whole rectangle, divider included, because that is what decides
+        // which pane a click was in — and a click on the divider is a click on
+        // the dock it belongs to.
         pane.frame = frame;
-        pane.gutter = gutter;
-        pane.area = Rect::new(frame.x + gutter, frame.y, text_width, frame.height);
+        pane.grip = grip;
+        pane.gutter = gutter + (inner.x - frame.x);
+        pane.area = Rect::new(inner.x + gutter, inner.y, text_width, inner.height);
     }
 }
 
@@ -293,6 +319,33 @@ fn draw_pane(frame: &mut Frame, app: &App, index: usize, ground: Color) -> Optio
     let theme = &app.theme;
     let tab_width = app.config.tab_width();
     let focused = index == app.focus.min(app.panes.len() - 1);
+
+    // The divider, and the fact that you can pull it. Drawn brighter where
+    // the pane it belongs to has the focus, for the same reason the focus
+    // rule is: so that "which of these am I typing into" has an answer on the
+    // screen.
+    if let Some(grip) = view.grip {
+        let colour = match focused {
+            true => theme.accent,
+            false => theme.chrome(),
+        };
+        let (line, across) = match view.dock.map(|d| d.edge) {
+            Some(view::Edge::Bottom) => ("\u{2500}", true),
+            _ => ("\u{2502}", false),
+        };
+        let buf = frame.buffer_mut();
+        for step in 0..if across { grip.width } else { grip.height } {
+            let at = match across {
+                true => Position::new(grip.x + step, grip.y),
+                false => Position::new(grip.x, grip.y + step),
+            };
+            if let Some(cell) = buf.cell_mut(at) {
+                cell.set_symbol(line);
+                cell.set_style(Style::new().bg(ground).fg(colour));
+            }
+        }
+    }
+
     let area = view.area;
     if area.width == 0 || area.height == 0 {
         return None;
@@ -2978,8 +3031,19 @@ mod tests {
         sidebar.dock = Some(crate::view::Dock::new(crate::view::Edge::Left, Some(30)));
         app.panes.insert(0, sidebar);
         place_panes(&mut app, Rect::new(0, 1, 100, 28));
-        // One column for the focus rule, and nothing else.
-        assert_eq!(app.panes[0].gutter, 1);
+        // Nothing between the edge and the names. The divider is on the other
+        // side and stands in for the focus rule.
+        assert_eq!(app.panes[0].gutter, 0);
+        assert_eq!(
+            app.panes[0].grip,
+            Some(Rect::new(29, 1, 1, 28)),
+            "the divider should be the dock's inner edge"
+        );
+        // And it comes out of the room the text gets, not out of the room the
+        // dock takes: the dock still occupies the thirty columns asked for.
+        assert_eq!(app.panes[0].frame.width, 30);
+        assert_eq!(app.panes[0].area.x, 0);
+        assert!(app.panes[0].area.right() <= 29);
         assert!(app.panes[1].gutter > 1, "the code still has its numbers");
     }
 

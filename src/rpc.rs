@@ -118,6 +118,43 @@ impl<A> Peer<A> {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
+        // Each peer gets a process group of its own, so that stopping it can
+        // stop **everything it started**.
+        //
+        // This is not a detail. A peer is very often a program that runs
+        // another program — the Copilot plugin is Python that runs node, and
+        // jdtls is a script that runs a JVM — and killing the one we spawned
+        // leaves the other one running. It is reparented to init, it keeps
+        // whatever it had (a quarter of a gigabyte, for Copilot's server), and
+        // nothing will ever collect it. Seven of those is a laptop that stops
+        // responding, which is exactly how this was found.
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+
+        // And the other half of that bargain. A group of its own means the
+        // peer no longer dies with the terminal, so something has to make it
+        // die with the editor even where the editor was given no chance to
+        // say so — a `kill -9`, an out-of-memory kill, a crash in a thread.
+        //
+        // `PDEATHSIG` is the kernel doing it: when the thread that spawned
+        // this child goes, the child is signalled. It reaches the peer itself
+        // rather than its whole tree, so a plugin that starts programs of its
+        // own should still tidy up after itself — but it is the difference
+        // between a language server outliving the editor and not.
+        #[cfg(target_os = "linux")]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(|| {
+                // Safety: this runs in the forked child before `exec`, where
+                // only async-signal-safe calls are allowed. `prctl` is one.
+                libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM);
+                Ok(())
+            });
+        }
+
         let mut child = command.spawn().map_err(|e| match e.kind() {
             std::io::ErrorKind::NotFound => NotStarted::Missing,
             _ => NotStarted::Failed(format!("{}: {e}", spawn.command)),
@@ -245,21 +282,67 @@ impl<A> Peer<A> {
     pub fn stop(&mut self) {
         self.send(&json!({"jsonrpc": "2.0", "id": 0, "method": "shutdown"}));
         self.notify("exit", json!(null));
+        self.end();
+    }
+
+    /// Make sure it is gone, along with anything it started.
+    ///
+    /// Called by [`Peer::stop`] after asking nicely, and by `Drop` where
+    /// nobody asked at all — a panic on the way out must not leave a language
+    /// server behind.
+    fn end(&mut self) {
         self.stdin = None;
-        if let Some(child) = &mut self.child {
-            // A peer that will not go is a peer that gets killed. Waiting on a
-            // wedged process is how editors hang on quit.
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            match child.try_wait() {
-                Ok(Some(_)) => {}
-                _ => {
-                    child.kill().ok();
-                    child.wait().ok();
-                }
-            }
+        self.pending.clear();
+        let Some(child) = &mut self.child else { return };
+        // A peer that will not go is a peer that gets killed. Waiting on a
+        // wedged process is how editors hang on quit.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if let Ok(Some(_)) = child.try_wait() {
+            // It went on its own — but something it started may not have, so
+            // the group still gets a signal.
+            signal_group(child.id(), false);
+            return;
+        }
+        signal_group(child.id(), false);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        signal_group(child.id(), true);
+        child.kill().ok();
+        child.wait().ok();
+    }
+}
+
+impl<A> Drop for Peer<A> {
+    fn drop(&mut self) {
+        self.end();
+    }
+}
+
+/// Signal a peer's whole process group: everything it started, and everything
+/// those started, however deep.
+///
+/// `hard` is `SIGKILL` rather than `SIGTERM`. A language server is given the
+/// chance to go quietly first, because several of them write an index to disk
+/// on the way out and half a written index is worse than none.
+///
+/// The group id is the peer's own pid, because that is what `process_group(0)`
+/// arranges when it is spawned. Negating it is what turns "this process" into
+/// "this group" — the same thing `kill -TERM -1234` does from a shell.
+#[cfg(unix)]
+fn signal_group(pid: u32, hard: bool) {
+    let signal = if hard { libc::SIGKILL } else { libc::SIGTERM };
+    // Safety: `kill` with a negative pid is a signal to a process group. The
+    // group is one we made when the child was spawned, so it holds that child
+    // and its descendants and nothing else — in particular it is never 0,
+    // which would mean *our own* group and would take the editor with it.
+    if pid > 1 {
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), signal);
         }
     }
 }
+
+#[cfg(not(unix))]
+fn signal_group(_pid: u32, _hard: bool) {}
 
 /// Read framed messages off a peer's output until it stops.
 ///
@@ -389,6 +472,105 @@ pub fn log_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Whether a process is still there, by asking the kernel rather than by
+    /// running `ps`.
+    #[cfg(unix)]
+    fn alive(pid: u32) -> bool {
+        // Safety: signal 0 sends nothing and only reports whether the process
+        // exists and could be signalled, which is what it is for.
+        unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn stopping_a_peer_stops_everything_it_started() {
+        // The bug this is about: a peer is very often a program that runs
+        // another program — the Copilot plugin is Python that runs node — and
+        // killing the one we spawned leaves the other one running, reparented
+        // to init, holding a quarter of a gigabyte, forever. Seven of those is
+        // a laptop that stops responding.
+        if !crate::pack::on_path("python3") {
+            return;
+        }
+        let (tx, _rx) = std::sync::mpsc::channel();
+        // A peer that starts a grandchild, says what its pid is, and then sits
+        // there — which is what a plugin with a language server behind it is.
+        let script = "import subprocess,sys;\
+                      c=subprocess.Popen(['sleep','120']);\
+                      sys.stdout.write('PID %d\\n' % c.pid);sys.stdout.flush();\
+                      sys.stdin.read()";
+        let args = vec!["-c".to_string(), script.to_string()];
+        let env = BTreeMap::new();
+        let mut peer: Peer<()> = Peer::start(
+            Spawn {
+                command: "python3",
+                args: &args,
+                root: Path::new("."),
+                env: &env,
+                label: "test",
+            },
+            tx,
+            |_| crate::app::Event::Files(Vec::new()),
+        )
+        .expect("it started");
+
+        // The grandchild's pid, read off the peer's own output. The listening
+        // thread has the pipe, so this is read from the log line it prints —
+        // simpler: give it a moment and find it by what it is.
+        std::thread::sleep(std::time::Duration::from_millis(600));
+        let child = peer.child.as_ref().expect("a child").id();
+        let grandchildren = descendants_of(child);
+        assert!(
+            !grandchildren.is_empty(),
+            "the test peer never started anything, so this proves nothing"
+        );
+        for pid in &grandchildren {
+            assert!(alive(*pid), "{pid} should be running");
+        }
+
+        peer.stop();
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(!alive(child), "the peer itself is still running");
+        for pid in &grandchildren {
+            assert!(
+                !alive(*pid),
+                "{pid} outlived the peer that started it — this is the leak"
+            );
+        }
+    }
+
+    /// Every process under `pid`, out of `/proc`. Linux only, which is where
+    /// this is checked; the behaviour it checks is every unix's.
+    #[cfg(target_os = "linux")]
+    fn descendants_of(pid: u32) -> Vec<u32> {
+        let mut found = Vec::new();
+        let Ok(entries) = std::fs::read_dir("/proc") else {
+            return found;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Ok(other) = name.parse::<u32>() else {
+                continue;
+            };
+            let Ok(status) = std::fs::read_to_string(format!("/proc/{other}/status")) else {
+                continue;
+            };
+            let parent = status
+                .lines()
+                .find_map(|line| line.strip_prefix("PPid:"))
+                .and_then(|said| said.trim().parse::<u32>().ok());
+            if parent == Some(pid) {
+                found.push(other);
+            }
+        }
+        found
+    }
+
+    #[cfg(all(unix, not(target_os = "linux")))]
+    fn descendants_of(_pid: u32) -> Vec<u32> {
+        Vec::new()
+    }
 
     #[test]
     fn a_notification_is_a_method_with_no_id() {

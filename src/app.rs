@@ -1026,6 +1026,13 @@ enum Drag {
     Lines { anchor: usize },
     /// Moving the view with the scroll bar.
     Scrollbar,
+    /// Pulling a docked pane's divider to make it wider or narrower.
+    DockEdge {
+        /// Which pane, by its place in the list. Held rather than looked up
+        /// again, because a drag that started on one sidebar must not jump to
+        /// another if the panes are renumbered underneath it.
+        pane: usize,
+    },
     /// Carrying a tab along the row, to put it somewhere else in the order.
     Tab {
         id: DocId,
@@ -1416,6 +1423,17 @@ impl App {
     fn show(&mut self, id: DocId) {
         self.touch(id);
         self.session_changed();
+        // Never into a sidebar. Standing in a tree of files and asking to open
+        // one of them means open it *in the editor* — a file explorer that
+        // replaced itself with the file you clicked would have thrown away the
+        // tree to show you one leaf of it. The only thing a docked pane ever
+        // shows is the panel it was opened for.
+        if self.panes.get(self.focus).is_some_and(|p| p.dock.is_some())
+            && self.doc(id).is_none_or(|d| d.panel.is_none())
+            && let Some(at) = self.beside_the_docks()
+        {
+            self.focus = at;
+        }
         let at = self.focus.min(self.panes.len() - 1);
         // Somewhere sensible to be if this pane has never shown this file:
         // wherever another pane has it open, and otherwise the top.
@@ -3934,6 +3952,18 @@ impl App {
     /// on an edge.
     fn ordinary_panes(&self) -> usize {
         self.panes.iter().filter(|p| p.dock.is_none()).count()
+    }
+
+    /// The pane in the middle to put something in, from wherever the focus is.
+    ///
+    /// The nearest one after the focus, wrapping — so from a sidebar on the
+    /// left it is the pane immediately to its right, which is the one anybody
+    /// pointing at the sidebar is looking at.
+    fn beside_the_docks(&self) -> Option<usize> {
+        let len = self.panes.len();
+        (0..len)
+            .map(|step| (self.focus + step) % len)
+            .find(|at| self.panes[*at].dock.is_none())
     }
 
     fn focus_pane(&mut self, by: isize) {
@@ -7089,7 +7119,7 @@ impl App {
         self.tell_panel(&plugin, "hint/dropped", json!({ "why": why }));
     }
 
-    /// Everything a plugin's panel says, all at once.    /// Everything a plugin's panel says, all at once.
+    /// Everything a plugin's panel says, all at once.
     ///
     /// The whole panel each time rather than a diff. A panel is tens of lines
     /// and changes a few times a second at worst, so sending the lot is
@@ -7128,9 +7158,30 @@ impl App {
                 .ok_or("a panel needs some lines")?,
         );
 
-        // Replaced the way any other whole-buffer change is, so that the
-        // cursor is carried across a refresh rather than thrown back to the
-        // top of a panel somebody was halfway down.
+        // Where every pane showing this panel was, as a line and a column
+        // rather than as an offset into the text.
+        //
+        // A refresh replaces the whole buffer, and an offset carried through
+        // that lands wherever the mapping puts it — which for a replacement of
+        // everything is the end. That is the bug it looks like: opening a
+        // directory in a file tree sends the panel to the bottom, because the
+        // text got longer and the cursor went with it. A line is what somebody
+        // reading a panel is actually standing on, and a line survives the
+        // lines below it changing.
+        let places: Vec<(usize, usize, usize, usize)> = self
+            .panes
+            .iter()
+            .enumerate()
+            .filter(|(_, pane)| pane.doc == doc_id)
+            .map(|(at, pane)| {
+                let doc = self.doc(doc_id);
+                let (line, column) = doc
+                    .map(|d| d.point_at_char(pane.sel.primary().head))
+                    .unwrap_or((0, 0));
+                (at, line, column, pane.top)
+            })
+            .collect();
+
         let Some(doc) = self.doc_mut(doc_id) else {
             return Err(format!("{wanted} is not open"));
         };
@@ -7146,7 +7197,31 @@ impl App {
             panel.actions = actions;
         }
         doc.mark_saved();
+        // A panel is replaced whole every time the plugin has something new to
+        // say, and every one of those would otherwise leave a revision holding
+        // the whole old text behind it. A tree that redraws on each keystroke
+        // would grow a history of every shape it has ever had — and none of it
+        // is reachable, because undo in a buffer you cannot type into has
+        // nothing to give back.
+        doc.forget_history();
         self.after_edit_to(doc_id, edits, None);
+
+        // And back to the same line, clamped to a panel that may have got
+        // shorter. Put back after the edit has been applied and mapped, so
+        // this is the last word on where the cursor is.
+        for (at, line, column, top) in places {
+            let Some(doc) = self.doc(doc_id) else { break };
+            let line = line.min(doc.len_lines().saturating_sub(1));
+            let start = crate::text::line_start(&doc.rope, line);
+            let end = crate::text::line_end(&doc.rope, line);
+            let head = (start + column).min(end);
+            let top = top.min(doc.len_lines().saturating_sub(1));
+            if let Some(pane) = self.panes.get_mut(at) {
+                pane.sel = Selections::single(Range::point(head));
+                pane.top = top;
+            }
+        }
+        self.scroll_into_view();
         Ok(json!({ "lines": lines }))
     }
 
@@ -8747,6 +8822,14 @@ fn server_rows(plugin: &crate::plugin::Plugin, on: impl Fn(&str) -> bool) -> Vec
         .collect()
 }
 
+/// The least a dock may be dragged down to, and the least it must leave
+/// behind. Kept here rather than in the drawing because a drag has to refuse
+/// the same sizes the layout would have clamped — a width that only looked
+/// right because it was clamped is a width that springs back the moment the
+/// terminal is resized.
+const MIN_DOCK: u16 = 4;
+const MIN_MIDDLE_ROOM: u16 = 20;
+
 /// A line that is nothing but this is a horizontal rule, to be drawn as one.
 pub const RULE: &str = "\u{2500}";
 
@@ -9558,6 +9641,14 @@ impl App {
         self.last_click = Some((now, column, row, count));
         self.click_away_from_suggestions(column, row);
 
+        // A divider, before anything else looks at where the click landed. It
+        // is chrome rather than text, and dragging it is the only thing it
+        // does.
+        if let Some(pane) = self.grip_at(column, row) {
+            self.drag = Some(Drag::DockEdge { pane });
+            return;
+        }
+
         // The context menu is on top of everything, including the list.
         if let Overlay::Menu(m) = &mut self.overlay {
             let area = m.area;
@@ -9936,6 +10027,53 @@ impl App {
         self.scroll_into_view();
     }
 
+    /// Which docked pane's divider is under this point, if any.
+    fn grip_at(&self, column: u16, row: u16) -> Option<usize> {
+        self.panes.iter().position(|pane| {
+            pane.grip.is_some_and(|grip| {
+                column >= grip.x
+                    && column < grip.x + grip.width
+                    && row >= grip.y
+                    && row < grip.y + grip.height
+            })
+        })
+    }
+
+    /// Make a dock as wide, or as tall, as the pointer says.
+    ///
+    /// Measured from the far edge of the dock rather than by how far the
+    /// pointer has moved, so the divider stays under the pointer instead of
+    /// drifting away from it over a long drag.
+    fn resize_dock(&mut self, pane: usize, column: u16, row: u16) {
+        let screen = self.screen;
+        let Some(view) = self.panes.get(pane) else { return };
+        let (Some(dock), frame) = (view.dock, view.frame) else {
+            return;
+        };
+        let wanted = match dock.edge {
+            crate::view::Edge::Left => column.saturating_sub(frame.x) + 1,
+            crate::view::Edge::Right => frame.right().saturating_sub(column),
+            crate::view::Edge::Bottom => frame.bottom().saturating_sub(row),
+        };
+        // Never so narrow there is nothing in it, and never so wide the middle
+        // is squeezed out — the layout clamps the second of those too, but a
+        // size that only looks right because it was clamped is a size that
+        // springs back the moment the terminal is resized.
+        let room = match dock.edge.is_side() {
+            true => screen.width,
+            false => screen.height.saturating_sub(2),
+        };
+        let most = room.saturating_sub(MIN_MIDDLE_ROOM).max(MIN_DOCK);
+        let size = wanted.clamp(MIN_DOCK, most);
+        if let Some(view) = self.panes.get_mut(pane)
+            && let Some(dock) = &mut view.dock
+            && dock.size != size
+        {
+            dock.size = size;
+            self.session_changed();
+        }
+    }
+
     fn drag_to(&mut self, column: u16, row: u16) {
         match self.drag {
             Some(Drag::Popup) => {
@@ -9954,6 +10092,7 @@ impl App {
                 }
             }
             Some(Drag::Scrollbar) => self.scroll_to_bar(row),
+            Some(Drag::DockEdge { pane }) => self.resize_dock(pane, column, row),
             Some(Drag::Tab { id, .. }) => {
                 if let Some(Drag::Tab { at, .. }) = &mut self.drag {
                     *at = (column, row);
@@ -12632,6 +12771,63 @@ mod tests {
         let panel = app.doc(app.panes[0].doc).expect("a buffer");
         assert!(panel.read_only);
         assert_eq!(panel.panel.as_ref().map(|p| p.id.as_str()), Some("files/tree"));
+    }
+
+    #[test]
+    fn opening_a_file_from_a_sidebar_puts_it_beside_the_sidebar() {
+        // A file explorer that replaced itself with the file you clicked would
+        // have thrown away the tree to show you one leaf of it.
+        let (mut app, _rx) = editor();
+        let code = app.view().doc;
+        app.open_panel(docked_panel("files/tree", Some("left"), None));
+        assert_eq!(app.focus, 0, "standing in the sidebar");
+        let sidebar = app.panes[0].doc;
+
+        // Whatever the plugin asked to open goes in the middle.
+        app.run(Cmd::NEW);
+        assert!(app.panes[0].dock.is_some(), "the sidebar is still a sidebar");
+        assert_eq!(
+            app.panes[0].doc, sidebar,
+            "the sidebar was made to show something else"
+        );
+        assert_eq!(app.focus, 1, "and the focus moved out of it");
+        assert_ne!(app.panes[1].doc, code, "the new buffer went in the middle");
+
+        // The one thing a dock does show is the panel it was opened for, so
+        // refreshing it must not be pushed out into the middle.
+        app.focus = 0;
+        app.show(sidebar);
+        assert_eq!(app.focus, 0);
+        assert_eq!(app.panes[0].doc, sidebar);
+    }
+
+    #[test]
+    fn a_sidebar_can_be_pulled_wider_and_narrower() {
+        let (mut app, _rx) = editor();
+        app.screen = Rect::new(0, 0, 100, 30);
+        app.open_panel(docked_panel("files/tree", Some("left"), Some(30)));
+        // What the drawing would have worked out, since a drag measures
+        // against where the pane actually is.
+        app.panes[0].frame = Rect::new(0, 1, 30, 28);
+
+        app.resize_dock(0, 44, 10);
+        assert_eq!(app.panes[0].dock.map(|d| d.size), Some(45));
+
+        app.panes[0].frame = Rect::new(0, 1, 45, 28);
+        app.resize_dock(0, 14, 10);
+        assert_eq!(app.panes[0].dock.map(|d| d.size), Some(15));
+
+        // Never down to nothing, and never so wide the middle is squeezed out
+        // — a width that only looked right because the layout clamped it is a
+        // width that springs back the moment the terminal is resized.
+        app.resize_dock(0, 0, 10);
+        assert_eq!(app.panes[0].dock.map(|d| d.size), Some(MIN_DOCK));
+        app.panes[0].frame = Rect::new(0, 1, MIN_DOCK, 28);
+        app.resize_dock(0, 99, 10);
+        assert_eq!(
+            app.panes[0].dock.map(|d| d.size),
+            Some(100 - MIN_MIDDLE_ROOM)
+        );
     }
 
     #[test]
