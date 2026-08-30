@@ -222,6 +222,14 @@ impl Vars {
                 Some(var) => out.push_str(&std::env::var(var).unwrap_or_default()),
                 None => match self.values.get(name) {
                     Some(value) => out.push_str(value),
+                    // `${tools}` is where textfold puts what it fetched, and
+                    // a plugin that installed something there had until now no
+                    // way to name it afterwards. jdtls is the case: the Java
+                    // debug adapter is a jar the plugin downloads, and the
+                    // server has to be told where it went.
+                    None if name == "tools" => {
+                        out.push_str(&crate::pack::tools_dir()?.display().to_string())
+                    }
                     // Not a fact about this project. `${java_home}` is worked
                     // out from the machine rather than from the directory,
                     // and only when something asks — most projects are not

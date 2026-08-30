@@ -144,8 +144,13 @@ impl Step {
     }
 }
 
-/// One server a plugin contributes, as the list of things you can switch off
-/// needs to know about it.
+/// One server or debug adapter a plugin contributes, as the list of things you
+/// can switch off needs to know about it.
+///
+/// One type for both because from the switch list's point of view they are the
+/// same thing: an id, a name, a program, and the languages it is for. The two
+/// are kept in separate lists on the [`Plugin`] so that the list can still say
+/// which is which.
 #[derive(Clone, Debug)]
 pub struct ServerEntry {
     /// `pyright`, or `pytools/ruff`.
@@ -194,6 +199,20 @@ pub struct Tool {
     pub pattern: Option<String>,
     /// Whether to run it every time the file is saved.
     pub on_save: bool,
+    /// Whether this is what turns a file of its language into something that
+    /// can be run.
+    ///
+    /// A build is an ordinary tool in every respect — a program, run on your
+    /// file, whose complaints go in the margin — and this one flag is the
+    /// whole of what makes it special: it is the one the editor runs *for*
+    /// you, before a debugger, without being asked. You cannot debug `main.c`;
+    /// you debug what `cc -g` made out of it, and an editor that knows how to
+    /// start a debugger but not how to produce the thing it debugs has left
+    /// the interesting half to a terminal in another window.
+    ///
+    /// One per language, first found. A second is a manifest saying two
+    /// different things are *the* build, and there is no answer to which.
+    pub builds: bool,
 }
 
 /// What to do with what a tool printed.
@@ -413,6 +432,9 @@ pub struct Plugin {
     /// What it says about languages, in the shape `languages.json` uses.
     pub languages: BTreeMap<String, FileLang>,
     pub servers: Vec<ServerEntry>,
+    /// The debug adapters it contributes, in the same shape and switched off
+    /// the same way.
+    pub debuggers: Vec<ServerEntry>,
     /// Programs it can run for you, each a command of its own.
     pub tools: Vec<Tool>,
     /// The program it brings with it, if it brings one.
@@ -814,6 +836,21 @@ pub struct FileOverride {
     /// Merged over what one of its language servers is told, by server name.
     #[serde(default)]
     servers: BTreeMap<String, FileServerOverride>,
+    /// The same for its debug adapters, by adapter name. This is where the
+    /// arguments a program is debugged with go, and where you point an
+    /// adapter at a different interpreter from the one it shipped with.
+    #[serde(default)]
+    debuggers: BTreeMap<String, FileDebuggerOverride>,
+    /// The same for the programs it runs on your files, by tool name.
+    ///
+    /// Which matters most for a build. What textfold ships for C is `cc -g -o
+    /// main main.c`, because one file is what somebody has when they first
+    /// press the key and a `Makefile` is not something an editor may assume.
+    /// A project with more than one file in it has a build of its own, and
+    /// this is where you say so: `{"tools": {"cc": {"command": "make",
+    /// "args": []}}}`.
+    #[serde(default)]
+    tools: BTreeMap<String, FileToolOverride>,
 }
 
 /// What you have said about one language server inside a plugin.
@@ -853,6 +890,93 @@ impl FileServerOverride {
     }
     pub fn env(&self) -> &BTreeMap<String, String> {
         &self.env
+    }
+}
+
+/// What you have said about one debug adapter inside a plugin.
+///
+/// `launch` is the field this exists for: it is where you say which arguments
+/// your program takes, or which port to attach to, without copying the rest of
+/// what the plugin shipped.
+#[derive(Deserialize, Default, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct FileDebuggerOverride {
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    #[serde(default)]
+    roots: Option<Vec<String>>,
+    /// Merged key by key, so naming one field leaves the rest as it shipped.
+    #[serde(default)]
+    launch: Option<serde_json::Value>,
+    /// The same, for attaching to something already running.
+    #[serde(default)]
+    attach: Option<serde_json::Value>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+}
+
+impl FileDebuggerOverride {
+    pub fn command(&self) -> Option<&str> {
+        self.command.as_deref()
+    }
+    pub fn args(&self) -> Option<&[String]> {
+        self.args.as_deref()
+    }
+    pub fn roots(&self) -> Option<&[String]> {
+        self.roots.as_deref()
+    }
+    pub fn launch(&self) -> Option<&serde_json::Value> {
+        self.launch.as_ref()
+    }
+    pub fn attach(&self) -> Option<&serde_json::Value> {
+        self.attach.as_ref()
+    }
+    pub fn env(&self) -> &BTreeMap<String, String> {
+        &self.env
+    }
+}
+
+/// What you have said about one tool inside a plugin.
+///
+/// `command` and `args` are the pair this exists for: a tool is a program and
+/// a list of arguments, and the two are very often changed together — the
+/// project that builds with `make` wants no `-g -O0 -o` either. So `args`
+/// replaces rather than merging, exactly as a server's does.
+#[derive(Deserialize, Default, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct FileToolOverride {
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    args: Option<Vec<String>>,
+    #[serde(default)]
+    roots: Option<Vec<String>>,
+    /// How to read a line it printed as a problem. Worth having here because
+    /// a different program prints its complaints differently, and a pattern
+    /// left behind from the one it replaced finds nothing at all.
+    #[serde(default)]
+    pattern: Option<String>,
+    #[serde(default)]
+    on_save: Option<bool>,
+}
+
+impl FileToolOverride {
+    pub fn command(&self) -> Option<&str> {
+        self.command.as_deref()
+    }
+    pub fn args(&self) -> Option<&[String]> {
+        self.args.as_deref()
+    }
+    pub fn roots(&self) -> Option<&[String]> {
+        self.roots.as_deref()
+    }
+    pub fn pattern(&self) -> Option<&str> {
+        self.pattern.as_deref()
+    }
+    pub fn on_save(&self) -> Option<bool> {
+        self.on_save
     }
 }
 
@@ -906,6 +1030,28 @@ pub fn settings_stub(plugin: &Plugin) -> String {
             servers.insert(server.name.clone(), serde_json::json!({ "settings": {} }));
         }
         body.insert("servers".into(), serde_json::Value::Object(servers));
+    }
+    if !plugin.debuggers.is_empty() {
+        about.push(String::new());
+        about.push("`debuggers` is by adapter name. Each may say `launch`, `env`,".into());
+        about.push("`attach`, `args`, `roots` or `command` — `launch` is where the".into());
+        about.push("arguments your program is debugged with go.".into());
+        let mut debuggers = serde_json::Map::new();
+        for debugger in &plugin.debuggers {
+            debuggers.insert(debugger.name.clone(), serde_json::json!({ "launch": {} }));
+        }
+        body.insert("debuggers".into(), serde_json::Value::Object(debuggers));
+    }
+    if !plugin.tools.is_empty() {
+        about.push(String::new());
+        about.push("`tools` is by tool name. Each may say `command`, `args`,".into());
+        about.push("`roots`, `pattern` or `on_save` — this is where a project with".into());
+        about.push("a build of its own says so.".into());
+        let mut tools = serde_json::Map::new();
+        for tool in &plugin.tools {
+            tools.insert(tool.name.clone(), serde_json::json!({ "args": tool.args }));
+        }
+        body.insert("tools".into(), serde_json::Value::Object(tools));
     }
     if body.is_empty() {
         about.push(String::new());
@@ -979,10 +1125,23 @@ impl FilePlugin {
         if let Some(host) = &mut self.host {
             merge_into(&mut host.settings, said.settings.as_ref());
         }
+        for tool in &mut self.tools {
+            // By the name the command palette shows, which is the name
+            // lowercased — so somebody who writes `CC` in their settings gets
+            // the tool they plainly meant.
+            if let Some(over) = said.tools.get(&tool.name.trim().to_lowercase()) {
+                tool.apply_override(over);
+            }
+        }
         for language in self.languages.values_mut() {
             for server in language.servers.iter_mut().flatten() {
                 if let Some(over) = said.servers.get(&server.plugin_name()) {
                     server.apply_override(over);
+                }
+            }
+            for debugger in language.debuggers.iter_mut().flatten() {
+                if let Some(over) = said.debuggers.get(&debugger.plugin_name()) {
+                    debugger.apply_override(over);
                 }
             }
         }
@@ -1212,6 +1371,33 @@ struct FileTool {
     pattern: Option<String>,
     #[serde(default)]
     on_save: Option<bool>,
+    /// Whether this is the language's build — the one F5 runs before it
+    /// debugs. See [`Tool::builds`].
+    #[serde(default)]
+    builds: Option<bool>,
+}
+
+impl FileTool {
+    /// Lay somebody's own settings over what the plugin shipped, by the same
+    /// rules a server's get: what is named replaces, what is not is left
+    /// exactly as it was.
+    fn apply_override(&mut self, said: &FileToolOverride) {
+        if let Some(command) = said.command() {
+            self.command = command.to_string();
+        }
+        if let Some(args) = said.args() {
+            self.args = args.to_vec();
+        }
+        if let Some(roots) = said.roots() {
+            self.roots = roots.to_vec();
+        }
+        if let Some(pattern) = said.pattern() {
+            self.pattern = Some(pattern.to_string());
+        }
+        if let Some(on_save) = said.on_save() {
+            self.on_save = Some(on_save);
+        }
+    }
 }
 
 impl FilePlugin {
@@ -1226,23 +1412,30 @@ impl FilePlugin {
             .filter(|id| !id.is_empty())
             .unwrap_or_else(|| fallback_id.to_lowercase());
         let mut servers = Vec::new();
+        let mut debuggers = Vec::new();
+        // The same server written out for three languages is one switch, not
+        // three: `tsserver` is on or off, and which of JavaScript, TypeScript
+        // and TSX you happen to be looking at is not a thing anybody wants to
+        // decide separately. The same goes for an adapter — `lldb-dap` is C,
+        // C++ and Rust — so both lists are gathered the same way.
+        let gather = |into: &mut Vec<ServerEntry>, name: String, command: &str, language: &str| {
+            if let Some(seen) = into.iter_mut().find(|s: &&mut ServerEntry| s.name == name) {
+                seen.languages.push(language.to_string());
+                return;
+            }
+            into.push(ServerEntry {
+                id: server_id(&id, &name),
+                name,
+                command: command.to_string(),
+                languages: vec![language.to_string()],
+            });
+        };
         for (language, def) in &self.languages {
             for server in def.servers.iter().flatten() {
-                let name = server.plugin_name();
-                // The same server written out for three languages is one
-                // switch, not three: `tsserver` is on or off, and which of
-                // JavaScript, TypeScript and TSX you happen to be looking at
-                // is not a thing anybody wants to decide separately.
-                if let Some(seen) = servers.iter_mut().find(|s: &&mut ServerEntry| s.name == name) {
-                    seen.languages.push(language.clone());
-                    continue;
-                }
-                servers.push(ServerEntry {
-                    id: server_id(&id, &name),
-                    name,
-                    command: server.command.clone(),
-                    languages: vec![language.clone()],
-                });
+                gather(&mut servers, server.plugin_name(), &server.command, language);
+            }
+            for debugger in def.debuggers.iter().flatten() {
+                gather(&mut debuggers, debugger.plugin_name(), &debugger.runs(), language);
             }
         }
         let tools = self
@@ -1274,6 +1467,7 @@ impl FilePlugin {
                     // about the file as it is on disk.
                     stdin: t.stdin.unwrap_or(output == Output::Replace),
                     on_save: t.on_save.unwrap_or(false),
+                    builds: t.builds.unwrap_or(false),
                     pattern: t.pattern,
                     output,
                     name,
@@ -1443,6 +1637,7 @@ impl FilePlugin {
             install,
             uninstall,
             servers,
+            debuggers,
             tools,
             host,
             commands,
@@ -1889,6 +2084,141 @@ mod tests {
         );
         assert_eq!(server.args, ["-data", "x"]);
         assert_eq!(server.command, "jdtls");
+    }
+
+    #[test]
+    fn a_project_with_a_build_of_its_own_can_say_so() {
+        // The one override this had no way of expressing, and the one people
+        // will reach for first. What textfold ships for C is a compile of the
+        // one file in front of you, because one file is what somebody has when
+        // they first press the key. A project of nine files and a `Makefile`
+        // has a build of its own, and there has to be somewhere to say that
+        // without editing a directory an update replaces whole.
+        let mut file: FilePlugin = serde_json::from_str(
+            r#"{"id":"c","tools":[{
+                 "name":"cc","command":"cc","args":["-g","-o","${file_stem}","${file}"],
+                 "languages":["c"],"output":"problems",
+                 "pattern":"%f:%l:%c: %t: %m","builds":true}]}"#,
+        )
+        .unwrap();
+        let said: FileOverride =
+            serde_json::from_str(r#"{"tools":{"cc":{"command":"make","args":[]}}}"#).unwrap();
+        file.apply_override(said);
+        let (plugin, problems) = file.into_plugin("c", Source::BuiltIn);
+        assert!(problems.is_empty(), "{problems:?}");
+
+        let tool = &plugin.tools[0];
+        assert_eq!(tool.command, "make");
+        // A list replaces rather than being appended to: the flags that made
+        // sense for `cc` make none for `make`, and there would otherwise be no
+        // way to be rid of them.
+        assert!(tool.args.is_empty(), "{:?}", tool.args);
+        // And what was not mentioned is exactly as it shipped — including the
+        // flag that makes this the build rather than merely a tool.
+        assert!(tool.builds);
+        assert_eq!(tool.output, Output::Problems);
+        assert_eq!(tool.pattern.as_deref(), Some("%f:%l:%c: %t: %m"));
+        assert!(tool.wants("c"));
+
+        // And the first draft of a settings file names it, so nobody has to
+        // find this out from the source.
+        let stub = settings_stub(&plugin);
+        let read: FileOverride = serde_json::from_str(&stub).expect("{stub}");
+        assert_eq!(read.tools.len(), 1, "{stub}");
+        assert!(stub.contains("\"cc\""), "{stub}");
+    }
+
+    #[test]
+    fn what_ships_for_a_compiled_language_knows_how_to_attach_to_one() {
+        // A debugger that can only run programs it started is half a debugger.
+        // What ships has to say *how* it attaches, because where the process
+        // id goes is the adapter's own business — `pid` for gdb, `processId`
+        // for others — and a list of the fields textfold understands would be
+        // wrong for the next adapter somebody installs.
+        let shipped: Vec<Plugin> = LANGUAGES
+            .iter()
+            .map(|(id, text)| {
+                let file: FilePlugin = serde_json::from_str(text)
+                    .unwrap_or_else(|e| panic!("{id}: {}", said(&e)));
+                file.into_plugin(id, Source::BuiltIn).0
+            })
+            .collect();
+        for (plugin, language) in [("c", "c"), ("cpp", "cpp")] {
+            let file = shipped
+                .iter()
+                .find(|p| p.id == plugin)
+                .and_then(|p| p.languages.get(language).cloned())
+                .unwrap_or_else(|| panic!("{plugin} defines no {language}"));
+            let debugger = file
+                .debuggers
+                .as_ref()
+                .and_then(|list| list.first())
+                .cloned()
+                .unwrap_or_else(|| panic!("{language} ships no debugger"))
+                .into_debugger(plugin);
+            assert!(
+                debugger.can_attach(),
+                "{language} can only debug programs it started"
+            );
+            let attach = debugger.attach.expect("just checked");
+            assert_eq!(attach["request"], serde_json::json!("attach"));
+            // And it says where the process goes, or attaching would be a
+            // request to attach to nothing in particular.
+            assert_eq!(attach["pid"], serde_json::json!("${pid}"), "{attach}");
+        }
+    }
+
+    #[test]
+    fn what_ships_for_a_compiled_language_knows_how_to_compile_it() {
+        // The bug this is about: pressing F5 on a `main.c` nobody had compiled
+        // yet started `gdb`, which reported that `main` does not exist. True,
+        // and no help at all — the editor knew what was missing and had no way
+        // to make it.
+        // Read from the manifests themselves rather than through `load`,
+        // which merges in whatever the person running the tests has said in
+        // their own settings. What ships is the question, and a developer who
+        // has pointed their C build at `make` should not fail this.
+        let shipped: Vec<Plugin> = LANGUAGES
+            .iter()
+            .map(|(id, text)| {
+                let file: FilePlugin = serde_json::from_str(text)
+                    .unwrap_or_else(|e| panic!("{id}: {}", said(&e)));
+                file.into_plugin(id, Source::BuiltIn).0
+            })
+            .collect();
+        for language in ["c", "cpp"] {
+            let build = shipped
+                .iter()
+                .flat_map(|plugin| plugin.tools.iter())
+                .find(|tool| tool.builds && tool.wants(language))
+                .unwrap_or_else(|| panic!("{language} ships a debugger and no way to build"));
+            // With debugging in it, or there is nothing for the adapter to
+            // read when it gets there.
+            assert!(
+                build.args.iter().any(|arg| arg == "-g"),
+                "{language} builds without debugging in it: {:?}",
+                build.args
+            );
+            // And into the file the debugger is going to open. See the `gdb`
+            // entry in the same manifest, whose `program` is `${file_stem}`.
+            assert!(
+                build.args.iter().any(|arg| arg == "${file_stem}"),
+                "{language} builds something other than what it debugs: {:?}",
+                build.args
+            );
+            assert_eq!(build.output, Output::Problems);
+            assert!(build.pattern.is_some(), "a build with nothing to read it");
+            // And run where the project is built rather than beside the file.
+            // `.git` alone is not enough: a checkout is not the only thing
+            // that makes a directory a project, and a build run in `src/`
+            // because there was no repository is a `make` with no `Makefile`
+            // in front of it.
+            assert!(
+                build.roots.iter().any(|root| root.eq_ignore_ascii_case("makefile")),
+                "{language} builds wherever the file happens to be: {:?}",
+                build.roots
+            );
+        }
     }
 
     #[test]

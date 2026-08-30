@@ -51,6 +51,13 @@ pub enum Event {
     Found(String, Vec<Row>),
     /// A plugin's own program said something.
     Plugin(HostId, Incoming),
+    /// A debug adapter said something, and which session it was.
+    ///
+    /// Named even though there is only one session at a time, because the
+    /// session before it can still be talking: killing an adapter is what
+    /// makes its reader thread post that it has gone, and that arrives after
+    /// the next one has started. See [`crate::dap::SessionId`].
+    Dap(crate::dap::SessionId, Incoming),
     /// A program the editor ran for a plugin has finished, and the plugin is
     /// still waiting to be told how it went.
     PluginRan(Box<crate::host::Ran>),
@@ -89,6 +96,70 @@ enum Reread {
     Asked,
     /// The timer noticed the file had changed.
     OnATimer,
+}
+
+/// What a build was started for.
+///
+/// The interesting half of having a build at all. `cc -g -o main main.c` is
+/// not a thing anybody wants to *watch*; it is a thing that has to have
+/// happened before a debugger has anything to open, and the way to make that
+/// reliably true is for the key that starts the debugger to do it. Without
+/// this, the commonest first run of a C program under textfold was `gdb`
+/// reporting that `main` does not exist — which is true, and says nothing
+/// about what to do next.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum AfterBuild {
+    /// Nothing. Somebody asked for a build and got one.
+    Nothing,
+    /// Debug the file it was built from, if it worked. A build that failed
+    /// stops here: a debugger started on yesterday's binary after today's
+    /// compile failed is the worst kind of working, because everything looks
+    /// right and the code being stepped through is not the code on screen.
+    Debug,
+}
+
+/// What came of asking for a build.
+///
+/// Three answers rather than two, because "this language has no build" and
+/// "this language has a build and it would not run" want opposite things from
+/// whoever asked. The first should fall straight through — most languages
+/// compile nothing, and F5 on a Python file must not wait for a compiler that
+/// was never coming. The second must stop: a debugger started because `cc` is
+/// not installed is a debugger opening whatever binary was lying about from
+/// last time, which looks exactly like it worked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Building {
+    /// Nothing to build. Whatever was going to happen next should happen.
+    NotAThing,
+    /// One is running; the answer arrives in [`App::on_tool`].
+    Started,
+    /// There is a build and it did not run. Why has been said already.
+    Refused,
+}
+
+/// What the last build printed, kept so it can be read afterwards.
+///
+/// A compiler says a great deal that a margin cannot hold. A linker's
+/// `undefined reference to 'fizz'` names no file and no line; `make` reports
+/// which recipe failed and nothing about the code; a compiler complaining
+/// about a file you do not have open has nowhere to put a mark. Every one of
+/// those used to be a build that failed with, from where the person is
+/// sitting, no reason given — and "it failed" with no reason is the one thing
+/// a build must never say, because there is nothing to do about it but go and
+/// run the compiler in another window, which is the whole thing this was
+/// supposed to save.
+///
+/// So the whole of what it printed is kept, whether it worked or not. One
+/// build's worth: the interesting one is always the last.
+struct Built {
+    /// The tool's name, for the buffer it opens in and the line about it.
+    name: String,
+    ok: bool,
+    /// Everything it printed, both pipes — see [`crate::tool::Finished::printed`].
+    text: String,
+    /// A line about the project's own build, where it failed and there is
+    /// one. See [`App::build_note`].
+    note: Option<String>,
 }
 
 /// An install or an uninstall that is running.
@@ -265,6 +336,8 @@ pub enum PromptKind {
     /// A question a plugin asked. What it says is the plugin's, so the label
     /// here is only the fallback for one that said nothing.
     PluginAsked,
+    /// An expression to work out where the program is stopped.
+    DebugEvaluate,
 }
 
 impl PromptKind {
@@ -278,6 +351,7 @@ impl PromptKind {
             PromptKind::ReplaceFind => "Replace what",
             PromptKind::ReplaceWith => "Replace with",
             PromptKind::PluginAsked => "A plugin asks",
+            PromptKind::DebugEvaluate => "Value of",
         }
     }
 }
@@ -1078,6 +1152,15 @@ pub struct App {
     pub status: Status,
 
     pub lsp: Servers,
+    /// The debug adapter, and where the program it is running has got to.
+    pub debug: crate::dap::Debugger,
+    /// The buffer the debugger's panel is in, while it is open.
+    debug_panel: Option<DocId>,
+    /// What to do when the build that is running finishes, while one is.
+    /// `None` means nothing is waiting on it. See [`AfterBuild`].
+    after_build: Option<AfterBuild>,
+    /// Everything the last build printed. See [`Built`].
+    last_build: Option<Built>,
     /// The plugins that are programs rather than tables.
     pub hosts: Hosts,
     /// A plugin waiting on a box that is on the screen.
@@ -1107,6 +1190,12 @@ pub struct App {
     /// Where files come from for the file picker, and where a project-wide
     /// search searches.
     pub project: PathBuf,
+    /// Where the pointer is, when the terminal has told us. Kept rather than
+    /// acted on and forgotten, because what is *under* the pointer is drawn
+    /// every frame — see [`App::panel_action_under`] — and a panel redrawn
+    /// while somebody rests on one of its buttons must not lose the highlight
+    /// under their hand.
+    pub pointer: Option<(u16, u16)>,
     /// What git says about the project and the files open from it: the
     /// branch, and which lines differ from the last commit.
     pub git: Tracker,
@@ -1218,6 +1307,7 @@ impl App {
             .unwrap_or(crate::theme::FALLBACK);
         let keys = Keys::new(&config.keys);
         let lsp = Servers::new(tx.clone());
+        let debug = crate::dap::Debugger::new(tx.clone());
         let hosts = Hosts::new(tx.clone());
         let project = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
@@ -1241,6 +1331,10 @@ impl App {
             signature: None,
             status: Status::quiet(),
             lsp,
+            debug,
+            debug_panel: None,
+            after_build: None,
+            last_build: None,
             hosts,
             plugin_waiting: None,
             unsettled: false,
@@ -1250,6 +1344,7 @@ impl App {
             clipboard: String::new(),
             last_search: String::new(),
             project,
+            pointer: None,
             git: Tracker::default(),
             files: None,
             files_walking: false,
@@ -1519,7 +1614,15 @@ impl App {
             .panes
             .iter()
             .filter(|pane| pane.dock.is_some())
-            .filter_map(|pane| self.doc(pane.doc)?.panel.as_ref().map(|p| p.id.clone()))
+            .filter_map(|pane| {
+                let panel = self.doc(pane.doc)?.panel.as_ref()?;
+                // A plugin's panel only. The debugger's comes back when there
+                // is something to debug, and a panel saying "nothing is being
+                // debugged" put back on every start is a sidebar nobody asked
+                // for.
+                panel.owner.plugin()?;
+                Some(panel.id.clone())
+            })
             .collect();
         crate::session::Session {
             focus: here.min(panes.len().saturating_sub(1)),
@@ -1704,7 +1807,7 @@ impl App {
         if let Some((plugin, panel)) = self
             .doc(id)
             .and_then(|d| d.panel.as_ref())
-            .map(|p| (p.plugin.clone(), p.id.clone()))
+            .and_then(|p| Some((p.owner.plugin()?.to_string(), p.id.clone())))
         {
             self.tell_panel(&plugin, "panel/closed", json!({ "panel": panel }));
         }
@@ -1718,7 +1821,14 @@ impl App {
                 pane.show(fresh, Selections::default());
             }
         } else {
-            // Panes showing it move to whatever was looked at most recently.
+            // A docked pane exists to show one panel, and when that panel has
+            // gone there is nothing for it to be. Sending it to "whatever was
+            // looked at most recently" turns a sidebar into a second, sideways
+            // copy of the file you are editing — which is what closing the
+            // debugger's panel used to do.
+            self.panes.retain(|pane| pane.dock.is_none() || pane.doc != id);
+            self.focus = self.focus.min(self.panes.len().saturating_sub(1));
+            // The rest move to whatever was looked at most recently.
             let fallback = self.most_recent().unwrap_or(self.docs[0].id);
             for pane in &mut self.panes {
                 if pane.doc == id {
@@ -1732,6 +1842,11 @@ impl App {
         for pane in &mut self.panes {
             pane.forget(id);
         }
+        // A breakpoint lives with its buffer, so closing the buffer takes it
+        // away — and the adapter has to hear about that or it goes on
+        // stopping in a file you have closed, which looks like a debugger
+        // stopping in a file you are not even looking at.
+        self.tell_debugger_about_breakpoints();
     }
 
     fn most_recent(&self) -> Option<DocId> {
@@ -2138,6 +2253,7 @@ impl App {
             Event::Term(_) => {}
             Event::Lsp(id, message) => self.on_lsp(id, message),
             Event::Plugin(id, message) => self.on_plugin(id, message),
+            Event::Dap(id, message) => self.on_dap(id, message),
             Event::Package(progress) => self.on_package(*progress),
             Event::Refreshed(problems) => self.refreshed(problems),
             Event::PluginRan(ran) => {
@@ -2188,6 +2304,12 @@ impl App {
         if event.kind == KeyEventKind::Release {
             return;
         }
+        // Back on the keyboard, so nothing is under the pointer any more as
+        // far as anybody is concerned. A terminal never says the pointer has
+        // left the window, so without this a button stays lit under a hand
+        // that moved to the keys ten minutes ago. Moving the mouse a single
+        // cell brings it back.
+        self.pointer = None;
         let key = Key::from_event(event);
 
         // One key that means the same thing whatever is on top of the editor.
@@ -2358,6 +2480,7 @@ impl App {
         }
         // So do the diagnostics: a warning about line ten belongs on the line
         // that text is on now, not on whatever ended up there.
+        let mut breakpoints_moved = false;
         if let Some(doc) = self.doc_mut(id) {
             for diagnostic in &mut doc.diagnostics {
                 let mut range = diagnostic.range;
@@ -2366,6 +2489,35 @@ impl App {
                 }
                 diagnostic.range = range.clamped(len);
             }
+            // And so do the breakpoints, for a stronger reason: a breakpoint
+            // left on a line number while the code moved off it is a debugger
+            // stopping somewhere you did not ask it to, which is an hour of
+            // not believing your own program.
+            let was = doc.breakpoint_lines();
+            for at in &mut doc.breakpoints {
+                let mut moved = *at;
+                for edit in &edits {
+                    moved = edit.map(moved);
+                }
+                *at = moved.min(len);
+            }
+            doc.breakpoints.sort_unstable();
+            doc.breakpoints.dedup();
+            breakpoints_moved = doc.breakpoint_lines() != was;
+        }
+        // The adapter is running against the file as it was, so an edit that
+        // moved a breakpoint has to be passed on or it goes on stopping at the
+        // old line.
+        //
+        // Only when one actually moved. Not thrift: a panel is filled by
+        // replacing its whole buffer, which arrives here as an edit like any
+        // other — and telling the adapter about it would bring back a reply,
+        // which refreshes the panel, which is an edit. The editor never gets
+        // another keystroke. Asking whether anything moved is what makes that
+        // impossible rather than merely unlikely.
+        if breakpoints_moved && self.debug.is_running() {
+            let where_ = self.breakpoints_now();
+            self.debug.send_breakpoints(&where_);
         }
 
         let App { docs, lsp, hosts, .. } = self;
@@ -3249,7 +3401,7 @@ impl App {
             // and whose colours disagree.
             doc.read_only = true;
             doc.panel = Some(crate::doc::Panel {
-                plugin: command.plugin.clone(),
+                owner: crate::doc::Owner::Plugin(command.plugin.clone()),
                 id: command.id.clone(),
                 spans: Vec::new(),
                 actions: Vec::new(),
@@ -3291,7 +3443,7 @@ impl App {
         let Some(path) = self.doc(id).and_then(|d| d.path.clone()) else {
             return false;
         };
-        let root = lang::project_root(&path, &tool.roots);
+        let root = self.root_for(&path, &tool.roots);
 
         // The same placeholders a language server's settings may use, so that
         // a Python tool lands in the project's environment without any of that
@@ -3300,6 +3452,18 @@ impl App {
         let environment = self.lsp.environment_for(&root);
         let mut vars = crate::venv::Vars::new(&root, environment.as_ref());
         vars.set("file", path.display().to_string());
+        if let Some(dir) = path.parent() {
+            vars.set("file_dir", dir.display().to_string());
+        }
+        // The same names a debug adapter's launch arguments get, and for the
+        // same reason: `cc -g -o ${file_stem} ${file}` is the whole of what a
+        // build of one C file is, and the two halves of it are this file and
+        // this file without its extension. A tool that never mentions them is
+        // unaffected. See [`crate::dap::filled`].
+        vars.set("file_stem", path.with_extension("").display().to_string());
+        if let Some(base) = path.file_stem() {
+            vars.set("file_base", base.to_string_lossy().into_owned());
+        }
         let args: Vec<String> = tool.args.iter().filter_map(|a| vars.fill(a)).collect();
         let mut env: Vec<(String, String)> = Vec::new();
         if let Some(found) = &environment {
@@ -3344,6 +3508,23 @@ impl App {
             .unwrap_or("")
             .to_string();
 
+        // Taken before the answer is dealt with, because dealing with it moves
+        // `done`, and because a build nobody is waiting on is an ordinary tool
+        // run and should be reported as one.
+        let waiting = tool.builds.then(|| self.after_build.take()).flatten();
+        let built = done.ok;
+        // And the whole of what a build printed is kept before anything reads
+        // it for problems, because what the margin can hold is a fraction of
+        // what a compiler says. See [`Built`].
+        if tool.builds {
+            self.last_build = Some(Built {
+                name: tool.name.clone(),
+                ok: done.ok,
+                text: done.printed(),
+                note: (!done.ok).then(|| self.build_note(tool, done.doc)).flatten(),
+            });
+        }
+
         match tool.output {
             Output::Replace => self.take_tool_text(tool, done, &complaint),
             Output::Show => {
@@ -3356,7 +3537,17 @@ impl App {
                 }
                 self.show_in_a_buffer(&format!("{} output", tool.name), &text);
             }
-            Output::Problems => self.take_tool_problems(tool, &done),
+            Output::Problems => {
+                let marked = self.take_tool_problems(tool, &done);
+                // A build that failed and left no mark anywhere has said
+                // nothing at all from where the person is sitting. What it
+                // printed is the only account there is, so it is put in front
+                // of them rather than left to be asked for — the asking is the
+                // part nobody knows to do.
+                if tool.builds && !done.ok && marked == 0 {
+                    self.show_build_output();
+                }
+            }
             Output::Ignore => match done.ok {
                 true => self.say_good(format!("{} finished", tool.name)),
                 false => self.say_bad(match complaint.is_empty() {
@@ -3364,6 +3555,20 @@ impl App {
                     false => format!("{}: {complaint}", tool.name),
                 }),
             },
+        }
+        match (waiting, built) {
+            // It compiled, so there is now something to debug. The message
+            // the build left in the status line is replaced by the
+            // debugger's, which is the more recent news.
+            (Some(AfterBuild::Debug), true) => self.start_debugging(),
+            // And when it did not, what it said is already in the margin or
+            // already on the screen. All that is left to say is that the
+            // debugger is not coming, and where the rest of it is.
+            (Some(AfterBuild::Debug), false) => self.say_bad(format!(
+                "{} failed, so there is nothing new to debug — build-output has all of it",
+                tool.name
+            )),
+            _ => {}
         }
         if in_a_save {
             self.advance();
@@ -3407,12 +3612,19 @@ impl App {
     }
 
     /// What a linter printed, read as problems and shown in the margin.
-    fn take_tool_problems(&mut self, tool: &'static Tool, done: &crate::tool::Finished) {
+    ///
+    /// Answers how many marks it actually *placed*, which is not the same as
+    /// how many it found: a problem about a file nobody has open has nowhere
+    /// to go. The difference matters to whoever asked — a build that failed
+    /// and put nothing anywhere visible has, from where the person is sitting,
+    /// failed for no reason at all. See [`App::on_tool`].
+    fn take_tool_problems(&mut self, tool: &'static Tool, done: &crate::tool::Finished) -> usize {
         let Some(pattern) = &tool.pattern else {
-            return self.say_bad(format!(
+            self.say_bad(format!(
                 "{} is set to find problems but says nothing about how to read them",
                 tool.name
             ));
+            return 0;
         };
         let told = crate::doc::Told::Tool(tool.id.as_str());
         // A tool sends its complete opinion every time, so its old findings go
@@ -3421,10 +3633,8 @@ impl App {
             doc.diagnostics.retain(|d| d.told != told);
         }
 
-        let mut both = done.out.clone();
-        both.push('\n');
-        both.push_str(&done.err);
-        let found = crate::tool::problems(pattern, &both);
+        let printed = done.printed();
+        let found = crate::tool::problems(pattern, &printed);
         let mut count = 0;
         for problem in found {
             let full = match problem.file.is_absolute() {
@@ -3460,9 +3670,17 @@ impl App {
         }
         match count {
             0 if done.ok => self.say_good(format!("{}: nothing to report", tool.name)),
-            0 => self.say(format!("{} found nothing it could read", tool.name)),
+            // It failed, and nothing it said was in the shape a margin holds.
+            // The first line is very often the whole story — `ld: undefined
+            // reference to 'fizz'`, `make: *** [Makefile:2: main] Error 1` —
+            // and is a better answer than a count of nothing.
+            0 => match printed.lines().find(|line| !line.trim().is_empty()) {
+                Some(first) => self.say_bad(format!("{}: {first}", tool.name)),
+                None => self.say_bad(format!("{} failed and said nothing", tool.name)),
+            },
             n => self.say(format!("{}: {n} {}", tool.name, plural("problem", n))),
         }
+        count
     }
 
     /// Put some text in a buffer of its own, for reading rather than editing,
@@ -3507,6 +3725,13 @@ impl App {
         if focus {
             self.show(id);
             self.view_mut().sel = crate::text::Selections::single(Range::point(0));
+            // Folded, the way the debugger's panel is and for the same
+            // reason. What lands in one of these is a line of prose — a
+            // compiler's complaint with an absolute path in it, a traceback, a
+            // test runner's account of itself — and a pane that cuts the
+            // interesting half off the right-hand edge is a pane that sends
+            // you to a terminal to read the thing you just asked for.
+            self.view_mut().wrap = true;
             self.scroll_into_view();
         }
     }
@@ -4418,6 +4643,17 @@ impl App {
             PromptKind::PluginAsked => {
                 self.overlay = Overlay::None;
                 self.settle_plugin_question(json!(input));
+            }
+            PromptKind::DebugEvaluate => {
+                self.overlay = Overlay::None;
+                if input.is_empty() {
+                    return;
+                }
+                // The answer goes into the panel rather than the status line:
+                // it is very often longer than a line, and it is the sort of
+                // thing you want to still be there after you have stepped.
+                self.debug.evaluate(&input);
+                self.open_debug_panel();
             }
             PromptKind::GotoLine => {
                 self.overlay = Overlay::None;
@@ -6010,6 +6246,7 @@ impl App {
             }
             Choice::Action(server, action) => self.do_code_action(server, *action),
             Choice::Environment(root) => self.use_environment(&root),
+            Choice::Process(pid) => self.attach_to(pid),
             Choice::Setting(which) => {
                 self.toggle_setting(which);
                 self.redraw_list(Self::open_settings_picker);
@@ -7327,7 +7564,7 @@ impl App {
             .find(|d| {
                 d.panel
                     .as_ref()
-                    .is_some_and(|p| p.id == wanted && p.plugin == plugin)
+                    .is_some_and(|p| p.id == wanted && p.owner.plugin() == Some(plugin.as_str()))
             })
             .map(|d| d.id)
         else {
@@ -7337,12 +7574,25 @@ impl App {
             return Err(format!("{wanted} is not open"));
         };
 
-        let (text, spans, actions) = panel_lines(
-            params
-                .get("lines")
-                .and_then(Value::as_array)
-                .ok_or("a panel needs some lines")?,
-        );
+        let lines = params
+            .get("lines")
+            .and_then(Value::as_array)
+            .ok_or("a panel needs some lines")?;
+        Ok(json!({ "lines": self.write_panel(doc_id, lines) }))
+    }
+
+    /// Put a set of lines into a panel's buffer, colours and all.
+    ///
+    /// Shared by the plugin that sent them and by the debugger, which fills
+    /// its own panel the same way for the same reason: everything about a
+    /// panel that is fiddly — keeping the cursor on the row somebody was
+    /// reading, not growing an undo history of every shape the panel has ever
+    /// had — is fiddly identically for both, and a second copy of it would
+    /// drift.
+    ///
+    /// Answers how many lines went in.
+    fn write_panel(&mut self, doc_id: DocId, rows: &[Value]) -> usize {
+        let (text, spans, actions) = panel_lines(rows);
 
         // Where every pane showing this panel was, as a line and a column
         // rather than as an offset into the text.
@@ -7369,7 +7619,7 @@ impl App {
             .collect();
 
         let Some(doc) = self.doc_mut(doc_id) else {
-            return Err(format!("{wanted} is not open"));
+            return 0;
         };
         let was = doc.len_chars();
         let sel = Selections::single(Range::point(0));
@@ -7408,7 +7658,7 @@ impl App {
             }
         }
         self.scroll_into_view();
-        Ok(json!({ "lines": lines }))
+        lines
     }
 
     /// Move a panel to an edge, resize it, or take it off one.
@@ -7435,7 +7685,7 @@ impl App {
             .find(|d| {
                 d.panel
                     .as_ref()
-                    .is_some_and(|p| p.id == wanted && p.plugin == plugin)
+                    .is_some_and(|p| p.id == wanted && p.owner.plugin() == Some(plugin.as_str()))
             })
             .map(|d| d.id)
             .ok_or_else(|| format!("{wanted} is not open"))?;
@@ -7641,8 +7891,13 @@ impl App {
         else {
             return false;
         };
-        let (plugin, id, action) = (panel.plugin.clone(), panel.id.clone(), action.clone());
-        self.tell_panel(&plugin, "panel/action", json!({ "panel": id, "action": action }));
+        let (owner, id, action) = (panel.owner.clone(), panel.id.clone(), action.clone());
+        match owner {
+            crate::doc::Owner::Plugin(plugin) => {
+                self.tell_panel(&plugin, "panel/action", json!({ "panel": id, "action": action }))
+            }
+            crate::doc::Owner::Debugger => self.debug_action(&action),
+        }
         true
     }
 
@@ -7675,7 +7930,7 @@ impl App {
             .here()
             .panel
             .as_ref()
-            .map(|p| (p.plugin.clone(), p.id.clone()))
+            .and_then(|p| Some((p.owner.plugin()?.to_string(), p.id.clone())))
         else {
             return;
         };
@@ -8160,6 +8415,15 @@ impl App {
                     self.accept_if_waiting(index);
                     return;
                 }
+                if let Ask::DebugAdapter { config, .. } | Ask::DebugLaunch { config, .. } = &ask {
+                    // The server was asked to start a debugger and would not.
+                    // Its own words, with the adapter named, because "cannot
+                    // resolve classpath" on its own does not say who said it
+                    // or what you were doing at the time.
+                    let name = config.name.clone();
+                    self.say_bad(format!("{name} could not start: {why}"));
+                    return;
+                }
                 if let Ask::QuickFixes { doc, at } = ask {
                     // "content modified" is the usual one, and it means the
                     // server was still catching up when we asked rather than
@@ -8185,6 +8449,12 @@ impl App {
                 self.take_completions(id, doc, at, version, value)
             }
             Ask::Hover { doc, at } => self.take_hover(doc, at, value),
+            Ask::DebugAdapter { config, root, file } => {
+                self.take_debug_adapter(*config, root, file, value)
+            }
+            Ask::DebugLaunch { config, root, file } => {
+                self.take_debug_launch(id, *config, root, file, value)
+            }
             Ask::Goto {
                 doc,
                 what,
@@ -9790,6 +10060,10 @@ impl App {
             return;
         }
         let (column, row) = (event.column, event.row);
+        // Every kind, not only a move: a click is where the pointer is too,
+        // and a terminal that reports no motion at all — several do, unless
+        // asked — would otherwise never light anything up.
+        self.pointer = Some((column, row));
         match event.kind {
             MouseEventKind::Down(MouseButton::Left) => self.click(column, row, event.modifiers),
             MouseEventKind::Drag(MouseButton::Left) => self.drag_to(column, row),
@@ -9997,6 +10271,28 @@ impl App {
             self.drag = Some(Drag::Scrollbar);
             return self.scroll_to_bar(row);
         }
+        // The very left of the margin is the debugger's column: clicking it
+        // puts a breakpoint on that line, which is the gesture every editor
+        // with a debugger in it has. It is one column wide and it is the
+        // blank one the line number is padded with, so it costs the numbers
+        // nothing and it is where the pointer already goes.
+        let rule = view.frame.x + crate::ui::rule_width(self.panes.len() as u16);
+        if view.gutter > 0
+            && column == rule
+            && self.doc(view.doc).is_some_and(|d| d.panel.is_none())
+            && let Some(at) = self.position_at(view.area.x, row)
+        {
+            let id = view.doc;
+            let line = self
+                .doc(id)
+                .map(|d| crate::text::line_of(&d.rope, at))
+                .unwrap_or(0);
+            if let Some(doc) = self.doc_mut(id) {
+                doc.toggle_breakpoint(line);
+            }
+            self.tell_debugger_about_breakpoints();
+            return;
+        }
         // The line numbers: clicking one takes the line.
         if column < view.area.x {
             let Some(at) = self.position_at(view.area.x, row) else {
@@ -10015,8 +10311,23 @@ impl App {
         // A panel is a plugin's own buffer, and the parts of it the plugin
         // marked as doing something do it when you click them — which is what
         // "clickable" has meant on a screen for forty years.
+        //
+        // The cursor goes where you clicked only if you are still looking at
+        // the same buffer afterwards. Half the actions a panel has are "take
+        // me somewhere": clicking a frame in the debugger's stack opens a file
+        // and puts the cursor on the line, and following that with the offset
+        // of the row you clicked in the *panel* would land wherever that
+        // happens to be in the file — which for a file shorter than the panel
+        // is past the end of it.
         if self.panel_action_at(at) {
-            self.place_cursor(at, false, false);
+            // And the cursor stays where it was. What was clicked is a button:
+            // it opened a file, stepped a program, folded a tree. Leaving a
+            // text caret sitting in the middle of its label afterwards says
+            // that something was *edited* there, in a buffer that cannot be
+            // typed into — and it moves the one thing the keyboard uses to
+            // pick a row, so a click would quietly change what Enter means
+            // next. Clicking the panel anywhere that is *not* a button still
+            // places it, which is how you get the caret somewhere on purpose.
             return;
         }
         // Ctrl-click is what every editor has taught people goes to the
@@ -10172,7 +10483,7 @@ impl App {
             .here()
             .panel
             .as_ref()
-            .map(|p| (p.plugin.clone(), p.id.clone()))
+            .and_then(|p| Some((p.owner.plugin()?.to_string(), p.id.clone())))
         {
             let at = self.view().cursor();
             let (line, column) = self.here().point_at_char(at);
@@ -10200,6 +10511,14 @@ impl App {
     /// cursors that were already there — Alt-click, which is how you get a
     /// second cursor without leaving the mouse.
     fn place_cursor(&mut self, at: usize, extend: bool, add: bool) {
+        // Clamped, always. A cursor past the end of a buffer is not a cursor
+        // that is slightly wrong — it is a panic the moment anything asks what
+        // is under it, which is the next frame. Every caller works out the
+        // position from something: a click from the screen, a jump from a
+        // language server, an action from a panel. Any of them can be about a
+        // buffer other than the one this pane is showing now, and asking each
+        // of them to remember that is asking one of them to forget.
+        let at = at.min(self.here().len_chars());
         let view = self.view_mut();
         if add {
             view.sel.push(Range::point(at));
@@ -10210,6 +10529,23 @@ impl App {
             view.sel = Selections::single(Range::point(at));
         }
         view.goal = None;
+        self.scroll_into_view();
+    }
+
+    /// Put a dragged selection in, certain that it is inside the buffer.
+    ///
+    /// The same bargain [`App::place_cursor`] makes, and for the same reason,
+    /// but for both ends of a range rather than one. A drag holds on to where
+    /// it began — a word, a line, a point — and the buffer underneath it is
+    /// free to change while it is held: the debugger's panel is redrawn whole
+    /// every time the program so much as prints a line. An anchor remembered
+    /// from a longer version of the text is a position past the end of this
+    /// one, and a position past the end is a panic on the next frame rather
+    /// than a selection that looks slightly wrong.
+    fn select_dragged(&mut self, range: Range) {
+        let len = self.here().len_chars();
+        let range = Range::new(range.anchor.min(len), range.head.min(len));
+        self.view_mut().sel = Selections::single(range);
         self.scroll_into_view();
     }
 
@@ -10354,18 +10690,17 @@ impl App {
                 self.drag_tab(id, column, row);
             }
             Some(Drag::Text) => {
-                let Some(at) = self.position_at(column, row) else {
+                let Some(at) = self.position_in(self.focus, column, row) else {
                     return;
                 };
                 let anchor = self.view().sel.primary().anchor;
-                self.view_mut().sel = Selections::single(Range::new(anchor, at));
-                self.scroll_into_view();
+                self.select_dragged(Range::new(anchor, at));
             }
             Some(Drag::Words {
                 anchor_start,
                 anchor_end,
             }) => {
-                let Some(at) = self.position_at(column, row) else {
+                let Some(at) = self.position_in(self.focus, column, row) else {
                     return;
                 };
                 // Dragging after a double click grows a word at a time, in
@@ -10376,11 +10711,10 @@ impl App {
                 } else {
                     Range::new(anchor_start, word.end())
                 };
-                self.view_mut().sel = Selections::single(range);
-                self.scroll_into_view();
+                self.select_dragged(range);
             }
             Some(Drag::Lines { anchor }) => {
-                let Some(at) = self.position_at(column, row) else {
+                let Some(at) = self.position_in(self.focus, column, row) else {
                     return;
                 };
                 let doc = self.here();
@@ -10397,8 +10731,7 @@ impl App {
                 } else {
                     Range::new(start, end)
                 };
-                self.view_mut().sel = Selections::single(range);
-                self.scroll_into_view();
+                self.select_dragged(range);
             }
             None => {}
         }
@@ -10503,22 +10836,83 @@ impl App {
     /// What character a point is over, in whichever pane it is in.
     pub fn position_at(&self, column: u16, row: u16) -> Option<usize> {
         let pane = self.pane_at(column, row)?;
-        let view = &self.panes[pane];
-        let area = view.area;
+        let area = self.panes[pane].area;
         if row < area.y || row >= area.y + area.height {
             return None;
         }
+        self.position_in(pane, column, row)
+    }
+
+    /// The stretch of a panel the pointer is resting on, where that stretch
+    /// does something.
+    ///
+    /// A panel's actionable text is the only thing inside a pane that behaves
+    /// like a button, and it used to look exactly like the text beside it: the
+    /// only way to learn whether something could be clicked was to click it.
+    /// Lighting it under the pointer is the oldest convention there is for
+    /// "this does something", and it costs a pane with no panel in it nothing,
+    /// because there are no actions to look through.
+    ///
+    /// Only the stretches that *do* something, which is the half that matters.
+    /// A button drawn greyed out — a step in a debugger that has nothing
+    /// stopped — has no action on it and so never lights up, and the pointer
+    /// is never somewhere the highlight is not. See [`crate::menu`], which
+    /// makes the same bargain for the same reason.
+    ///
+    /// Worked out while drawing rather than remembered, so that a panel
+    /// rewritten under a resting pointer — the debugger's is, every time the
+    /// program prints a line — comes back with the highlight in the right
+    /// place rather than on whatever text has moved into the old one.
+    pub fn panel_action_under(&self, pane: usize, column: u16, row: u16) -> Option<Range> {
+        if self.pane_at(column, row)? != pane {
+            return None;
+        }
+        let view = self.panes.get(pane)?;
+        let area = view.area;
+        // The text itself, not the margin beside it: a click left of the text
+        // is the start of the line, and the start of a line that happens to
+        // begin with a button is not the button.
+        if column < area.x || row < area.y || row >= area.y + area.height {
+            return None;
+        }
         let doc = self.doc(view.doc)?;
+        let panel = doc.panel.as_ref()?;
+        let at = self.position_at(column, row)?;
+        panel
+            .actions
+            .iter()
+            .find(|(range, _)| range.start() <= at && at < range.end())
+            .map(|(range, _)| *range)
+    }
+
+    /// The same, in a pane named rather than found under the pointer, with
+    /// the point clamped into it.
+    ///
+    /// This is what a drag needs, and the difference is not a detail. A drag
+    /// belongs to the pane it began in for the whole of its life, and the
+    /// pointer is very often somewhere else — leaving the pane is *how* you
+    /// select more than a screenful. Asking which pane is under the pointer
+    /// answers with somebody else's buffer, and an offset into that one used
+    /// in this one is a selection past the end of the text: a click in the
+    /// debugger's panel dragged up into a source file two thousand characters
+    /// longer than it used to be an outright crash on the next frame.
+    fn position_in(&self, pane: usize, column: u16, row: u16) -> Option<usize> {
+        let view = self.panes.get(pane)?;
+        let doc = self.doc(view.doc)?;
+        let area = view.area;
         // A click left of the text is the start of the line, not nothing:
         // clicking the line numbers should still put you somewhere.
         let across = column
             .saturating_sub(area.x)
             .min(area.width.saturating_sub(1));
+        let down = row
+            .saturating_sub(area.y)
+            .min(area.height.saturating_sub(1));
         Some(view::position_at_screen(
             view,
             doc,
             self.config.tab_width(),
-            (row - area.y) as usize,
+            down as usize,
             across as usize,
         ))
     }
@@ -10532,6 +10926,1265 @@ fn hits(area: Rect, column: u16, row: u16) -> bool {
         && column < area.x + area.width
         && row >= area.y
         && row < area.y + area.height
+}
+
+
+// ---------------------------------------------------------------------------
+// Debugging.
+//
+// The same shape as everything else the editor talks to: a program somebody
+// else wrote, at the end of a pipe, whose messages arrive on the channel the
+// keyboard arrives on. What is different is that a debugger has a *place* —
+// the line the program is stopped on — and the whole of the interface is
+// about making that place obvious: an arrow in the margin, the cursor put on
+// it, and a panel along the bottom saying how it got there and what the
+// values are.
+// ---------------------------------------------------------------------------
+
+impl App {
+    /// Start debugging, or let a stopped program go again.
+    ///
+    /// One key for both, which is what every debugger has settled on: while
+    /// nothing is running it means "run this", and while something is stopped
+    /// it means "carry on". There is never a moment where both readings are
+    /// available, so there is never a moment where it is ambiguous.
+    fn debug(&mut self) {
+        if let Some(session) = self.debug.session() {
+            if session.state.is_stopped() {
+                self.debug.resume();
+                return self.refresh_debug_panel();
+            }
+            if !session.state.is_over() {
+                return self.say("it is already running — Shift-F5 stops it");
+            }
+        }
+        // Pressing it again while the compiler is still going is somebody
+        // wondering whether it heard them, not somebody asking for a second
+        // build of the same file.
+        if self.after_build.is_some() {
+            return self.say("still building — it starts when that finishes");
+        }
+        // A compiled language is built first. There is nothing for `gdb` to
+        // open until `cc` has run, and an editor that knows how to start a
+        // debugger but not how to make the thing it debugs has left the
+        // interesting half in another window. See [`AfterBuild`].
+        if self.start_building(AfterBuild::Debug) != Building::NotAThing {
+            return;
+        }
+        self.start_debugging();
+    }
+
+    /// Build the file in front of you, and nothing more.
+    ///
+    /// The same build F5 runs, asked for on its own — which is what you want
+    /// while you are still fixing the things that stop it compiling, and do
+    /// not want a debugger started every time one of them is fixed.
+    fn build(&mut self) {
+        let language = lang::get(self.here().language).name.clone();
+        if self.start_building(AfterBuild::Nothing) == Building::NotAThing {
+            self.say(format!("nothing installed here knows how to build {language}"));
+        }
+    }
+
+    /// What to say about a build that failed in a project that brought a build
+    /// of its own.
+    ///
+    /// The one-file compile textfold ships is right for one file and cannot be
+    /// right for anything else: a project with headers in a directory of their
+    /// own needs an include path it has no way to guess, and a project of nine
+    /// files needs the other eight named. Both come out as a compiler error
+    /// that is perfectly true and says nothing about what to do.
+    ///
+    /// A `Makefile` sitting in the root is the project having already answered
+    /// the question. Saying so is not textfold deciding how your project is
+    /// built — it does not run the thing, and it stays out of the way of a
+    /// build that worked. It is the difference between a wall and a fixable
+    /// problem, which is the same reason a debug adapter has a `see`.
+    fn build_note(&self, tool: &'static Tool, doc: DocId) -> Option<String> {
+        // Already pointed at one. Somebody whose `make` is failing does not
+        // need to be told about `make`.
+        const THEIRS: [&str; 6] = ["make", "gmake", "ninja", "cmake", "meson", "bazel"];
+        let program = Path::new(&tool.command).file_stem()?.to_string_lossy();
+        if THEIRS.contains(&program.as_ref()) {
+            return None;
+        }
+        let path = self.doc(doc)?.path.clone()?;
+        let root = self.root_for(&path, &tool.roots);
+        // The names that mean "this project has already said how it is built".
+        const KNOWN: [&str; 6] = [
+            "Makefile",
+            "makefile",
+            "GNUmakefile",
+            "CMakeLists.txt",
+            "meson.build",
+            "build.ninja",
+        ];
+        let found = KNOWN.into_iter().find(|name| root.join(name).is_file())?;
+        let plugin = tool.id.split('/').next().unwrap_or(&tool.id);
+        // The directory's own name rather than its path relative to the
+        // project, which is empty when they are the same directory — and
+        // naming it is worth a word: which directory the build decided it was
+        // in is exactly what is surprising when it picked the wrong one.
+        let here = root
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| root.display().to_string());
+        let makefile = found.eq_ignore_ascii_case("makefile") || found == "GNUmakefile";
+        // The `command` a Makefile deserves is `make`, because `make` with no
+        // arguments is what a Makefile means. For the rest it is left blank:
+        // `cmake --build build` and `ninja -C out` are guesses about somebody
+        // else's layout, and a wrong command confidently offered is worse than
+        // a blank somebody fills in.
+        let command = match makefile {
+            true => r#""command": "make", "args": []"#,
+            false => r#""command": "…", "args": ["…"]"#,
+        };
+        Some(format!(
+            "{here} has a {found}, and this compiled one file with {}. To build it the way \
+             the project does: {{\"tools\": {{\"{}\": {{{command}}}}}}} in your settings \
+             for the {plugin} plugin.",
+            tool.command, tool.name
+        ))
+    }
+
+    /// Everything the last build printed, in a buffer of its own.
+    ///
+    /// The backstop behind the margin, and the answer to "it failed and I
+    /// cannot see why". The margin holds what a compiler said *about a line of
+    /// a file you have open*, which is most of what it says and never all of
+    /// it — a linker error names no line, `make` names no file, and a mistake
+    /// in a header you have not opened has nowhere to be drawn. This is the
+    /// unabridged version, and it is a buffer because searching, scrolling and
+    /// copying out of one is already what buffers do.
+    fn show_build_output(&mut self) {
+        let Some(built) = &self.last_build else {
+            return self.say("nothing has been built yet");
+        };
+        let (name, ok) = (built.name.clone(), built.ok);
+        // The editor's own line goes after everything the compiler said,
+        // separated and marked, so that "everything it printed" stays exactly
+        // that and the way out is on the screen with it.
+        let text = match &built.note {
+            Some(note) => format!("{}\n\ntextfold: {note}\n", built.text.trim_end()),
+            None => built.text.clone(),
+        };
+        if built.text.trim().is_empty() && built.note.is_none() {
+            return self.say(match ok {
+                true => format!("{name} finished without a word, which is a compiler working"),
+                false => format!("{name} failed and printed nothing at all"),
+            });
+        }
+        self.show_in_a_buffer(&format!("{name} output"), &text);
+    }
+
+    /// Where something the editor runs on this file should be run.
+    ///
+    /// The markers first, exactly as [`lang::project_root`] reads them — a
+    /// `Makefile`, a `Cargo.toml`, a `.git`. What is different is what happens
+    /// when none of them is there. `project_root` falls back to the directory
+    /// the file happens to sit in, which is the only answer it can give: it is
+    /// handed a path and knows nothing else.
+    ///
+    /// The editor knows something else. It was opened on a directory, and that
+    /// directory is the project as far as everything else here is concerned —
+    /// it is where the file picker looks and what a project-wide search
+    /// searches. A build run in `src/` because the project has no `.git` in it
+    /// is a `make` with no `Makefile` in front of it, and the answer was
+    /// sitting one level up the whole time.
+    ///
+    /// Only for a file inside it. A file opened from somewhere else entirely
+    /// is not part of this project, and running its build in this project's
+    /// directory would be a worse guess than the directory it lives in.
+    fn root_for(&self, path: &Path, markers: &[String]) -> PathBuf {
+        if let Some(marked) = lang::marked_root(path, markers) {
+            return marked;
+        }
+        match path.starts_with(&self.project) {
+            true => self.project.clone(),
+            false => lang::project_root(path, markers),
+        }
+    }
+
+    /// The tool that turns a file of this language into something that can be
+    /// run, where there is one.
+    ///
+    /// An ordinary tool with one flag on it, found the way everything else
+    /// finds a command: in the one registry that has both what textfold ships
+    /// and what the plugins brought. Which means a build is switched off,
+    /// renamed, given different flags or bound to a key by exactly the
+    /// machinery that already does those things for a formatter.
+    fn build_for(&self, language: &str) -> Option<&'static Tool> {
+        crate::cmd::all()
+            .iter()
+            .filter_map(|cmd| cmd.tool())
+            .find(|tool| tool.builds && tool.wants(language))
+    }
+
+    /// Start the build for the file in front of you. See [`Building`], which
+    /// is the whole of what the answer means.
+    fn start_building(&mut self, then: AfterBuild) -> Building {
+        let doc = self.here();
+        let (id, modified, saved) = (doc.id, doc.is_modified(), doc.path.is_some());
+        let language = lang::get(doc.language).name.clone();
+        let Some(tool) = self.build_for(&language) else {
+            return Building::NotAThing;
+        };
+        if !saved {
+            self.say(format!("save this to a file first — {} needs one", tool.name));
+            return Building::Refused;
+        }
+        // The compiler reads the file on disk, exactly as the debugger runs
+        // the file on disk. Compiling yesterday's text and then debugging it
+        // is the same lost afternoon twice over.
+        if modified {
+            self.save(None);
+        }
+        self.after_build = Some(then);
+        // `start_tool` has already said why — that `cc` is not installed, most
+        // likely, which is a sentence somebody can act on.
+        if !self.start_tool(tool, id) {
+            self.after_build = None;
+            return Building::Refused;
+        }
+        self.say(format!("{}…", tool.name));
+        Building::Started
+    }
+
+    /// Run the file in front of you under a debug adapter.
+    fn start_debugging(&mut self) {
+        let doc = self.here();
+        let Some(path) = doc.path.clone() else {
+            return self.say("save this to a file first — there is nothing to run yet");
+        };
+        let language = doc.language;
+        let modified = doc.is_modified();
+        let adapters = lang::get(language).debuggers.clone();
+        if adapters.is_empty() {
+            let name = lang::get(language).name.clone();
+            return self.say(format!("nothing installed here knows how to debug {name}"));
+        }
+        // The adapter runs the file on disk, not the buffer. Saving first
+        // beats debugging yesterday's code and wondering why the breakpoint
+        // is in the wrong place — which is the single commonest way to lose
+        // twenty minutes to a debugger.
+        if modified {
+            self.save(None);
+        }
+
+        // The first one that starts, in the order the manifests wrote them.
+        // More than one is ordinary — an adapter that launches a program and
+        // one that attaches to a running process are two — and which of them
+        // is installed on this machine is not something the person pressing
+        // the key should have to know.
+        let mut why_not = None;
+        for config in &adapters {
+            let root = self.root_for(&path, &config.roots);
+            // An adapter that lives inside a language server is asked for
+            // rather than started, and the answer comes back later — see
+            // [`App::ask_server_for_adapter`], which finishes the job when it
+            // does.
+            if config.started_by().is_some() {
+                match self.ask_server_for_adapter(config, &root, &path) {
+                    Ok(()) => return,
+                    Err(why) => {
+                        why_not = Some(why);
+                        continue;
+                    }
+                }
+            }
+            // The same interpreter the language servers were pointed at,
+            // including one chosen by hand — a debugger running under a
+            // different Python from the type checker is a debugger that will
+            // disagree with your editor about what is installed.
+            let environment = self.lsp.environments.get(&root).cloned();
+            match self.debug.start(config, &root, &path, environment.as_deref()) {
+                Ok(()) => return self.debugging_now(config, &path),
+                // The last word rather than the first: the last adapter tried
+                // is the one whose absence is worth reporting, and a list of
+                // every one that is not installed is not a message anybody
+                // reads.
+                Err(why) => why_not = Some(why),
+            }
+        }
+        if let Some(why) = why_not {
+            self.say_bad(why);
+        }
+    }
+
+    /// Offer the programs that are running, to attach the debugger to one.
+    ///
+    /// A debugger that can only run programs it started itself is half a
+    /// debugger. The bugs worth a debugger are very often in something that
+    /// has been up for hours — a server holding a connection, a simulation
+    /// four hours in — and the whole point of attaching is not having to
+    /// reproduce that from the beginning.
+    ///
+    /// A list, because a process id is a number that means nothing to a person
+    /// and is different every time. Writing one into a settings file is the
+    /// interface this replaces, and it was one that had to be redone after
+    /// every restart of the thing being debugged.
+    fn open_attach_picker(&mut self) {
+        let doc = self.here();
+        let language = doc.language;
+        let path = doc.path.clone();
+        let name = lang::get(language).name.clone();
+        if !lang::get(language).debuggers.iter().any(|d| d.can_attach()) {
+            return self.say(format!(
+                "nothing installed here knows how to attach to a running {name} program"
+            ));
+        }
+        let running = crate::proc::running();
+        if running.is_empty() {
+            return self.say("nothing of yours is running to attach to");
+        }
+        // The project's own binaries first. On a machine with two hundred
+        // processes on it, the one you want is nearly always the thing you
+        // just built — and the editor knows which those are, so making
+        // somebody scroll past `pipewire` to find it would be withholding an
+        // answer it already has.
+        let root = path.map(|path| {
+            let roots: Vec<String> = lang::get(language)
+                .debuggers
+                .iter()
+                .flat_map(|d| d.roots.clone())
+                .collect();
+            self.root_for(&path, &roots)
+        });
+        let mine = |process: &crate::proc::Process| {
+            root.as_deref().is_some_and(|root| process.is_inside(root))
+        };
+        let (ours, theirs): (Vec<_>, Vec<_>) =
+            running.into_iter().partition(mine);
+
+        let rows: Vec<Row> = ours
+            .iter()
+            .map(|process| self.process_row(process, true))
+            .chain(theirs.iter().map(|process| self.process_row(process, false)))
+            .collect();
+        self.overlay = Overlay::Picker(Picker::new(Kind::Processes, rows));
+    }
+
+    /// One running program, as a row of that list.
+    fn process_row(&self, process: &crate::proc::Process, ours: bool) -> Row {
+        // The whole command line under the name, because three copies of the
+        // same program with different arguments is the case this list exists
+        // for and the name alone cannot tell them apart.
+        let row = Row::new(
+            format!("{}  {}", process.name, process.pid),
+            Choice::Process(process.pid),
+        )
+        .detail(process.command.clone());
+        match ours {
+            true => row.tag("here"),
+            false => row,
+        }
+    }
+
+    /// Attach the debugger to a program that is already running.
+    ///
+    /// No build first, unlike F5. The program in front of us is *running*; it
+    /// was built by whoever started it, and compiling over the top of it now
+    /// would at best be pointless and at worst replace the file the symbols
+    /// are being read from.
+    fn attach_to(&mut self, pid: u32) {
+        let Some(process) = crate::proc::running().into_iter().find(|p| p.pid == pid) else {
+            // Between the list going up and a row being chosen. Rare, and the
+            // alternative is attaching to whatever has been given the number
+            // since.
+            return self.say(format!("process {pid} is not there any more"));
+        };
+        let doc = self.here();
+        let language = doc.language;
+        let path = doc
+            .path
+            .clone()
+            // Attaching does not need a file of yours at all — the program is
+            // the thing. A buffer with no path still has a project to be in.
+            .unwrap_or_else(|| self.project.join("."));
+
+        let adapters: Vec<lang::Debugger> = lang::get(language)
+            .debuggers
+            .iter()
+            .filter(|config| config.can_attach())
+            .cloned()
+            .collect();
+        let mut why_not = None;
+        for config in &adapters {
+            let root = self.root_for(&path, &config.roots);
+            // The attach request, with the process in it, put where a launch
+            // would go. Everything after this is the debugger it always was —
+            // the same `initialize`, the same breakpoints, the same panel.
+            let mut config = config.clone();
+            let Some(attach) = config.attach.clone() else {
+                continue;
+            };
+            config.launch = crate::dap::about_process(&attach, pid, process.program.as_deref());
+            let environment = self.lsp.environments.get(&root).cloned();
+            match self.debug.start(&config, &root, &path, environment.as_deref()) {
+                Ok(()) => {
+                    self.say_good(format!(
+                        "{}: attached to {} ({pid})",
+                        config.name, process.name
+                    ));
+                    return self.open_debug_panel();
+                }
+                Err(why) => why_not = Some(why),
+            }
+        }
+        match why_not {
+            Some(why) => self.say_bad(why),
+            None => self.say("nothing here can attach to a running program"),
+        }
+    }
+
+    /// Say a session has begun, and put the panel where it will be filled.
+    fn debugging_now(&mut self, config: &lang::Debugger, path: &Path) {
+        let what = short(path, &self.project);
+        self.say_good(format!("{}: debugging {what}", config.name));
+        self.open_debug_panel();
+    }
+
+    /// Ask a language server to start a debug adapter for us.
+    ///
+    /// Java's adapter is a plugin to the Java language server rather than a
+    /// program — see [`crate::lang::FromServer`] — so starting one is a
+    /// question rather than a `spawn`, and the answer arrives on the same
+    /// channel as everything else a server says.
+    fn ask_server_for_adapter(
+        &mut self,
+        config: &lang::Debugger,
+        root: &Path,
+        path: &Path,
+    ) -> Result<(), String> {
+        // Filled here rather than in the debugger, because what goes to the
+        // server has `${…}` in it too — the file it is being asked about.
+        let environment = self.lsp.environments.get(root).cloned();
+        let config = crate::dap::filled(config, root, path, environment.as_deref());
+        let from = config.started_by().ok_or("no server named")?.clone();
+        let doc = self.here();
+        let Some(server) = self.lsp.named(&from.server, doc) else {
+            return Err(format!(
+                "{} debugs through {}, and that is not running here — {}",
+                config.name,
+                from.server,
+                match config.see.as_deref() {
+                    Some(see) => see.to_string(),
+                    None => format!("install the {} plugin", from.server),
+                }
+            ));
+        };
+
+        // Two questions where there is something to resolve, one where there
+        // is not. The first fills in what only the server knows; the second
+        // asks for the adapter itself.
+        let (command, arguments, ask) = match &from.resolve {
+            Some(resolve) => (
+                resolve.command.clone(),
+                resolve.arguments.clone(),
+                Ask::DebugLaunch {
+                    config: Box::new(config.clone()),
+                    root: root.to_path_buf(),
+                    file: path.to_path_buf(),
+                },
+            ),
+            None => (
+                from.start.clone(),
+                Vec::new(),
+                Ask::DebugAdapter {
+                    config: Box::new(config.clone()),
+                    root: root.to_path_buf(),
+                    file: path.to_path_buf(),
+                },
+            ),
+        };
+        if !self
+            .lsp
+            .start_debug_session(server, &command, &arguments, ask)
+        {
+            return Err(format!(
+                "{} is still starting — it has to read the project before it \
+                 can debug it",
+                from.server
+            ));
+        }
+        // Not `say_good`: nothing is debugging yet, and a session that never
+        // arrives should not have said it had.
+        self.say(format!("asking {} for a debug session…", from.server));
+        Ok(())
+    }
+
+    /// The server has answered the question the adapter needed answering.
+    ///
+    /// Its answer goes into the launch arguments by the names the manifest
+    /// gave, and then the adapter itself is asked for. Nothing here knows
+    /// what a classpath is — only that a field of an answer was to be put in
+    /// a field of a launch.
+    fn take_debug_launch(
+        &mut self,
+        server: ServerId,
+        mut config: crate::lang::Debugger,
+        root: PathBuf,
+        file: PathBuf,
+        answer: Value,
+    ) {
+        let Some(from) = config.from_server.clone() else {
+            return;
+        };
+        if let Some(resolve) = &from.resolve {
+            crate::dap::fold_into_launch(&mut config.launch, resolve, &answer);
+        }
+        let ask = Ask::DebugAdapter {
+            config: Box::new(config),
+            root,
+            file,
+        };
+        if !self
+            .lsp
+            .start_debug_session(server, &from.start, &[], ask)
+        {
+            self.say_bad(format!("{} would not start a debug session", from.server));
+        }
+    }
+
+    /// A language server answered with the port its adapter is listening on.
+    fn take_debug_adapter(
+        &mut self,
+        config: crate::lang::Debugger,
+        root: PathBuf,
+        file: PathBuf,
+        result: Value,
+    ) {
+        // Every adapter that works this way answers with a bare number. One
+        // that answers with something else has not started anything, and
+        // guessing a port would be connecting to whatever happens to be
+        // listening on it.
+        let port = result
+            .as_u64()
+            .or_else(|| result.get("port").and_then(Value::as_u64))
+            .and_then(|port| u16::try_from(port).ok());
+        let Some(port) = port.filter(|port| *port != 0) else {
+            return self.say_bad(format!(
+                "{} would not say which port to debug on",
+                config.name
+            ));
+        };
+        let environment = self.lsp.environments.get(&root).cloned();
+        match self
+            .debug
+            .connect(&config, &root, &file, environment.as_deref(), port)
+        {
+            Ok(()) => self.debugging_now(&config, &file),
+            Err(why) => self.say_bad(why),
+        }
+    }
+
+    /// Stop the program and the adapter with it.
+    fn stop_debugging(&mut self) {
+        // Including one that has not started yet. "Stop" pressed while the
+        // compiler is running has to mean the debugger is not coming, or it
+        // arrives half a minute later on top of whatever you moved on to.
+        if self.after_build == Some(AfterBuild::Debug) {
+            self.after_build = None;
+            return self.say("the build finishes, and nothing is debugged");
+        }
+        if self.debug.session().is_none() {
+            return self.say("nothing is being debugged");
+        }
+        self.debug.stop();
+        self.refresh_debug_panel();
+        self.say("stopped debugging");
+    }
+
+    fn debug_step(&mut self, what: crate::dap::Step) {
+        if !self.debug.session().is_some_and(|s| s.state.is_stopped()) {
+            return self.say("nothing is stopped — F5 starts it");
+        }
+        self.debug.step(what);
+        self.refresh_debug_panel();
+    }
+
+    /// Ask for an expression, and work it out where the program is stopped.
+    ///
+    /// The word selected, if there is one, since asking what the thing you
+    /// have highlighted comes to is most of what this is for.
+    fn ask_debug_evaluate(&mut self) {
+        if !self.debug.session().is_some_and(|s| s.state.is_stopped()) {
+            return self.say("nothing is stopped, so there is nowhere to work it out");
+        }
+        let selected = {
+            let (doc, view) = (self.here(), self.view());
+            let range = view.sel.primary();
+            match range.is_empty() {
+                true => text::word_text_at(&doc.rope, range.head),
+                false => Some(doc.rope.slice(range.start()..range.end()).to_string()),
+            }
+        };
+        let mut prompt = Prompt::new(PromptKind::DebugEvaluate);
+        if let Some(word) = selected {
+            prompt.caret = word.chars().count();
+            prompt.input = word;
+        }
+        self.overlay = Overlay::Prompt(prompt);
+    }
+
+    fn debug_pause(&mut self) {
+        match self.debug.session() {
+            Some(session) if !session.state.is_over() => {
+                self.debug.pause();
+                self.say("asked it to stop");
+            }
+            _ => self.say("nothing is running"),
+        }
+    }
+
+    /// Put a breakpoint on the line the cursor is on, or take it off.
+    fn toggle_breakpoint(&mut self) {
+        let at = self.view().cursor();
+        let id = self.view().doc;
+        let Some(doc) = self.doc_mut(id) else { return };
+        if doc.panel.is_some() {
+            return;
+        }
+        let line = crate::text::line_of(&doc.rope, at);
+        let on = doc.toggle_breakpoint(line);
+        self.tell_debugger_about_breakpoints();
+        self.say(match on {
+            true => format!("breakpoint on line {}", line + 1),
+            false => format!("breakpoint off line {}", line + 1),
+        });
+    }
+
+    /// Take every breakpoint in this file away.
+    ///
+    /// The one you want nine times out of ten: you were debugging one thing,
+    /// you put six of them in while working out what it did, and you are done
+    /// with that file rather than with debugging.
+    fn clear_breakpoints_here(&mut self) {
+        let id = self.view().doc;
+        let name = self.here().name.clone();
+        let Some(doc) = self.doc_mut(id) else { return };
+        let had = doc.breakpoints.len();
+        doc.breakpoints.clear();
+        self.tell_debugger_about_breakpoints();
+        self.say(match had {
+            0 => format!("there were none in {name}"),
+            1 => format!("the breakpoint in {name} is gone"),
+            n => format!("all {n} breakpoints in {name} are gone"),
+        });
+    }
+
+    /// Take every breakpoint in every open buffer away. The way out of having
+    /// twenty of them and no memory of where.
+    fn clear_all_breakpoints(&mut self) {
+        let had: usize = self.docs.iter().map(|d| d.breakpoints.len()).sum();
+        let files = self
+            .docs
+            .iter()
+            .filter(|d| !d.breakpoints.is_empty())
+            .count();
+        for doc in &mut self.docs {
+            doc.breakpoints.clear();
+        }
+        self.tell_debugger_about_breakpoints();
+        self.say(match (had, files) {
+            (0, _) => "there were none".to_string(),
+            (1, _) => "the breakpoint is gone".to_string(),
+            (n, 1) => format!("all {n} breakpoints are gone"),
+            // How many files it reached across, because "all 14 breakpoints
+            // are gone" after you meant to clear one file is a thing you want
+            // to find out now rather than the next time you run.
+            (n, files) => format!("all {n} breakpoints across {files} files are gone"),
+        });
+    }
+
+    /// Where the breakpoints are now, per file, for the adapter.
+    ///
+    /// Only buffers with a file behind them: a breakpoint in an unsaved
+    /// scratch buffer has no path to name it by, and an adapter told about a
+    /// file that does not exist answers with an error rather than ignoring it.
+    fn breakpoints_now(&self) -> Vec<(PathBuf, Vec<usize>)> {
+        self.docs
+            .iter()
+            .filter(|d| d.panel.is_none())
+            .filter_map(|d| Some((d.path.clone()?, d.breakpoint_lines())))
+            .filter(|(_, lines)| !lines.is_empty())
+            .collect()
+    }
+
+    fn tell_debugger_about_breakpoints(&mut self) {
+        if !self.debug.is_running() {
+            return;
+        }
+        let where_ = self.breakpoints_now();
+        self.debug.send_breakpoints(&where_);
+    }
+
+    /// Everything a debug adapter says.
+    fn on_dap(&mut self, id: crate::dap::SessionId, message: Incoming) {
+        let where_ = self.breakpoints_now();
+        match self.debug.on(id, message, &where_) {
+            crate::dap::Change::Stopped => {
+                self.show_where_it_stopped();
+                self.refresh_debug_panel();
+            }
+            crate::dap::Change::Resumed => self.refresh_debug_panel(),
+            crate::dap::Change::Ended => {
+                self.refresh_debug_panel();
+                let Some(session) = self.debug.session() else {
+                    return;
+                };
+                // "The program finished" is the wrong thing to say about a
+                // debugger that never ran one — and it is the *worst* wrong
+                // thing, because it sounds like it worked. What the adapter
+                // printed on its way out is the only account of why there is.
+                if !session.ever_started() {
+                    let name = session.name.clone();
+                    let why = session.why_not();
+                    self.open_debug_panel();
+                    return match why {
+                        Some(why) => self.say_bad(format!(
+                            "{name} would not start: {}",
+                            crate::text::truncate(&why, 90)
+                        )),
+                        None => self.say_bad(format!("{name} would not start")),
+                    };
+                }
+                let why = session.state.label().to_string();
+                self.say(format!("the program {why}"));
+            }
+            crate::dap::Change::Nothing => self.refresh_debug_panel(),
+        }
+        for problem in std::mem::take(&mut self.debug.problems) {
+            self.say_bad(problem);
+        }
+    }
+
+    /// Open the file the program stopped in and put the cursor on the line.
+    ///
+    /// Into a pane that is not the panel and not a dock, because the whole
+    /// point is that you can see the code — landing in the sidebar would be
+    /// the debugger stopping somewhere you cannot read.
+    fn show_where_it_stopped(&mut self) {
+        let Some((path, line, column)) = self.debug.session().and_then(|s| s.here()) else {
+            return;
+        };
+        let panel = self.debug_panel;
+        // Never into the panel itself. `open_path` picks a pane for the file,
+        // and the pane it should not pick is the one the stack is drawn in.
+        if self.panes.get(self.focus).map(|p| p.doc) == panel
+            && let Some(at) = self.beside_the_docks()
+        {
+            self.focus = at;
+        }
+        self.open_path(&path);
+        self.go_to(line, column);
+    }
+
+    /// Which file and line the program is stopped at, for the margin.
+    pub fn stopped_at(&self) -> Option<(&Path, usize)> {
+        let session = self.debug.session()?;
+        if !session.state.is_stopped() {
+            return None;
+        }
+        let frame = session.selected()?;
+        Some((frame.path.as_deref()?, frame.line))
+    }
+
+    // ---- The panel ----
+
+    /// Show the debugger's panel along the bottom, or put it away.
+    fn toggle_debug_panel(&mut self) {
+        match self.debug_panel {
+            Some(id) if self.pane_showing_docked(id).is_some() => {
+                self.close_debug_panel();
+            }
+            _ => {
+                self.open_debug_panel_taking_focus(true);
+                if self.debug.session().is_none() {
+                    self.say("nothing is being debugged yet — F5 starts it");
+                }
+            }
+        }
+    }
+
+    /// Take the panel off the bottom of the screen.
+    ///
+    /// The buffer goes with the pane. A plugin's panel keeps its buffer when
+    /// its sidebar closes, because what is in it came from the plugin and
+    /// asking for it again would mean asking the plugin again — but this one
+    /// is drawn from the session every time anything changes, so there is
+    /// nothing in it to keep. And a kept one is worse than nothing: with no
+    /// dock to live in it becomes an ordinary buffer, which means a tab
+    /// called `Debug` in the row at the top, which is not a thing anybody
+    /// asked for.
+    fn close_debug_panel(&mut self) {
+        let Some(id) = self.debug_panel.take() else {
+            return;
+        };
+        self.close_doc(id);
+    }
+
+    /// Make the panel if there is not one, and put it back if it was closed.
+    ///
+    /// Without taking the keyboard. Opening a sidebar puts the cursor in it,
+    /// which is right when you asked for the sidebar and wrong when it opened
+    /// because you pressed F5 — pressing "run" should not move your cursor out
+    /// of your code.
+    fn open_debug_panel(&mut self) {
+        self.open_debug_panel_taking_focus(false);
+    }
+
+    fn open_debug_panel_taking_focus(&mut self, take_focus: bool) {
+        let was = self.focus;
+        let id = match self.debug_panel.filter(|id| self.doc(*id).is_some()) {
+            Some(id) => id,
+            None => {
+                let id = self.new_id();
+                let mut doc = Document::scratch(id, "Debug".into(), self.default_indent());
+                // A panel is not yours to type into, and saying so here means
+                // every key that would have changed the text is free for the
+                // panel to use — the same bargain a plugin's panel makes.
+                doc.read_only = true;
+                doc.panel = Some(crate::doc::Panel {
+                    owner: crate::doc::Owner::Debugger,
+                    id: "debug".into(),
+                    spans: Vec::new(),
+                    actions: Vec::new(),
+                });
+                doc.mark_saved();
+                self.docs.push(doc);
+                self.debug_panel = Some(id);
+                id
+            }
+        };
+        if self.pane_showing_docked(id).is_none() {
+            let edge = crate::view::Edge::Bottom;
+            self.dock_panel(id, crate::view::Dock::new(edge, Some(DEBUG_PANEL_ROWS)));
+            // Folded, unlike an ordinary pane. Most of what goes in here is a
+            // line of prose — an adapter's complaint, a Python traceback, the
+            // repr of something big — and a panel fourteen rows tall that cuts
+            // the interesting half off the right-hand edge is a panel that
+            // makes you go and read the log anyway.
+            if let Some(at) = self.pane_showing_docked(id) {
+                self.panes[at].wrap = true;
+            }
+            if !take_focus {
+                // The panel is added at the end, so nothing before it was
+                // renumbered and the pane that had the keyboard still has its
+                // place in the list.
+                self.focus = was.min(self.panes.len().saturating_sub(1));
+            }
+        }
+        self.refresh_debug_panel();
+    }
+
+    /// Draw the session into the panel: where it is, how it got there, what
+    /// the values are, and what it printed.
+    ///
+    /// Rebuilt whole every time anything changes, which is what the panel
+    /// machinery is built for — see [`App::write_panel`]. Cheap, and it means
+    /// there is exactly one function that decides what the panel says.
+    fn refresh_debug_panel(&mut self) {
+        let Some(id) = self.debug_panel.filter(|id| self.doc(*id).is_some()) else {
+            return;
+        };
+        let lines = self.debug_panel_lines();
+        self.write_panel(id, &lines);
+    }
+
+    fn debug_panel_lines(&self) -> Vec<Value> {
+        let mut lines: Vec<Value> = Vec::new();
+        let plain = |text: &str, style: &str| json!({ "spans": [{ "text": text, "style": style }] });
+
+        let Some(session) = self.debug.session() else {
+            lines.push(self.debug_buttons(None));
+            lines.push(json!(""));
+            match (self.after_build, &self.last_build) {
+                // A compile of one file is quick; a project's build is not,
+                // and a panel that says "nothing is being debugged" for half a
+                // minute after F5 reads as a key that did nothing.
+                (Some(AfterBuild::Debug), _) => {
+                    lines.push(plain("Building, and then debugging it.", "muted"));
+                }
+                // The commonest reason there is no session: the thing being
+                // debugged was never made. Saying "nothing is being debugged"
+                // here is true and is not the answer — the answer is what the
+                // compiler said, and the way to the whole of it.
+                (_, Some(built)) if !built.ok => {
+                    lines.push(json!({ "spans": [
+                        { "text": format!("{} failed, so there is nothing to debug.", built.name),
+                          "style": "warning" },
+                        { "text": "   see what it printed", "style": "muted",
+                          "action": "do:build-output" },
+                    ]}));
+                }
+                _ => lines.push(plain("Nothing is being debugged.", "muted")),
+            }
+            lines.push(json!(""));
+            let key = self.keys.shortcut(Cmd::DEBUG).unwrap_or_else(|| "F5".into());
+            lines.push(plain(
+                &format!("{key} runs the file you are looking at under a debugger."),
+                "muted",
+            ));
+            let key = self
+                .keys
+                .shortcut(Cmd::TOGGLE_BREAKPOINT)
+                .unwrap_or_else(|| "F9".into());
+            lines.push(plain(
+                &format!("{key} puts a breakpoint on the line the cursor is on."),
+                "muted",
+            ));
+            return lines;
+        };
+
+        // The buttons first, so they are in the same place whatever the
+        // session is doing. A row that moves down the panel as the stack gets
+        // deeper is a row you have to look for.
+        lines.push(self.debug_buttons(Some(session)));
+        lines.push(json!(""));
+
+        // The headline: what is being debugged and what it is doing.
+        let tone = match &session.state {
+            crate::dap::State::Stopped(_) => "warning",
+            crate::dap::State::Ended(_) => "muted",
+            _ => "string",
+        };
+        lines.push(json!({ "spans": [
+            { "text": format!("{} ", session.name), "style": "function" },
+            { "text": format!("{} ", session.what), "style": "muted" },
+            { "text": session.state.label(), "style": tone },
+        ]}));
+
+        // The stack, innermost first, each row a place you can go.
+        if !session.frames.is_empty() {
+            lines.push(json!(""));
+            lines.push(plain("Where it is", "keyword"));
+            for frame in &session.frames {
+                let here = session.frame == Some(frame.id);
+                let place = match &frame.path {
+                    Some(path) => format!(
+                        "{}:{}",
+                        short(path, &self.project),
+                        frame.line + 1
+                    ),
+                    None => "no source".to_string(),
+                };
+                lines.push(json!({ "spans": [
+                    { "text": if here { "▸ " } else { "  " }, "style": "warning" },
+                    { "text": frame.name.clone(),
+                      "style": if here { "function" } else { "variable" },
+                      "action": format!("frame:{}", frame.id) },
+                    { "text": format!("  {place}"), "style": "muted",
+                      "action": format!("frame:{}", frame.id) },
+                ]}));
+            }
+        }
+
+        // The values in view at the frame being looked at.
+        for scope in &session.scopes {
+            let open = session.open.contains(&scope.reference);
+            lines.push(json!(""));
+            lines.push(json!({ "spans": [
+                { "text": if open { "▾ " } else { "▸ " }, "style": "muted",
+                  "action": format!("open:{}", scope.reference) },
+                { "text": scope.name.clone(), "style": "keyword",
+                  "action": format!("open:{}", scope.reference) },
+            ]}));
+            if open {
+                append_values(&mut lines, session, scope.reference, 1);
+            }
+        }
+
+        // The threads, under the values rather than over them.
+        //
+        // Only when there is more than one, because a list of one thread
+        // called `MainThread` is a row of noise. And below, because a JVM has
+        // six before your program has done anything — `Reference Handler`,
+        // `Finalizer`, `Signal Dispatcher` — and six rows of threads nobody
+        // asked about between the stack and the values is the values off the
+        // bottom of the panel.
+        if session.threads.len() > 1 {
+            lines.push(json!(""));
+            lines.push(plain("Threads", "keyword"));
+            for thread in &session.threads {
+                let here = session.thread == Some(thread.id);
+                lines.push(json!({ "spans": [
+                    { "text": if here { "▸ " } else { "  " }, "style": "warning" },
+                    { "text": thread.name.clone(),
+                      "style": if here { "function" } else { "variable" } },
+                ]}));
+            }
+        }
+
+        // What the program printed, last first in the sense that the end of
+        // the list is what is on screen — a panel scrolled to the top showing
+        // the first thing a program ever said is showing the wrong end.
+        if !session.output.is_empty() {
+            lines.push(json!(""));
+            // A debugger that never ran anything has printed nothing of your
+            // program's, so calling this "what it printed" would be pointing
+            // at somebody else's error message and calling it your output.
+            let printed = session.has_printed();
+            let mut heading = vec![json!({
+                "text": match printed {
+                    true => "What it printed",
+                    false => "What went wrong",
+                },
+                "style": "keyword",
+            })];
+            // The panel keeps the last few dozen lines; the session keeps
+            // several hundred. A program that printed more than fits here is
+            // exactly the program whose output somebody needs to read, and
+            // scrolling a panel fourteen rows tall is not reading.
+            if printed {
+                heading.push(json!({
+                    "text": "   see all of it",
+                    "style": "muted",
+                    "action": "do:output",
+                }));
+            }
+            lines.push(json!({ "spans": heading }));
+            for line in session.output.iter().rev().take(OUTPUT_SHOWN).rev() {
+                // Coloured by who said it, which is the whole reason the two
+                // are told apart: your program's output reads as output, a
+                // traceback stands out in the middle of it, and the editor's
+                // own account of the run stays quietly in the background
+                // rather than looking like something you printed.
+                let style = match line.from {
+                    crate::dap::Printer::Err => "warning",
+                    crate::dap::Printer::Out => "string",
+                    crate::dap::Printer::Note => "muted",
+                };
+                lines.push(plain(&format!("  {}", line.text), style));
+            }
+        }
+        lines
+    }
+
+    /// The row of buttons along the top of the panel.
+    ///
+    /// Not a second way of doing what F10 does. F10 is for somebody who
+    /// already knows it is F10, and a debugger is very often the first thing
+    /// in an editor that somebody uses before they have learned any of its
+    /// keys — so the panel that is already on the screen showing where the
+    /// program stopped is the obvious place to say what can be done about it.
+    ///
+    /// Everything is always drawn, and what cannot be done now is drawn
+    /// without an action on it. A row whose buttons come and go is a row you
+    /// have to read every time; one whose buttons grey out can be aimed at
+    /// from memory, and says what the states of a debugger *are*.
+    fn debug_buttons(&self, session: Option<&crate::dap::Session>) -> Value {
+        let state = session.map(|s| &s.state);
+        let stopped = state.is_some_and(|s| s.is_stopped());
+        let running = state.is_some_and(|s| !s.is_stopped() && !s.is_over());
+        let alive = stopped || running;
+        // A build that a debugger is waiting on is a run that has begun, as
+        // far as the buttons are concerned: there is nothing to start and
+        // there is something to call off.
+        let coming = self.after_build == Some(AfterBuild::Debug);
+
+        let mut spans: Vec<Value> = Vec::new();
+        let mut button = |label: &str, action: &str, on: bool| {
+            spans.push(json!({
+                "text": format!(" {label} "),
+                "style": if on { "function" } else { "muted" },
+                "action": on.then(|| format!("do:{action}")),
+            }));
+            spans.push(json!({ "text": " ", "style": "muted" }));
+        };
+
+        match alive {
+            // "Carry on" and "start it" are the same key and the same button,
+            // for the same reason: there is never a moment where both
+            // readings are available. See [`App::debug`].
+            true => button("▶ Continue", "start", stopped),
+            false => button("▶ Start", "start", !coming),
+        }
+        button("❚❚ Pause", "pause", running);
+        button("↷ Over", "over", stopped);
+        button("↓ Into", "into", stopped);
+        button("↑ Out", "out", stopped);
+        button("■ Stop", "stop", alive || coming);
+        // Attaching, where the language has an adapter that can. Only while
+        // nothing is running, because it is another way of *starting* — and a
+        // row that offered it mid-session would be offering to throw the
+        // session away.
+        let can_attach = self.the_code().is_some_and(|doc| {
+            lang::get(doc.language).debuggers.iter().any(|d| d.can_attach())
+        });
+        if !alive && !coming && can_attach {
+            button("⚯ Attach", "attach", true);
+        }
+        // Not part of the run, and last: the build is what you press when the
+        // program is not the thing that needs fixing yet.
+        //
+        // The language of your *code*, not of the panel. Clicking in the panel
+        // puts the keyboard in a scratch buffer that is no language at all,
+        // and a button that disappeared when you clicked near it would be a
+        // button nobody could hit twice.
+        let language = self
+            .the_code()
+            .map(|doc| lang::get(doc.language).name.clone())
+            .unwrap_or_default();
+        if let Some(build) = self.build_for(&language) {
+            button(&format!("⚒ {}", build.name), "build", true);
+        }
+        json!({ "spans": spans })
+    }
+
+    /// The buffer somebody is actually working in, as against a panel they
+    /// have clicked in. `None` only where every pane on the screen is a dock,
+    /// which is a screen with nowhere to put a file.
+    fn the_code(&self) -> Option<&Document> {
+        let at = self.beside_the_docks()?;
+        self.doc(self.panes.get(at)?.doc)
+    }
+
+    /// Everything the program printed, in a buffer of its own.
+    ///
+    /// A buffer rather than a bigger panel, because what somebody wants to do
+    /// with a thousand lines of output is search it, scroll it and copy out of
+    /// it — and a buffer is already the thing in this editor that does all
+    /// three. The panel keeps showing the last of it either way.
+    fn show_program_output(&mut self) {
+        let Some(session) = self.debug.session() else {
+            return self.say("nothing is being debugged");
+        };
+        let (text, what, ran) = (
+            session.program_printed(),
+            session.what.clone(),
+            session.ever_started(),
+        );
+        if text.trim().is_empty() {
+            return self.say(match ran {
+                true => "it has not printed anything".to_string(),
+                false => "nothing ran, so nothing printed — the panel says why".to_string(),
+            });
+        }
+        self.show_in_a_buffer(&format!("{what} output"), &text);
+    }
+
+    /// Something in the panel was pressed or clicked.
+    fn debug_action(&mut self, action: &str) {
+        let Some((what, rest)) = action.split_once(':') else {
+            return;
+        };
+        if what == "do" {
+            return self.debug_button(rest);
+        }
+        let Ok(number) = rest.parse::<i64>() else {
+            return;
+        };
+        match what {
+            // A frame: go and look at it, and show its values.
+            "frame" => {
+                self.debug.select_frame(number);
+                self.show_where_it_stopped();
+                self.refresh_debug_panel();
+            }
+            // A structured value: open it up, or fold it away.
+            "open" => {
+                self.debug.toggle_value(number);
+                self.refresh_debug_panel();
+            }
+            _ => {}
+        }
+    }
+
+    /// One of the buttons along the top of the panel.
+    ///
+    /// Each is the command of the same name and nothing else, so there is one
+    /// account of what "step over" means and the button and the key cannot
+    /// drift apart.
+    fn debug_button(&mut self, what: &str) {
+        // Clicking in the panel puts the keyboard in the panel, and the panel
+        // is a buffer with no file in it. "Run this file" asked there is a
+        // question about the wrong buffer — so the two buttons that are about
+        // your code send the keyboard back to your code first, which is where
+        // it wanted to be anyway.
+        if matches!(what, "start" | "build" | "attach")
+            && self.here().panel.is_some()
+            && let Some(at) = self.beside_the_docks()
+        {
+            self.focus = at;
+        }
+        match what {
+            "start" => self.debug(),
+            "pause" => self.debug_pause(),
+            "over" => self.debug_step(crate::dap::Step::Over),
+            "into" => self.debug_step(crate::dap::Step::Into),
+            "out" => self.debug_step(crate::dap::Step::Out),
+            "stop" => self.stop_debugging(),
+            "build" => self.build(),
+            "attach" => self.open_attach_picker(),
+            "output" => self.show_program_output(),
+            "build-output" => self.show_build_output(),
+            _ => {}
+        }
+        self.refresh_debug_panel();
+    }
+}
+
+/// How many rows the debugger's panel gets when it opens. Enough for a stack,
+/// a set of locals and a few lines of output without covering the code.
+const DEBUG_PANEL_ROWS: u16 = 14;
+
+/// How much of a program's output the panel shows at once. The rest is still
+/// kept — see [`crate::dap`] — and scrolling is what the panel is for.
+const OUTPUT_SHOWN: usize = 60;
+
+/// One level of variables, and whatever has been opened up under them.
+///
+/// The depth limit is not tidiness. The tree being walked is the *program's*,
+/// and a program can perfectly well hold a list that holds itself — which
+/// without a limit is a panel that never finishes drawing.
+fn append_values(
+    lines: &mut Vec<Value>,
+    session: &crate::dap::Session,
+    reference: i64,
+    depth: usize,
+) {
+    const DEEPEST: usize = 6;
+    if depth > DEEPEST {
+        return;
+    }
+    let Some(values) = session.values.get(&reference) else {
+        // Asked for and not back yet. Saying so beats a gap that looks like
+        // an empty scope.
+        lines.push(json!({ "spans": [
+            { "text": format!("{}…", "  ".repeat(depth)), "style": "muted" },
+        ]}));
+        return;
+    };
+    for value in values {
+        let pad = "  ".repeat(depth);
+        let open = value.reference != 0 && session.open.contains(&value.reference);
+        let arrow = match (value.reference != 0, open) {
+            (false, _) => "  ",
+            (true, false) => "▸ ",
+            (true, true) => "▾ ",
+        };
+        let action = (value.reference != 0).then(|| format!("open:{}", value.reference));
+        let mut spans = vec![
+            json!({ "text": format!("{pad}{arrow}"), "style": "muted" }),
+            json!({ "text": value.name.clone(), "style": "property", "action": action }),
+        ];
+        // Nothing after the name where there is nothing to say. `debugpy`
+        // gathers the dunders of a frame under a row called `special
+        // variables` with no value of its own, and `special variables = `
+        // reads as a variable whose value is missing rather than as a heading.
+        if !value.value.is_empty() {
+            spans.push(json!({ "text": " = ", "style": "operator" }));
+            spans.push(json!({ "text": value.value.clone(), "style": "string", "action": action }));
+        }
+        if let Some(kind) = &value.kind {
+            spans.push(json!({ "text": format!("  {kind}"), "style": "type" }));
+        }
+        lines.push(json!({ "spans": spans }));
+        if open {
+            append_values(lines, session, value.reference, depth + 1);
+        }
+    }
 }
 
 // ---- Everything textfold can be told to do ----
@@ -10836,6 +12489,39 @@ commands! {
         |app| app.restart_servers();
     SERVER_STATUS => "server-status", Code, Passive, "What the language servers are doing",
         |app| app.show_server_status();
+
+    // Debugging. Every one of these is Passive: a debugger looks at your
+    // program, and none of them so much as touches the text.
+    DEBUG => "debug", Code, Passive, "Run this file under a debugger, or carry on from where it stopped",
+        |app| app.debug();
+    DEBUG_STOP => "debug-stop", Code, Passive, "Stop the program and the debugger with it",
+        |app| app.stop_debugging();
+    DEBUG_PAUSE => "debug-pause", Code, Passive, "Stop the running program where it is",
+        |app| app.debug_pause();
+    DEBUG_STEP_OVER => "debug-step-over", Code, Passive, "The next line, calls and all",
+        |app| app.debug_step(crate::dap::Step::Over);
+    DEBUG_STEP_INTO => "debug-step-into", Code, Passive, "Into the call on this line",
+        |app| app.debug_step(crate::dap::Step::Into);
+    DEBUG_STEP_OUT => "debug-step-out", Code, Passive, "Out of this function, back to whoever called it",
+        |app| app.debug_step(crate::dap::Step::Out);
+    TOGGLE_BREAKPOINT => "toggle-breakpoint", Code, Passive, "Stop here when the program reaches this line",
+        |app| app.toggle_breakpoint();
+    CLEAR_BREAKPOINTS => "clear-breakpoints", Code, Passive, "Take every breakpoint in this file away",
+        |app| app.clear_breakpoints_here();
+    CLEAR_ALL_BREAKPOINTS => "clear-all-breakpoints", Code, Passive, "Take every breakpoint in every open file away",
+        |app| app.clear_all_breakpoints();
+    DEBUG_PANEL => "debug-panel", Code, Passive, "Show the stack, the values and what the program printed",
+        |app| app.toggle_debug_panel();
+    DEBUG_EVALUATE => "debug-evaluate", Code, Passive, "Work out what an expression comes to, where the program is stopped",
+        |app| app.ask_debug_evaluate();
+    DEBUG_OUTPUT => "debug-output", Code, Passive, "Everything the program being debugged has printed, in a buffer",
+        |app| app.show_program_output();
+    BUILD => "build", Code, Passive, "Turn this file into something that can be run",
+        |app| app.build();
+    BUILD_OUTPUT => "build-output", Code, Passive, "Everything the last build printed, in a buffer",
+        |app| app.show_build_output();
+    DEBUG_ATTACH => "debug-attach", Code, Passive, "Attach the debugger to a program that is already running",
+        |app| app.open_attach_picker();
     COMMAND_PALETTE => "command-palette", View, Passive, "Everything textfold can do, by name",
         |app| app.open_commands_picker();
     SPLIT => "split", View, Passive, "Another pane onto the same file",
@@ -10948,6 +12634,214 @@ mod tests {
     fn pressed(app: &mut App, key: &str) {
         let key = Key::parse(key).expect("a key");
         app.handle(Event::Term(TermEvent::Key(KeyEvent::new(key.code, key.mods))));
+    }
+
+    /// Everything one row of a panel says, run together, with the stretches
+    /// that do something marked. What a person sees, near enough.
+    fn row(line: &Value) -> String {
+        line.get("spans")
+            .and_then(Value::as_array)
+            .map(|spans| {
+                spans
+                    .iter()
+                    .map(|span| {
+                        let text = span.get("text").and_then(Value::as_str).unwrap_or("");
+                        match span.get("action").and_then(Value::as_str) {
+                            Some(action) => format!("[{text}→{action}]"),
+                            None => text.to_string(),
+                        }
+                    })
+                    .collect::<String>()
+            })
+            .unwrap_or_else(|| line.as_str().unwrap_or("").to_string())
+    }
+
+    #[test]
+    fn the_debugger_says_what_can_be_done_and_not_only_what_happened() {
+        // A debugger is very often the first thing in an editor somebody uses
+        // before they have learned any of its keys, and the panel is already
+        // on the screen saying where the program stopped. Making them find
+        // `debug-step-over` in the command palette to act on that is asking
+        // them to read the manual with the answer in front of them.
+        let (app, _rx) = editor();
+        let buttons = row(&app.debug_panel_lines()[0]);
+        for label in ["Start", "Pause", "Over", "Into", "Out", "Stop"] {
+            assert!(buttons.contains(label), "no {label} button: {buttons}");
+        }
+        // With nothing running, the only one that does anything is the one
+        // that starts something. The rest are drawn and inert rather than
+        // absent: a row whose buttons come and go is a row you have to read
+        // every time.
+        assert!(buttons.contains("[ ▶ Start →do:start]"), "{buttons}");
+        assert!(!buttons.contains("→do:over"), "{buttons}");
+        assert!(!buttons.contains("→do:stop"), "{buttons}");
+        assert!(!buttons.contains("→do:pause"), "{buttons}");
+    }
+
+    #[test]
+    fn a_language_that_has_to_be_compiled_offers_that_where_you_are_looking() {
+        // The other half of the same complaint. `gdb` cannot open a program
+        // nobody has built, and an editor that knows that and offers no way to
+        // build it has left the interesting half in another window.
+        let (mut app, _rx) = editor();
+        let c = scratch("buttons.c");
+        std::fs::write(&c, "int main(void) { return 0; }\n").expect("written");
+        app.open_path(&c);
+        let buttons = row(&app.debug_panel_lines()[0]);
+        assert!(buttons.contains("→do:build"), "no way to build a C file: {buttons}");
+
+        // And a language with nothing to build says nothing about building.
+        let py = scratch("buttons.py");
+        std::fs::write(&py, "print(1)\n").expect("written");
+        app.open_path(&py);
+        let buttons = row(&app.debug_panel_lines()[0]);
+        assert!(!buttons.contains("→do:build"), "{buttons}");
+        std::fs::remove_file(&c).ok();
+        std::fs::remove_file(&py).ok();
+    }
+
+    #[test]
+    fn running_a_c_file_compiles_it_first() {
+        // The bug: F5 on a `main.c` nobody had compiled started `gdb`, which
+        // said `main`: no such file. The editor knew what was missing and had
+        // no way to make it.
+        if !crate::pack::on_path("cc") {
+            return;
+        }
+        let (mut app, rx) = editor();
+        // The rest of this runs a real compiler, so it is about the build
+        // textfold ships. Somebody who has pointed their own C build at `make`
+        // has a settings file, not a bug, and a test that failed for them
+        // would be a test about their machine.
+        let shipped = app.build_for("c").is_some_and(|build| build.command == "cc");
+        let path = scratch("run-me.c");
+        std::fs::write(&path, "int main(void) { return 0; }\n").expect("written");
+        app.open_path(&path);
+        app.run(Cmd::DEBUG);
+        assert_eq!(
+            app.after_build,
+            Some(AfterBuild::Debug),
+            "F5 went straight to the debugger with nothing built"
+        );
+
+        // And when the compiler comes back, the debugger it was for is
+        // started. Which is the whole of the point: one key, and what it does
+        // is what somebody meant by it.
+        let built = loop {
+            match rx.recv_timeout(Duration::from_secs(20)) {
+                Ok(Event::Tool(done)) => break Some(done),
+                Ok(_) => continue,
+                Err(_) => break None,
+            }
+        };
+        let built = built.expect("the build never answered");
+        if shipped {
+            assert!(built.ok, "cc would not compile an empty main: {}", built.err);
+            assert!(path.with_extension("").exists(), "nothing was built");
+        }
+        let ok = built.ok;
+        app.handle(Event::Tool(built));
+        assert_eq!(app.after_build, None, "the build is over and still being waited on");
+        // `gdb` is not on every machine, and this test is about the editor
+        // rather than about the adapter — so what is checked is that it got as
+        // far as trying, which is a session either way.
+        if ok && crate::pack::on_path("gdb") {
+            assert!(
+                app.debug.session().is_some(),
+                "it compiled and then never started a debugger"
+            );
+            app.debug.stop();
+        }
+        // And a build that failed never gets that far, whichever build it is.
+        if !ok {
+            assert!(
+                app.debug.session().is_none(),
+                "it debugged something the build had not made"
+            );
+        }
+
+        // And a language with no build goes straight through rather than
+        // waiting for one that is never coming.
+        let py = scratch("run-me.py");
+        std::fs::write(&py, "print(1)\n").expect("written");
+        app.after_build = None;
+        app.open_path(&py);
+        app.run(Cmd::DEBUG);
+        assert_eq!(app.after_build, None);
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&py).ok();
+        std::fs::remove_file(path.with_extension("")).ok();
+    }
+
+    #[test]
+    fn a_build_that_fails_in_a_way_the_margin_cannot_hold_still_says_why() {
+        // The complaint this is about: "cc just fails without telling me why".
+        // The margin holds what a compiler said about a line of a file you
+        // have open, which is most of what it says and never all of it — a
+        // linker error names no line, `make` names no file, and a mistake in a
+        // header you have not opened has nowhere to be drawn. Every one of
+        // those reached the person as a count of nothing.
+        let (mut app, rx) = editor();
+        // About the build textfold ships, for the reason above.
+        if app.build_for("c").is_none_or(|build| build.command != "cc") {
+            return;
+        }
+        let path = scratch("wont-link.c");
+        // Calls something that is never defined, so it compiles and does not
+        // link — and a linker's complaint matches no `%f:%l:%c` pattern there
+        // has ever been.
+        std::fs::write(&path, "int fizz(int);\nint main(void) { return fizz(1); }\n")
+            .expect("written");
+        app.open_path(&path);
+        app.run(Cmd::BUILD);
+
+        let done = loop {
+            match rx.recv_timeout(Duration::from_secs(20)) {
+                Ok(Event::Tool(done)) => break Some(done),
+                Ok(_) => continue,
+                Err(_) => break None,
+            }
+        };
+        let done = done.expect("the compiler never answered");
+        if done.ok {
+            // A machine whose `cc` links this anyway has nothing to say about
+            // the bug, and a test that asserts on somebody's toolchain is a
+            // test that fails for the wrong reason.
+            return;
+        }
+        app.handle(Event::Tool(done));
+
+        // The whole of what it printed is kept…
+        let kept = app.last_build.as_ref().expect("nothing was kept");
+        assert!(!kept.ok);
+        assert!(
+            kept.text.to_lowercase().contains("fizz"),
+            "what it actually said was thrown away: {:?}",
+            kept.text
+        );
+        // …and put in front of somebody, because nothing went in the margin
+        // and asking for it is the part nobody knows to do.
+        let shown = app
+            .docs
+            .iter()
+            .find(|doc| doc.name.ends_with("output"))
+            .expect("it failed and showed nothing");
+        assert!(shown.rope.to_string().to_lowercase().contains("fizz"));
+        // And the status line carries what the compiler said rather than the
+        // count of nothing it used to: "cc found nothing it could read" is a
+        // sentence about the parser, not about the program.
+        assert!(!app.status.text.contains("found nothing"), "{}", app.status.text);
+        assert_eq!(app.status.tone, Tone::Bad, "{}", app.status.text);
+        let first = kept
+            .text
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .expect("it printed something");
+        assert_eq!(app.status.text, format!("cc: {first}"));
+
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(path.with_extension("")).ok();
     }
 
     #[test]
@@ -11075,6 +12969,231 @@ mod tests {
         assert!(matches!(app.overlay, Overlay::None));
     }
 
+    // ---- Debugging ----
+
+    #[test]
+    fn a_breakpoint_follows_the_text_it_was_put_on() {
+        // The bug this is about: put a breakpoint on line ten, add an import
+        // at the top, and the debugger stops on line nine — which is a line
+        // you did not choose, doing something you did not ask for, and looks
+        // for all the world like a debugger that is broken.
+        let (mut app, _rx) = editor();
+        typed(&mut app, "one\ntwo\nthree\n");
+        let id = app.view().doc;
+        app.doc_mut(id).expect("a buffer").toggle_breakpoint(2);
+        assert_eq!(app.doc(id).expect("a buffer").breakpoint_lines(), vec![2]);
+
+        // A line put in above it.
+        app.go_to(0, 0);
+        typed(&mut app, "zero\n");
+        assert_eq!(
+            app.doc(id).expect("a buffer").breakpoint_lines(),
+            vec![3],
+            "the breakpoint should have moved down with `three`"
+        );
+    }
+
+    #[test]
+    fn clicking_the_left_of_the_margin_puts_a_breakpoint_there() {
+        // The gesture every editor with a debugger in it has, and the reason
+        // the mark sits in the blank column the line number is padded with:
+        // it costs the numbers no room and it is where the pointer goes.
+        let (mut app, _rx) = editor();
+        typed(&mut app, "one\ntwo\nthree\n");
+        app.panes[0].gutter = 6;
+        let id = app.view().doc;
+
+        // Row 1 is the first line of the text — the pane starts at y = 1.
+        app.click(0, 2, KeyModifiers::NONE);
+        assert_eq!(app.doc(id).expect("a buffer").breakpoint_lines(), vec![1]);
+        // And clicking it again takes it off.
+        app.click(0, 2, KeyModifiers::NONE);
+        assert!(app.doc(id).expect("a buffer").breakpoint_lines().is_empty());
+    }
+
+    #[test]
+    fn clicking_the_line_numbers_still_takes_the_line() {
+        // The breakpoint column is one column wide. The rest of the margin
+        // goes on meaning what it always meant, or this would be a feature
+        // that broke selecting a line by clicking its number.
+        let (mut app, _rx) = editor();
+        typed(&mut app, "one\ntwo\nthree\n");
+        app.panes[0].gutter = 6;
+        let id = app.view().doc;
+
+        app.click(3, 2, KeyModifiers::NONE);
+        assert!(
+            app.doc(id).expect("a buffer").breakpoint_lines().is_empty(),
+            "clicking a line number is not putting a breakpoint on it"
+        );
+        assert!(
+            !app.view().sel.primary().is_empty(),
+            "it should have taken the line"
+        );
+    }
+
+    #[test]
+    fn a_breakpoint_in_a_buffer_with_no_file_is_not_offered_to_the_adapter() {
+        // An adapter is told about breakpoints by path. A scratch buffer has
+        // none, and an adapter told about a file that does not exist answers
+        // with an error rather than ignoring it.
+        let (mut app, _rx) = editor();
+        typed(&mut app, "one\ntwo\n");
+        let id = app.view().doc;
+        app.doc_mut(id).expect("a buffer").toggle_breakpoint(0);
+        assert!(app.breakpoints_now().is_empty());
+    }
+
+    #[test]
+    fn a_cursor_is_never_put_past_the_end_of_the_buffer() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "short\n");
+        app.place_cursor(10_000, false, false);
+        assert_eq!(app.view().cursor(), app.here().len_chars());
+    }
+
+    #[test]
+    fn a_panel_can_never_hold_a_breakpoint() {
+        // Not tidiness — this is what makes a feedback loop impossible. The
+        // panel is filled by replacing its whole buffer, which reaches
+        // `after_edit_to` as an edit like any other. If that edit could look
+        // like one that moved a breakpoint, the adapter would be told, its
+        // reply would refresh the panel, and the editor would never read
+        // another keystroke. A buffer that cannot have one cannot start it.
+        let (mut app, _rx) = editor();
+        app.run(Cmd::DEBUG_PANEL);
+        let id = app.debug_panel.expect("a panel");
+        app.show(id);
+        app.go_to(0, 0);
+        app.run(Cmd::TOGGLE_BREAKPOINT);
+        assert!(app.doc(id).expect("a buffer").breakpoints.is_empty());
+        // And it is not a file, so it is never offered to the adapter either.
+        assert!(app.breakpoints_now().iter().all(|(_, l)| !l.is_empty()));
+    }
+
+    #[test]
+    fn the_debug_panel_says_how_to_start_when_nothing_is_running() {
+        // A panel that is empty until you have already worked out how to use
+        // it is a panel that teaches nobody anything.
+        let (mut app, _rx) = editor();
+        app.run(Cmd::DEBUG_PANEL);
+        let id = app.debug_panel.expect("a panel");
+        let text = app.doc(id).expect("a buffer").rope.to_string();
+        assert!(text.contains("Nothing is being debugged"), "{text}");
+        assert!(text.contains("F5"), "it should say which key: {text}");
+        assert!(text.contains("F9"), "and which one sets a breakpoint: {text}");
+        // And it is docked along the bottom rather than opened as a tab.
+        let at = app.pane_showing_docked(id).expect("docked");
+        assert_eq!(
+            app.panes[at].dock.map(|d| d.edge),
+            Some(crate::view::Edge::Bottom)
+        );
+
+        // Running the command again puts it away, which is what a docked
+        // panel's own command means everywhere else in the editor. The pane
+        // goes and the buffer stays — a dock that gave its buffer back to the
+        // pool would leave a sideways second copy of the file you are editing
+        // where the panel was, which is exactly what it used to do.
+        app.run(Cmd::DEBUG_PANEL);
+        assert!(app.pane_showing_docked(id).is_none(), "the pane should go");
+        assert!(
+            app.panes.iter().all(|p| p.doc != id),
+            "and nothing should be left showing the panel's buffer"
+        );
+        // The buffer goes too, or it turns into a tab called `Debug` in the
+        // row at the top — a docked panel that has lost its dock is an
+        // ordinary buffer, and nobody asked for one.
+        assert!(app.doc(id).is_none(), "the buffer should have gone");
+        assert!(app.debug_panel.is_none());
+
+        // And showing it again builds a fresh one rather than a second dock.
+        app.run(Cmd::DEBUG_PANEL);
+        let again = app.debug_panel.expect("a panel");
+        assert!(app.pane_showing_docked(again).is_some());
+        assert_eq!(
+            app.panes.iter().filter(|p| p.dock.is_some()).count(),
+            1,
+            "one panel, not two"
+        );
+    }
+
+    #[test]
+    fn closing_a_panels_buffer_takes_its_sidebar_with_it() {
+        // The bug: a docked pane whose buffer was closed was handed "whatever
+        // was looked at most recently" like any other pane — which turned the
+        // debugger's panel into a second, sideways copy of the file you were
+        // editing, sitting along the bottom of the screen where the stack had
+        // been.
+        let (mut app, _rx) = editor();
+        let file = app.view().doc;
+        app.run(Cmd::DEBUG_PANEL);
+        let panel = app.debug_panel.expect("a panel");
+        assert!(app.pane_showing_docked(panel).is_some());
+
+        app.close_doc(panel);
+        assert!(
+            app.panes.iter().all(|p| p.dock.is_none()),
+            "the dock should have gone with the buffer it was showing"
+        );
+        assert!(app.panes.iter().all(|p| p.doc == file));
+    }
+
+    #[test]
+    fn stepping_with_nothing_running_says_so_rather_than_doing_nothing() {
+        let (mut app, _rx) = editor();
+        app.run(Cmd::DEBUG_STEP_OVER);
+        assert!(app.status.text.contains("F5"), "{}", app.status.text);
+        app.run(Cmd::DEBUG_STOP);
+        assert!(
+            app.status.text.contains("nothing is being debugged"),
+            "{}",
+            app.status.text
+        );
+    }
+
+    #[test]
+    fn there_is_no_arrow_in_the_margin_when_nothing_is_stopped() {
+        let (app, _rx) = editor();
+        assert!(app.stopped_at().is_none());
+    }
+
+    #[test]
+    fn breakpoints_can_be_cleared_in_this_file_or_everywhere() {
+        let (mut app, _rx) = editor();
+        typed(&mut app, "one\ntwo\nthree\n");
+        let first = app.view().doc;
+        let doc = app.doc_mut(first).expect("a buffer");
+        doc.toggle_breakpoint(0);
+        doc.toggle_breakpoint(2);
+
+        // A second file, with one of its own.
+        app.run(Cmd::NEW);
+        typed(&mut app, "four\nfive\n");
+        let second = app.view().doc;
+        assert_ne!(first, second);
+        app.doc_mut(second).expect("a buffer").toggle_breakpoint(1);
+
+        // Clearing this file leaves the other one alone, which is the whole
+        // reason there are two commands.
+        app.run(Cmd::CLEAR_BREAKPOINTS);
+        assert!(app.doc(second).expect("a buffer").breakpoints.is_empty());
+        assert_eq!(app.doc(first).expect("a buffer").breakpoint_lines(), vec![0, 2]);
+
+        app.run(Cmd::CLEAR_ALL_BREAKPOINTS);
+        assert!(app.doc(first).expect("a buffer").breakpoints.is_empty());
+        assert!(app.status.text.contains("gone"), "{}", app.status.text);
+    }
+
+    #[test]
+    fn clearing_breakpoints_says_which_file_it_was_about() {
+        // "All 14 breakpoints are gone" when you meant to clear one file is a
+        // thing to find out now rather than the next time you run.
+        let (mut app, _rx) = editor();
+        typed(&mut app, "one\ntwo\n");
+        app.run(Cmd::CLEAR_BREAKPOINTS);
+        assert!(app.status.text.contains("there were none in"), "{}", app.status.text);
+    }
+
     #[test]
     fn a_panel_gets_the_keys_that_would_have_changed_the_text() {
         let (mut app, _rx) = editor();
@@ -11087,7 +13206,7 @@ mod tests {
         if let Some(doc) = app.doc_mut(id) {
             doc.read_only = true;
             doc.panel = Some(crate::doc::Panel {
-                plugin: "cargo".into(),
+                owner: crate::doc::Owner::Plugin("cargo".into()),
                 id: "cargo/report".into(),
                 spans: Vec::new(),
                 actions: Vec::new(),
@@ -11258,7 +13377,7 @@ mod tests {
         let id = app.view().doc;
         if let Some(doc) = app.doc_mut(id) {
             doc.panel = Some(crate::doc::Panel {
-                plugin: "cargo".into(),
+                owner: crate::doc::Owner::Plugin("cargo".into()),
                 id: "cargo/report".into(),
                 spans: Vec::new(),
                 actions: vec![(Range::new(4, 9), "go:somewhere".into())],
@@ -12504,6 +14623,263 @@ mod tests {
             Some(0),
             "the first tab was moved before the first tab"
         );
+    }
+
+    #[test]
+    fn attaching_offers_the_projects_own_programs_first() {
+        // On a machine with two hundred processes on it, the one you want is
+        // nearly always the thing you just built — and the editor knows which
+        // those are, so making somebody scroll past `pipewire` to find it
+        // would be withholding an answer it already has.
+        let (mut app, _rx) = editor();
+        let path = scratch("attach-me.c");
+        std::fs::write(&path, "int main(void){return 0;}\n").expect("written");
+        app.open_path(&path);
+        app.project = path.parent().expect("a directory").to_path_buf();
+
+        // Something of the project's, and something that is not.
+        let mine = app.project.join("mine");
+        std::fs::copy("/bin/sleep", &mine).expect("a program to run");
+        let mut ours = std::process::Command::new(&mine)
+            .arg("30")
+            .spawn()
+            .expect("started");
+        let mut theirs = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("started");
+
+        app.run(Cmd::DEBUG_ATTACH);
+        let rows: Vec<Row> = match &app.overlay {
+            Overlay::Picker(picker) => {
+                (0..picker.len()).filter_map(|at| picker.row(at).cloned()).collect()
+            }
+            _ => panic!("no list went up: {}", app.status.text),
+        };
+        let at = |pid: u32| {
+            rows.iter()
+                .position(|row| matches!(row.choice, Choice::Process(it) if it == pid))
+                .unwrap_or_else(|| panic!("{pid} was not offered"))
+        };
+        assert!(
+            at(ours.id()) < at(theirs.id()),
+            "something that is not the project's came first"
+        );
+        // And it says which is which, rather than leaving the order to be
+        // noticed.
+        assert_eq!(rows[at(ours.id())].tag.as_deref(), Some("here"));
+        assert_eq!(rows[at(theirs.id())].tag, None);
+
+        ours.kill().ok();
+        ours.wait().ok();
+        theirs.kill().ok();
+        theirs.wait().ok();
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_file(&mine).ok();
+    }
+
+    #[test]
+    fn a_project_with_no_marker_in_it_is_still_the_project_you_opened() {
+        // `project_root` is handed a path and knows nothing else, so when it
+        // finds no marker it answers with the directory the file sits in.
+        // For a build that is `src/`, and `make` run in `src/` is `make` with
+        // no `Makefile` in front of it. The editor knows the directory it was
+        // opened on, which is what everything else here already means by "the
+        // project".
+        let (mut app, _rx) = editor();
+        let root = scratch("no-marker").parent().expect("a directory").to_path_buf();
+        let inside = root.join("src");
+        std::fs::create_dir_all(&inside).expect("a place to work");
+        let file = inside.join("main.c");
+        std::fs::write(&file, "int main(void){return 0;}\n").expect("written");
+        app.project = root.clone();
+
+        let markers = vec![".git".to_string()];
+        assert_eq!(
+            lang::project_root(&file, &markers),
+            inside,
+            "the thing being corrected for"
+        );
+        assert_eq!(app.root_for(&file, &markers), root, "it settled for src/");
+
+        // A marker that *is* there still wins: this only fills a hole, it does
+        // not overrule an answer.
+        std::fs::write(inside.join("Makefile"), "all:\n").expect("written");
+        let markers = vec!["Makefile".to_string()];
+        assert_eq!(
+            app.root_for(&file, &markers),
+            inside,
+            "the nearest Makefile lost to the directory textfold was opened on"
+        );
+
+        // And a file from somewhere else entirely is not part of this project,
+        // so guessing this project's directory for it would be worse than the
+        // directory it lives in.
+        let elsewhere = scratch("far-away.c");
+        std::fs::write(&elsewhere, "int main(void){return 0;}\n").expect("written");
+        let markers = vec![".git".to_string()];
+        assert_eq!(
+            app.root_for(&elsewhere, &markers),
+            elsewhere.parent().expect("a directory"),
+        );
+
+        std::fs::remove_dir_all(&inside).ok();
+        std::fs::remove_file(&elsewhere).ok();
+    }
+
+    /// A pane holding a panel with one plain stretch and one that does
+    /// something, laid out so a test can point at either.
+    fn a_panel(app: &mut App) -> DocId {
+        let id = app.new_scratch();
+        if let Some(doc) = app.doc_mut(id) {
+            doc.read_only = true;
+            doc.panel = Some(crate::doc::Panel {
+                // A plugin that is not running, so acting on it does nothing
+                // at all — this is about what a click *moves*, not about what
+                // the action does.
+                owner: crate::doc::Owner::Plugin("nobody".into()),
+                id: "tree".into(),
+                spans: Vec::new(),
+                actions: Vec::new(),
+            });
+        }
+        app.show(id);
+        app.write_panel(
+            id,
+            &[json!({ "spans": [
+                { "text": "plain " },
+                { "text": "[button]", "action": "open:1" },
+            ]})],
+        );
+        id
+    }
+
+    #[test]
+    fn what_a_panel_offers_lights_up_under_the_pointer() {
+        // A panel's actionable text is the only thing inside a pane that
+        // behaves like a button, and it used to look exactly like the text
+        // beside it: the only way to find out whether something could be
+        // clicked was to click it.
+        let (mut app, _rx) = editor();
+        a_panel(&mut app);
+        let area = app.panes[app.focus].area;
+        // "plain " is six characters, so the button starts six columns in.
+        let on_button = area.x + 8;
+        let on_plain = area.x + 2;
+
+        let lit = app.panel_action_under(app.focus, on_button, area.y);
+        assert!(lit.is_some_and(|range| range.start() == 6 && range.end() == 14), "{lit:?}");
+        // And the words beside it are words, not a button.
+        assert_eq!(app.panel_action_under(app.focus, on_plain, area.y), None);
+        // Nor is the blank line under it, which has no spans at all.
+        assert_eq!(app.panel_action_under(app.focus, on_button, area.y + 1), None);
+    }
+
+    #[test]
+    fn clicking_what_a_panel_offers_does_not_leave_a_caret_in_it() {
+        // Clicking a button opened a file, stepped a program, folded a tree —
+        // and then dropped a text caret in the middle of its label, in a
+        // buffer that cannot be typed into. It also moved the one thing the
+        // keyboard uses to pick a row, so a click quietly changed what Enter
+        // would do next.
+        let (mut app, _rx) = editor();
+        a_panel(&mut app);
+        let area = app.panes[app.focus].area;
+        let click = |app: &mut App, column| {
+            app.handle(Event::Term(TermEvent::Mouse(MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row: area.y,
+                modifiers: KeyModifiers::NONE,
+            })));
+        };
+
+        click(&mut app, area.x + 8);
+        assert_eq!(
+            app.view().sel.primary().head,
+            0,
+            "clicking a button moved the caret onto its label"
+        );
+        // But the panel is still a buffer you can put the caret in on purpose,
+        // which is how the keyboard picks a row at all.
+        click(&mut app, area.x + 2);
+        assert_eq!(app.view().sel.primary().head, 2);
+    }
+
+    #[test]
+    fn a_drag_out_of_one_pane_stays_in_the_pane_it_began_in() {
+        // The crash this is about, exactly as it was reported: press in the
+        // debugger's panel, drag up into the source file, and textfold is
+        // gone. `position_at` answered with whichever pane the pointer was
+        // over, so an offset four thousand characters into `main.c` became
+        // the selection head of a panel holding four hundred — and the next
+        // frame asked the rope for a slice that is not there.
+        //
+        // Nothing about it was specific to the debugger. Any two panes
+        // whose buffers are different lengths would do it, and the panel is
+        // merely where somebody is most likely to drag out of, being short
+        // and full of things that look clickable.
+        let (mut app, _rx) = editor();
+        let long = scratch("dragged-into.txt");
+        std::fs::write(&long, "a line of text\n".repeat(400)).expect("written");
+        app.open_path(&long);
+        app.split();
+        // The pane the drag starts in holds far less text than the one the
+        // pointer ends over, which is the whole of the setup.
+        let short = app.new_scratch();
+        if let Some(doc) = app.doc_mut(short) {
+            doc.name = "Debug".into();
+        }
+        app.show(short);
+        let (from, onto) = (app.focus, 1 - app.focus);
+        let small = app.doc(short).expect("a buffer").len_chars();
+
+        let mouse = |app: &mut App, kind, column, row| {
+            app.handle(Event::Term(TermEvent::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })));
+        };
+        let area = app.panes[from].area;
+        mouse(
+            &mut app,
+            MouseEventKind::Down(MouseButton::Left),
+            area.x,
+            area.y,
+        );
+        assert_eq!(app.focus, from, "the press did not land where it was aimed");
+        let over = app.panes[onto].area;
+        mouse(
+            &mut app,
+            MouseEventKind::Drag(MouseButton::Left),
+            over.x + over.width / 2,
+            over.y + over.height - 1,
+        );
+
+        // Both ends of what is selected are inside the buffer the drag began
+        // in. Anything else is a panic on the next frame rather than a
+        // selection that looks slightly wrong.
+        let range = app.panes[from].sel.primary();
+        assert!(
+            range.anchor <= small && range.head <= small,
+            "the drag took a position from the other pane: {range:?} in {small} characters"
+        );
+        // And laying it out is the moment the old bug went off, so it is laid
+        // out: `Layout::place` is what the drawing asks where the cursor is,
+        // and what used to take the rope past its end.
+        let doc = app.doc(short).expect("a buffer");
+        let layout = crate::view::Layout {
+            rope: &doc.rope,
+            width: app.panes[from].area.width as usize,
+            tab_width: 4,
+            wrap: true,
+        };
+        layout.place(range.head);
+        layout.place(range.anchor);
+
+        std::fs::remove_file(&long).ok();
     }
 
     #[test]

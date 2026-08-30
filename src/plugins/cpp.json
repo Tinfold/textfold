@@ -1,7 +1,7 @@
 {
   "id": "cpp",
   "name": "C++",
-  "about": "What C++ is: colours, comments, and what a .cpp file is",
+  "about": "What C++ is: colours, comments, what a .cpp file is, and how to build and debug one",
   "languages": {
     "cpp": {
       "extensions": [
@@ -19,7 +19,67 @@
       ],
       "grammar": {
         "built_in": "c"
-      }
+      },
+      "debuggers": [
+        {
+          "name": "gdb",
+          "command": "gdb",
+          "args": [
+            "--interpreter=dap"
+          ],
+          "roots": [
+            "Makefile",
+            "makefile",
+            "GNUmakefile",
+            "CMakeLists.txt",
+            "meson.build",
+            "build.ninja",
+            "compile_commands.json",
+            ".git"
+          ],
+          "launch": {
+            "request": "launch",
+            "program": "${file_stem}",
+            "cwd": "${root}"
+          },
+          "attach": {
+            "request": "attach",
+            "program": "${program}",
+            "pid": "${pid}"
+          },
+          "see": "gdb debugs the program, not the source: `program` is the file `cc -g` produced. F5 builds it first, and Ctrl-Shift-B builds it on its own. A project with a build of its own says so with {\"tools\": {\"c++\": {\"command\": \"make\", \"args\": []}}} in your settings for this plugin; to point gdb at a build you already have, say {\"debuggers\": {\"gdb\": {\"launch\": {\"program\": \"…\"}}}} instead."
+        }
+      ]
     }
-  }
+  },
+  "tools": [
+    {
+      "name": "c++",
+      "about": "Compile this file with debugging in it, so there is something to debug",
+      "command": "c++",
+      "args": [
+        "-g",
+        "-O0",
+        "-o",
+        "${file_stem}",
+        "${file}"
+      ],
+      "languages": [
+        "cpp"
+      ],
+      "roots": [
+        "Makefile",
+        "makefile",
+        "GNUmakefile",
+        "CMakeLists.txt",
+        "meson.build",
+        "build.ninja",
+        "compile_commands.json",
+        ".git"
+      ],
+      "output": "problems",
+      "pattern": "%f:%l:%c: %t: %m",
+      "builds": true
+    }
+  ]
 }

@@ -336,6 +336,7 @@ impl Hosts {
                 root,
                 env: &config.env,
                 label: plugin,
+                dialect: rpc::Dialect::JsonRpc,
             },
             self.tx.clone(),
             move |incoming| crate::app::Event::Plugin(id, incoming),

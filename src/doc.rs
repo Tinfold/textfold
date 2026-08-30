@@ -200,6 +200,19 @@ pub struct Document {
     pub diagnostics: Vec<Diagnostic>,
     /// What makes this a plugin's buffer rather than a file's.
     pub panel: Option<Panel>,
+    /// Where the debugger should stop, as character positions.
+    ///
+    /// Positions and not line numbers, so that a breakpoint follows the text
+    /// it was put on. Adding a line above the one you are debugging must not
+    /// silently move the breakpoint onto the line before — it is the same
+    /// rule the diagnostics get, and for a stronger reason: a diagnostic
+    /// pointing at the wrong line is confusing, and a breakpoint on the wrong
+    /// line is an hour of not believing your own program.
+    ///
+    /// They live on the document rather than in the debugger for the same
+    /// reason a cursor does: a breakpoint is a fact about a file, and it is
+    /// there before any adapter starts and after it has gone.
+    pub breakpoints: Vec<usize>,
     /// Text a plugin is offering to put in, shown but not there.
     pub hint: Option<Hint>,
     /// Why this file has no colours, where the reason is worth showing — so
@@ -300,8 +313,8 @@ pub struct Hint {
 /// What a panel does differently is exactly two things: where its colours come
 /// from, and that parts of it do something when you press Enter on them.
 pub struct Panel {
-    /// Which plugin owns it: the id its host is found by.
-    pub plugin: String,
+    /// Whose buffer this is.
+    pub owner: Owner,
     /// Which of that plugin's panels this is: `stm32/pins`.
     pub id: String,
     /// The colours, as character ranges. Stands in for the tree-sitter
@@ -312,6 +325,32 @@ pub struct Panel {
     pub spans: Vec<(Range, crate::theme::Role)>,
     /// Which stretches do something, and what to send back when they do.
     pub actions: Vec<(Range, String)>,
+}
+
+/// Who fills a panel.
+///
+/// Nearly always a plugin, and the debugger is the exception worth an enum
+/// rather than a reserved plugin id: the panel machinery — the colours, the
+/// stretches that do something, the keys a panel gets because its text is not
+/// yours to type into — is exactly what a stack and a set of variables want,
+/// and none of it should have to be written twice. What differs is only where
+/// an Enter on a row is sent, which is one match in one place.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub enum Owner {
+    /// A plugin, by the id its host is found by.
+    Plugin(String),
+    /// The debugger's own panel. There is one, because there is one session.
+    Debugger,
+}
+
+impl Owner {
+    /// The plugin behind it, where there is one.
+    pub fn plugin(&self) -> Option<&str> {
+        match self {
+            Owner::Plugin(id) => Some(id),
+            Owner::Debugger => None,
+        }
+    }
 }
 
 /// Where a complaint came from.
@@ -499,6 +538,7 @@ impl Document {
             syntax: None,
             diagnostics: Vec::new(),
             panel: None,
+            breakpoints: Vec::new(),
             hint: None,
             colours_off: None,
             stamp: None,
@@ -579,6 +619,7 @@ impl Document {
             syntax: None,
             diagnostics: Vec::new(),
             panel: None,
+            breakpoints: Vec::new(),
             hint: None,
             colours_off: None,
             seen: stamp,
@@ -607,6 +648,56 @@ impl Document {
 
     pub fn is_modified(&self) -> bool {
         self.saved_at != Some(self.done.len())
+    }
+
+    // ---- Breakpoints ----
+
+    /// Which lines have a breakpoint on them, in order and without repeats.
+    ///
+    /// Worked out from the positions rather than stored, because the positions
+    /// are what moves with the text: two breakpoints on lines that an edit has
+    /// joined are one breakpoint, and the answer to "which lines" has to say
+    /// so rather than saying the same line twice.
+    pub fn breakpoint_lines(&self) -> Vec<usize> {
+        let mut lines: Vec<usize> = self
+            .breakpoints
+            .iter()
+            .map(|at| crate::text::line_of(&self.rope, (*at).min(self.len_chars())))
+            .collect();
+        lines.sort_unstable();
+        lines.dedup();
+        lines
+    }
+
+    pub fn has_breakpoint(&self, line: usize) -> bool {
+        self.breakpoints
+            .iter()
+            .any(|at| crate::text::line_of(&self.rope, (*at).min(self.len_chars())) == line)
+    }
+
+    /// Put one on this line, or take away the one that is there.
+    ///
+    /// Answers whether there is one there now, so that whoever asked can tell
+    /// the adapter and say so in the status line without asking again.
+    pub fn toggle_breakpoint(&mut self, line: usize) -> bool {
+        if line >= self.len_lines() {
+            return false;
+        }
+        let was = self.breakpoints.len();
+        let rope = &self.rope;
+        let len = rope.len_chars();
+        self.breakpoints
+            .retain(|at| crate::text::line_of(rope, (*at).min(len)) != line);
+        if self.breakpoints.len() != was {
+            return false;
+        }
+        // The start of the line, which is a position that survives the line
+        // being edited: typing at the end of it leaves the breakpoint where
+        // it was, and typing a newline before it carries the breakpoint down
+        // with the code it was put on.
+        self.breakpoints.push(crate::text::line_start(rope, line));
+        self.breakpoints.sort_unstable();
+        true
     }
 
     /// Say that what is in the rope is what is on disk, without writing
@@ -1284,6 +1375,41 @@ mod tests {
 
     fn sel(at: usize) -> Selections {
         Selections::single(Range::point(at))
+    }
+
+    #[test]
+    fn a_breakpoint_goes_on_and_comes_off_the_line_you_asked_about() {
+        let mut d = doc("one\ntwo\nthree\n");
+        assert!(d.toggle_breakpoint(1), "it should go on");
+        assert!(d.has_breakpoint(1));
+        assert!(!d.has_breakpoint(0));
+        assert_eq!(d.breakpoint_lines(), vec![1]);
+        assert!(!d.toggle_breakpoint(1), "and off again");
+        assert!(d.breakpoint_lines().is_empty());
+    }
+
+    #[test]
+    fn a_breakpoint_past_the_end_of_the_file_is_not_put_anywhere() {
+        let mut d = doc("one\n");
+        assert!(!d.toggle_breakpoint(40));
+        assert!(d.breakpoints.is_empty());
+    }
+
+    #[test]
+    fn two_breakpoints_on_lines_that_have_become_one_are_one_breakpoint() {
+        // The reason lines are worked out from positions rather than stored:
+        // an edit can join two lines, and the answer to "which lines have a
+        // breakpoint" then has to be one line rather than that line twice.
+        // The adapter is told this list, and told the same line twice it sets
+        // two breakpoints and reports two.
+        let mut d = doc("one\ntwo\nthree\n");
+        d.toggle_breakpoint(0);
+        d.toggle_breakpoint(1);
+        assert_eq!(d.breakpoint_lines(), vec![0, 1]);
+        // Both positions now point into the same line.
+        d.rope = Rope::from_str("onetwo\nthree\n");
+        d.breakpoints = vec![0, 3];
+        assert_eq!(d.breakpoint_lines(), vec![0]);
     }
 
     #[test]

@@ -354,8 +354,14 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::GREP, &["alt-g", "ctrl-shift-f", "f7"]),
     // Beside the keys for the next problem, since stepping through your own
     // changes is the same shape of thing as stepping through the compiler's.
-    (Cmd::NEXT_CHANGE, &["f9"]),
-    (Cmd::PREV_CHANGE, &["shift-f9"]),
+    //
+    // Ctrl and not bare F9, which every debugger ever written uses for a
+    // breakpoint. That is the one key here textfold does not get to have an
+    // opinion about: somebody who has used any other editor will press F9
+    // expecting a breakpoint, and a key that does something else instead is
+    // worse than a key that does nothing.
+    (Cmd::NEXT_CHANGE, &["ctrl-f9"]),
+    (Cmd::PREV_CHANGE, &["ctrl-shift-f9"]),
 
     // Language servers.
     (Cmd::COMPLETION, &["ctrl-space"]),
@@ -375,6 +381,23 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     // Not Ctrl-Shift-Space: with shift folded into the character, that is the
     // same keystroke as Ctrl-Space, which already asks for completions.
     (Cmd::SIGNATURE_HELP, &["alt-p"]),
+
+    // Debugging. The keys every debugger written in the last thirty years
+    // uses, which is the whole of the argument for them — somebody who has
+    // used Visual Studio, VS Code, IntelliJ or Eclipse already knows these,
+    // and somebody who has not is going to look them up in one of those.
+    (Cmd::DEBUG, &["f5"]),
+    (Cmd::DEBUG_STOP, &["shift-f5"]),
+    (Cmd::DEBUG_STEP_OVER, &["f10"]),
+    (Cmd::DEBUG_STEP_INTO, &["f11"]),
+    (Cmd::DEBUG_STEP_OUT, &["shift-f11"]),
+    (Cmd::TOGGLE_BREAKPOINT, &["f9"]),
+    (Cmd::DEBUG_PANEL, &["alt-5"]),
+    // The key the same four editors use for a build, and a spare for the
+    // terminals and desktops that keep Ctrl-Shift for themselves. Ctrl-B is
+    // already the list of buffers and stays that way: a key people press
+    // twenty times an hour beats one they press when a compile is due.
+    (Cmd::BUILD, &["ctrl-shift-b", "f6"]),
 
     // Panes and the view.
     (Cmd::SPLIT, &["alt-v"]),
@@ -729,11 +752,11 @@ mod tests {
 
     #[test]
     fn a_plugin_may_have_the_keys_nobody_else_wanted() {
-        // The built-ins alone: whether F6 is spare must not depend on which
-        // plugins the person running the tests has installed.
+        // The built-ins alone: whether the spare key is spare must not depend
+        // on which plugins the person running the tests has installed.
         let mut keys = Keys::built_in();
         let taken = Key::parse("ctrl-s").expect("a key");
-        let spare = Key::parse("f6").expect("a key");
+        let spare = Key::parse("ctrl-f6").expect("a key");
         let was = keys.lookup(taken);
         assert!(was.is_some(), "ctrl-s should already do something");
 
@@ -751,7 +774,7 @@ mod tests {
     #[test]
     fn what_you_bind_yourself_beats_what_a_plugin_suggested() {
         let mut keys = Keys::built_in();
-        let spare = Key::parse("f6").expect("a key");
+        let spare = Key::parse("ctrl-f6").expect("a key");
         keys.suggest(spare, Cmd::ABOUT);
         // Which is what an override does: `bind`, not `suggest`.
         keys.bind(spare, Cmd::HELP);

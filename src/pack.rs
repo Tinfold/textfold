@@ -221,9 +221,19 @@ impl<'a> Sources<'a> {
 /// else is looked for along the `PATH`, which is what the shell would do and
 /// so is what a person means when they write `ruff` in a manifest.
 pub fn on_path(command: &str) -> bool {
+    which(command).is_some()
+}
+
+/// Where a command actually is, looked up the way a shell would.
+///
+/// The path and not just the answer, because "which one of these did you
+/// run" is a question a person asks the moment something goes wrong — a
+/// `python3` that has the package you installed and a `python3` that does not
+/// are the same five characters on the screen and two different programs.
+pub fn which(command: &str) -> Option<PathBuf> {
     let command = command.trim();
     if command.is_empty() {
-        return false;
+        return None;
     }
     let named = Path::new(command);
     if named.components().count() > 1 {
@@ -231,22 +241,23 @@ pub fn on_path(command: &str) -> bool {
         // executable bit is their business — a plugin may well be pointing at
         // something it hands to an interpreter, as a `.js` file handed to
         // node. Being there is the question that was asked.
-        return named.exists();
+        return named.exists().then(|| named.to_path_buf());
     }
     // A bare name is looked up the way a shell would, and there it does have
     // to be runnable: a file on the `PATH` with no executable bit is not a
     // program, and treating it as one is how a download gets mistaken for a
     // finished install.
-    let Some(path) = std::env::var_os("PATH") else {
-        return false;
-    };
-    std::env::split_paths(&path).any(|dir| {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).find_map(|dir| {
         let full = dir.join(command);
-        runnable(&full)
-            // Windows does not put the extension in the name you type.
-            || ["exe", "cmd", "bat"]
-                .iter()
-                .any(|e| runnable(&full.with_extension(e)))
+        if runnable(&full) {
+            return Some(full);
+        }
+        // Windows does not put the extension in the name you type.
+        ["exe", "cmd", "bat"]
+            .iter()
+            .map(|e| full.with_extension(e))
+            .find(|full| runnable(full))
     })
 }
 
@@ -1934,7 +1945,13 @@ mod tests {
 
     #[test]
     fn a_package_says_what_it_is_called_and_falls_back_to_its_directory() {
-        let dir = scratch("named");
+        // Its own directory, and not `named` — which the test above already
+        // has. `scratch` wipes what it is given before making it, the tests
+        // run on threads of one process, and two of them sharing a name is
+        // one wiping the other's files halfway through. That was a suite that
+        // failed about one run in three for reasons that had nothing to do
+        // with what either test was checking.
+        let dir = scratch("id-at");
         let one = dir.join("whatever");
         std::fs::create_dir_all(&one).expect("made");
         std::fs::write(one.join(MANIFEST), r#"{"id":"Cargo"}"#).expect("written");

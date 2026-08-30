@@ -66,6 +66,8 @@ pub enum Choice {
     Install(String),
     /// A plugin to take off this machine.
     Uninstall(String),
+    /// A program already running, to attach the debugger to.
+    Process(u32),
 }
 
 /// One row.
@@ -148,6 +150,8 @@ pub enum Kind {
     Uninstall,
     /// A list a plugin put up, waiting for somebody to pick from it.
     PluginPick,
+    /// The programs running on this machine, to attach a debugger to one.
+    Processes,
 }
 
 impl Kind {
@@ -173,6 +177,7 @@ impl Kind {
             // A plugin says what its own list is called. This is only the
             // fallback for one that did not.
             Kind::PluginPick => "Pick one",
+            Kind::Processes => "Attach to a running program",
         }
     }
 

@@ -337,7 +337,7 @@ fn digits(n: usize) -> usize {
 
 /// How wide the pane's left edge is: one column for the focus rule when there
 /// is more than one pane, and nothing at all when there is not.
-fn rule_width(panes: u16) -> u16 {
+pub fn rule_width(panes: u16) -> u16 {
     u16::from(panes > 1)
 }
 
@@ -451,6 +451,12 @@ fn draw_pane(frame: &mut Frame, app: &App, index: usize, ground: Color) -> Optio
         None => syntax_spans(doc, from_char, to_char),
     };
 
+    // What the pointer is resting on, worked out once for the pane. Nothing
+    // for a pane with no panel in it, which is nearly all of them.
+    let hover = app
+        .pointer
+        .and_then(|(column, row)| app.panel_action_under(index, column, row));
+
     let selections = view.sel.ranges();
     let cursors: Vec<usize> = selections.iter().map(|r| r.head).collect();
     let cursor_lines: Vec<usize> = cursors
@@ -495,6 +501,7 @@ fn draw_pane(frame: &mut Frame, app: &App, index: usize, ground: Color) -> Optio
                     screen,
                     rows: &rows,
                     spans: &spans,
+                    hover,
                     cursors: &cursors,
                     cursor_lines: &cursor_lines,
                     partner,
@@ -514,7 +521,13 @@ fn draw_pane(frame: &mut Frame, app: &App, index: usize, ground: Color) -> Optio
         line += 1;
     }
 
-    if app.panes.len() > 1 {
+    // The rule down the left edge that says which pane has the focus. Not on
+    // a docked one: a dock has no line-number margin to borrow the column
+    // from, so the rule would be drawn straight over the first character of
+    // every row — the `d` of `debugpy`, the arrow beside the frame you are
+    // standing on. Its divider already says where it ends, which is what that
+    // rule is for.
+    if app.panes.len() > 1 && view.dock.is_none() {
         mark_focus(frame.buffer_mut(), view, theme, focused);
     }
     draw_scrollbar(frame.buffer_mut(), view, doc, theme);
@@ -528,6 +541,8 @@ struct DrawRow<'a> {
     screen: u16,
     rows: &'a [usize],
     spans: &'a [(Range, crate::theme::Role)],
+    /// The stretch of a panel the pointer is on, where it is on one.
+    hover: Option<Range>,
     cursors: &'a [usize],
     cursor_lines: &'a [usize],
     partner: Option<usize>,
@@ -626,7 +641,17 @@ fn draw_row(
             .iter()
             .any(|range| range.contains(at) && !range.is_empty());
 
-        let mut style = Style::new().bg(if selected { theme.selection } else { line_bg });
+        // Lit under the pointer, in the colour every other list in textfold
+        // uses for the row you are pointing at. The span keeps its own
+        // foreground: a button's colour is what says whether it is a frame, a
+        // file or a heading, and a highlight that repainted the text would
+        // throw that away to say something the background already says.
+        let hovered = it.hover.is_some_and(|range| range.contains(at));
+        let mut style = Style::new().bg(if selected || hovered {
+            theme.selection
+        } else {
+            line_bg
+        });
         style = style.fg(colour_of(it.spans, at, theme));
 
         if let Some(severity) = diagnostics
@@ -821,6 +846,34 @@ fn draw_gutter(buf: &mut Buffer, app: &App, view: &View, doc: &Document, it: Gut
         .map(|d| d.severity)
         .min();
 
+    // And what the debugger has to say about it: a dot where you asked it to
+    // stop, an arrow where it actually has. The arrow wins, because a line
+    // that is both is a line where the interesting fact is that the program
+    // is standing on it.
+    let stopped = app
+        .stopped_at()
+        .is_some_and(|(path, at)| at == line && doc.path.as_deref() == Some(path));
+    // A hollow dot for one the adapter would not take. An adapter refuses a
+    // breakpoint on a blank line or a comment, and moves one to the next line
+    // that has code on it — and a breakpoint that looks exactly like a working
+    // one while quietly being nothing is the most confusing thing a debugger
+    // does. Hollow only once the adapter has actually been asked: before that
+    // it is neither confirmed nor refused.
+    let taken = doc
+        .path
+        .as_deref()
+        .and_then(|path| app.debug.is_verified(path, line))
+        .unwrap_or(true);
+    let breakpoint = match (doc.has_breakpoint(line), taken) {
+        (false, _) => None,
+        (true, true) => Some((BREAKPOINT_MARK, theme.error)),
+        (true, false) => Some((UNSET_BREAKPOINT_MARK, theme.muted)),
+    };
+    let mark = match stopped {
+        true => Some((STOPPED_MARK, theme.warning)),
+        false => breakpoint,
+    };
+
     let numbers = app.config.line_numbers();
     let cursor_line = text::line_of(&doc.rope, view.sel.primary().head);
     let label = match (numbers, numbered) {
@@ -878,7 +931,31 @@ fn draw_gutter(buf: &mut Buffer, app: &App, view: &View, doc: &Document, it: Gut
         cell.set_style(style.fg(severity_colour(severity, theme)));
         cell.set_char(severity.mark().chars().next().unwrap_or('*'));
     }
+    // Hard against the left edge of the margin, which is the blank column the
+    // line number is padded with — so a breakpoint costs no room, and lands
+    // where every other editor puts one and where the mouse expects to click.
+    //
+    // With the line numbers off there is only the one column and the
+    // diagnostic already has it. The debugger's mark takes it: a red dot you
+    // put there deliberately outranks a warning that arrived on its own, and
+    // the alternative is a breakpoint you cannot see.
+    if let Some((glyph, colour)) = mark
+        && let Some(cell) = buf.cell_mut(Position::new(x, screen))
+    {
+        cell.set_style(style.fg(colour));
+        cell.set_char(glyph);
+    }
 }
+
+/// Where you asked the debugger to stop. A filled dot, because that is what
+/// one is in every debugger anybody has used.
+const BREAKPOINT_MARK: char = '\u{25cf}';
+/// One the adapter would not take: a blank line, a comment, a file it is not
+/// running. Hollow, and in the quiet colour, because it is a breakpoint that
+/// is not going to happen.
+const UNSET_BREAKPOINT_MARK: char = '\u{25cb}';
+/// Where the program actually is.
+const STOPPED_MARK: char = '\u{25b6}';
 
 /// What colour a line's history is drawn in. Green for new, blue for changed,
 /// red for gone — the three every diff has used since diffs were in colour.
@@ -1259,6 +1336,21 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
     }
     if doc.read_only {
         chips.push(("read-only".into(), theme.warning, Cmd::ABOUT));
+    }
+    // What the debugger is doing, and a click that shows the panel where the
+    // rest of it is. Near the left of the chips because while you are
+    // debugging it is the most important thing on the bar.
+    if let Some(session) = app.debug.session() {
+        let colour = match &session.state {
+            crate::dap::State::Stopped(_) => theme.warning,
+            crate::dap::State::Ended(_) => theme.muted,
+            _ => theme.success,
+        };
+        let said = match &session.state {
+            crate::dap::State::Stopped(why) => format!("{} {why}", session.what),
+            state => format!("{} {}", session.what, state.label()),
+        };
+        chips.push((said, colour, Cmd::DEBUG_PANEL));
     }
     // What can be done about the problem under the cursor, in the words the
     // server used for it: `Import 'List' (java.util)`, and a key to press.

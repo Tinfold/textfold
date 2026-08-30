@@ -30,6 +30,7 @@ textfold                         # an empty buffer
 - [One box, several lists](#one-box-several-lists)
 - [Several cursors](#several-cursors)
 - [Language servers](#language-servers)
+- [Debugging](#debugging)
 - [Settings](#settings)
 - [Colours](#colours)
 - [Files that change underneath you](#files-that-change-underneath-you)
@@ -232,6 +233,36 @@ stretch of whitespace as well as on a name: a warning is not always about a
 word, and pointing at the squiggle is how you ask what is wrong there. Alt-K
 does the same from the keyboard, and both work with no server running at all,
 because the message has already arrived.
+
+### Debugging
+
+| Key | |
+|---|---|
+| F9 | breakpoint on this line, or off it |
+| F5 | run this file under a debugger — or carry on, when it is stopped |
+| Shift-F5 | stop the program, and the debugger with it |
+| F10 | the next line, calls and all |
+| F11 | into the call on this line |
+| Shift-F11 | out of this function |
+| Alt-5 | show the stack, the values and what it printed |
+| Ctrl-Shift-B | build this file — F6 where a desktop keeps Ctrl-Shift for itself |
+| — | `debug-attach`: attach the debugger to a program already running |
+| — | `debug-evaluate`: what does this expression come to, here |
+| — | `debug-pause`: stop the running program where it is |
+| — | `debug-output`: everything the program printed, in a buffer of its own |
+| — | `build-output`: everything the last build printed, in a buffer of its own |
+| — | `clear-breakpoints`: take every one in this file away |
+| — | `clear-all-breakpoints`: take every one in every open file away |
+
+None of them has to be remembered. The panel has a row of buttons along the
+top — continue, pause, step, stop, build — and whatever cannot be done from
+where the program is now is greyed out rather than missing.
+
+These are the keys Visual Studio, VS Code, IntelliJ and Eclipse all use, which
+is the whole of the argument for them. F9 is the one place a debugger's
+convention displaced textfold's own: stepping through your own changes moved to
+**Ctrl-F9** and **Ctrl-Shift-F9** so that F9 could mean what it means
+everywhere else.
 
 ### Panes and the view
 
@@ -773,6 +804,403 @@ until you closed and reopened it.
 
 ---
 
+## Debugging
+
+textfold speaks the Debug Adapter Protocol, which is to running a program what
+LSP is to reading one: a program somebody else wrote, at the end of a pipe,
+that knows how to stop `python` at line four and say what `n` is. `debugpy`,
+`lldb-dap` and `js-debug` are the ones who know how to debug things; textfold
+knows how to ask.
+
+Open a Python file, put the cursor on a line and press **F9**. A red dot
+appears in the margin. Press **F5**.
+
+```
+┃  1  def fizz(n):
+┃  2      total = 0
+┃  3      for i in range(n):
+┃▶ 4          total += i
+┃  5      return total
+──────────────────────────────────────────────────────────
+ ▶ Continue   ❚❚ Pause   ↷ Over   ↓ Into   ↑ Out   ■ Stop
+
+debugpy main.py breakpoint
+
+Where it is
+▸ fizz  main.py:4
+  main  main.py:9
+  <module>  main.py:13
+
+▾ Locals
+    i = 0  int
+    n = 5  int
+    total = 0  int
+
+▸ Globals
+```
+
+The file is saved first, because the adapter runs what is on disk and
+debugging yesterday's code is how an afternoon goes missing. The arrow in the
+margin is where the program is; the cursor is put there too, so the next thing
+you type happens where you are looking. **F10** steps over, **F11** steps in,
+**Shift-F11** steps out, **F5** carries on, **Shift-F5** stops — or press the
+buttons along the top of the panel, which say the same thing and do not have
+to be learned first.
+
+**Clicking the margin sets a breakpoint**, in the blank column the line numbers
+are padded with — the same gesture as everywhere else, costing the numbers no
+room. A dot the adapter would not take — on a blank line, on a comment, in a
+file it is not running — goes hollow (`○`) once it has said so. A breakpoint
+that looks exactly like a working one while quietly being nothing is the most
+confusing thing a debugger does.
+
+**Breakpoints work across as many files as you like.** The adapter is told
+about every open file that has one, and told again whenever they move. They
+live with the buffer, though — a breakpoint is a fact about a line of text —
+so closing a file takes its breakpoints with it, and the adapter is told that
+too rather than being left stopping in a file you have closed.
+
+**A breakpoint is a fact about a line of text, not a line number.** Add an
+import above the line you are debugging and the breakpoint goes down with the
+code it was put on, and the adapter is told. This is the same rule the
+diagnostics get, for a stronger reason: a warning on the wrong line is
+confusing, and a breakpoint on the wrong line is an hour of not believing your
+own program.
+
+### The panel
+
+Along the bottom, and **Alt-5** shows it or puts it away. It is an ordinary
+docked pane, so it scrolls, splits, and can be dragged wider.
+
+- **The buttons**, along the top and always in the same place. Continue,
+  pause, step over, step into, step out, stop — and, for a language that has
+  one, the build. They are the commands of the same name and nothing else, so
+  there is one account of what "step over" means. What cannot be done where
+  the program is now is drawn greyed out rather than taken away: a row whose
+  buttons come and go is a row you have to read every time, and one whose
+  buttons grey out says what the states of a debugger *are*. The live ones
+  light up under the pointer and the greyed-out ones do not, which is the
+  ordinary panel behaviour — see [A panel of its own](#a-panel-of-its-own).
+  While nothing is running there is an **⚯ Attach** too, for a language whose
+  adapter can — see [Attaching to something already
+  running](#attaching-to-something-already-running).
+- **Where it is** — the call stack, innermost first. Enter or a click on a
+  frame goes to it *and* shows that frame's values, which is how you find out
+  what the caller was holding.
+- **Locals** and **Arguments** — opened for you, because they are what you
+  stopped to look at. Which scopes those are is the adapter's own word for it,
+  not a list of names here: the protocol marks a scope as `arguments`,
+  `locals` or `registers`, and the first two open. `gdb`'s registers and
+  Python's globals stay shut, which is the difference between a panel and a
+  memory dump.
+  Anything with a `▸` opens up; a list of a list of a list opens as far as you
+  care to go.
+  A value too long to read is cut short with a `…` — Python's `__builtins__`
+  is two and a half thousand characters of `repr` and is on every frame there
+  is, and drawn in full it is not a row of the panel, it *is* the panel. Open
+  it, or ask `debug-evaluate`, to see the whole of it.
+- **What it printed** — the program's own output. Not the adapter's
+  complaints: a question we asked about a moment that has passed, answered
+  after the program moved on, is dropped rather than shown as though your
+  program had said it — and neither is an adapter clearing its throat, which
+  is how `gdb` opens every conversation with fifteen lines of GNU copyright
+  notice, sent under the category the protocol reserves for *your program's*
+  output.
+
+  What is left is coloured by who said it: standard output plainly, standard
+  error in the colour a warning gets, and textfold's own account of the run —
+  which command it ran, why nothing started — quietly, so that it does not
+  read as something you printed. **see all of it**, beside the heading, opens
+  the whole of what the program printed in a buffer of its own, which is where
+  you can search it, scroll it and copy out of it; the panel keeps the last of
+  it either way. `debug-output` in the palette does the same.
+
+`debug-evaluate` in the palette asks what an expression comes to at the frame
+you are looking at, filled in with whatever is selected or under the cursor.
+
+### What it will start, if you have it
+
+**C and C++**, out of the box, if you have `gdb` — version 14 or newer, which
+speaks the protocol itself with `--interpreter=dap`; there is nothing to
+install beside it. You do not debug `main.c`, you debug what came out of it —
+so **F5 compiles it first**, with `cc -g -O0 -o main main.c`, and starts the
+debugger on what that produced. **Ctrl-Shift-B** runs the same build on its
+own, which is what you want while you are still fixing the things that stop it
+compiling. Either way the compiler's errors land in the margin beside the
+language server's, and a build that failed does not go on to start a debugger
+on yesterday's binary.
+
+**A build that fails in a project with a build of its own says so.** A
+`Makefile`, `CMakeLists.txt`, `meson.build` or `build.ninja` in the root is the
+project having already answered the question, and a failed one-file compile
+beside one of those gets a line naming it and the two lines of settings that
+use it instead. textfold does not run it for you — how your project is built is
+your project's business — but it is the difference between a wall and a fixable
+problem. The build also *runs* where those files are rather than beside your
+source, so `make` is run in front of its `Makefile` even in a project with no
+`.git` in it. Where nothing marks a root at all, it falls back to **the
+directory textfold was opened on** — the same directory the file picker and a
+project-wide search already mean by "the project" — rather than to whichever
+directory the file happens to sit in.
+
+**What the compiler said is kept whole, not only the parts the margin can
+hold.** A linker's `undefined reference to 'fizz'` names no line; `make`
+reports which recipe failed and nothing about the code; a mistake in a header
+you have not opened has nowhere to be drawn. Every one of those is a real
+failure with, from where you are sitting, no reason given — so a build that
+fails and leaves no mark anywhere **opens what it printed in a buffer**, and
+`build-output` in the palette shows the whole of the last one at any time. When
+there *are* marks in the margin, nothing opens over your code: the status line
+carries the first line it said, and the rest is a command away.
+
+For a project with a build of its own, say so — the build is an ordinary
+[tool](#tools), so it is changed where every other tool is:
+
+```json
+{ "tools": { "cc": { "command": "make", "args": [] } } }
+```
+
+in [your settings for that plugin](#settings-for-a-plugin), and point `gdb` at
+what that build produces:
+
+```json
+{ "debuggers": { "gdb": { "launch": { "program": "${root}/build/thing" } } } }
+```
+
+This is the part of a compiled language that cannot be guessed at. What ships
+is the one-file answer, because one file is what somebody has when they first
+press the key, and a `Makefile` is not something an editor may assume.
+
+#### Attaching to something already running
+
+A debugger that can only run programs it started itself is half a debugger. The
+bugs worth reaching for one are very often in something that has been up for
+hours — a server holding a connection, a simulation four hours in — and the
+whole point of attaching is not having to reproduce that from the beginning.
+
+`debug-attach` in the palette, or the **⚯ Attach** button on the panel, offers
+what is running:
+
+```
+╭ Attach to a running program ──────────────────────────────── 155 of 155 ─╮
+│›                                                                         │
+│──────────────────────────────────────────────────────────────────────────│
+│ here wordcount  4127        /home/me/example-c/bin/wordcount -n 10 data/… │
+│      sleep  4204                                                    sleep 30 │
+│      clangd.main  4188                                                clangd │
+╰──────────────────────────────────────────────────────────────────────────╯
+```
+
+A list, because a process id is a number that means nothing to a person and is
+different every time. Three things make the right row easy to find: **the whole
+command line**, since three copies of the same program with different arguments
+is the case a list like this exists for; **`here`**, on the programs whose
+executable is inside the project you are in, which are offered first; and the
+order, **newest first**, because the thing you started a moment ago is what you
+are nearly always reaching for. Only your own processes — attaching to somebody
+else's needs privileges this editor has not got, and a list mostly full of rows
+that cannot be chosen is worse than a short one.
+
+Everything after that is the same debugger: breakpoints, the stack, the values,
+the buttons. Two differences, both because the program is not textfold's:
+
+- **Nothing is built first.** F5 compiles before it runs, because the thing it
+  is about to run has to exist. The thing you are attaching to is already
+  running; compiling over the top of it would at best be pointless.
+- **Stopping detaches rather than kills.** A program textfold launched is
+  textfold's and goes with the debugger. One it attached to was somebody else's
+  before textfold arrived, and Shift-F5 is a request to stop debugging, not a
+  request to stop that.
+
+An adapter says how it attaches in the manifest, beside how it launches:
+
+```json
+{ "name": "gdb", "command": "gdb", "args": ["--interpreter=dap"],
+  "launch": { "request": "launch", "program": "${file_stem}", "cwd": "${root}" },
+  "attach": { "request": "attach", "program": "${program}", "pid": "${pid}" } }
+```
+
+`${pid}` is the process picked and `${program}` is the file it is running, and
+they are filled in for whichever row you chose. Where the process id goes is the
+adapter's own business — `pid` for gdb, `processId` for some others, a `connect`
+object for the ones that listen on a port — so there is no list here of the
+fields textfold understands, for the same reason `launch` has none.
+
+Two small things about the placeholders, both because a `pid` is a number rather
+than a path. A value that is **nothing but** `${pid}` becomes a JSON number,
+since every adapter refuses `"pid": "4127"` on the grounds that a string is not
+a number; one with a `${pid}` inside a longer string — `"--pid=${pid}"` —
+becomes the digits. And a field asking for `${program}` on a machine that will
+not say what a process is running is **dropped** rather than left empty: an
+adapter handed `"program": ""` goes looking for a file called nothing, where one
+handed no `program` at all works it out from the pid.
+
+An adapter that attaches over a port rather than to a process id says so the
+same way, and needs no picker — there is nothing to choose:
+
+```json
+{ "debuggers": { "debugpy": { "attach": {
+    "request": "attach",
+    "connect": { "host": "127.0.0.1", "port": 5678 }
+} } } }
+```
+
+in [your settings for that plugin](#settings-for-a-plugin), against a program
+started with `python -m debugpy --listen 5678 --wait-for-client`.
+
+**Java**, through the `jdtls` plugin, which fetches the adapter as part of
+installing itself. Java's debugger is not a program: it is a plugin to the
+Java *language server*, which starts one on request and answers with a port.
+So textfold asks jdtls for a session, connects to the port it names, and from
+there it is the same protocol it speaks to gdb down a pipe. Give the server a
+moment on a project it has not seen before — it has to read the project before
+it can debug it, and it says so if you are early.
+
+**Python**, out of the box, if `debugpy` is in the environment the project uses —
+`pip install debugpy`, in the same virtual environment textfold already points
+`pyright` and `ruff` at, including one you chose by hand with
+`python-environment`. There is nothing to configure: `${python}` is the
+interpreter for this project, and falls back to the `python3` on your `PATH`
+for a script with no environment at all.
+
+**If it will not start, the panel says why.** An adapter that is installed but
+cannot run — the commonest failure by far, and `python3 -m debugpy.adapter`
+with no `debugpy` in *that* interpreter is most of it — exits having printed
+exactly what is wrong, and that goes in the panel along with the command line
+textfold actually ran and whatever the manifest says about getting it:
+
+```
+debugpy main.py would not start
+
+What went wrong
+  /home/me/other-project/.venv/bin/python3: Error while finding module
+  specification for 'debugpy.adapter' (ModuleNotFoundError: No module
+  named 'debugpy')
+  textfold ran: /home/me/other-project/.venv/bin/python3 -m debugpy.adapter
+  from the environment you are in — Python 3.14.7 — /home/me/other-project
+  debugpy goes in the environment this project uses: `python -m pip install
+  debugpy`, with that environment's python.
+  to run something else: {"debuggers": {"debugpy": {"command": "…"}}} in your
+  settings for the python plugin
+```
+
+Four things, because between them they answer the question every time: what
+it said, **which program textfold actually ran** — resolved, since two
+`python3`s look identical and are not — **where that interpreter came from**,
+and how to point it somewhere else. The one in the example is the answer
+nobody guesses on their own: a virtual environment activated in the shell an
+hour ago, for a different project, is still `VIRTUAL_ENV`, and textfold takes
+that as this project's answer for the same reason a language server does.
+`python-environment` in the palette is where you say otherwise.
+
+**The environment line only appears for an adapter that asked for one.** It is
+there because the manifest wrote `${python}`, and it says which interpreter
+that turned out to be. `gdb` is not run by a Python and does not care which one
+this project uses, so somebody debugging a C program is never told about
+virtual environments — a true sentence about somebody else's language is noise
+in exactly the place where every line has to count.
+
+An adapter that never answered did not run your program, and is never reported
+as one that finished. That distinction is the whole point of the message: "the
+program stopped" about a debugger that never started is wrong in the worst
+way, because it sounds like it worked.
+
+Everything else is a manifest. An adapter is declared beside a language's
+servers, in the same shape:
+
+```json
+{
+  "id": "lldb",
+  "languages": {
+    "rust": {
+      "debuggers": [{
+        "command": "lldb-dap",
+        "launch": {
+          "request": "launch",
+          "program": "${root}/target/debug/${plugin}",
+          "cwd": "${root}"
+        }
+      }]
+    }
+  }
+}
+```
+
+An adapter that lives inside a language server says so instead of naming a
+program. Java's does, and the shape is general — nothing here knows what a
+classpath is:
+
+```json
+{ "id": "jdtls",
+  "languages": { "java": {
+    "debuggers": [{
+      "name": "java-debug",
+      "server": "jdtls",
+      "start": "vscode.java.startDebugSession",
+      "resolve": {
+        "command": "java.project.getClasspaths",
+        "arguments": ["${file_uri}", "{\"scope\": \"runtime\"}"],
+        "into": { "classPaths": "classpaths", "modulePaths": "modulepaths" }
+      },
+      "launch": { "request": "launch", "mainClass": "${file_base}" }
+    }]
+  } } }
+```
+
+`server` is the language server to ask, by the command it runs as. `start` is
+the command to ask it to execute, whose answer is a port. `resolve` is the
+other half: some adapters will not launch without a fact only their server has
+— Java's refuses without a classpath, and what the classpath is depends on
+Maven, on Gradle, and on where jdtls compiled to — so this says *ask this, put
+the answer there*. `into` maps a field of the answer onto a field of `launch`.
+VS Code's Java extension does the same thing in code; here it is a row in a
+manifest, so a plugin for some other language whose adapter needs the same
+kind of help does not need a change to textfold.
+
+`see` is the line to show if it will not start — the only place that knows how
+to get a particular adapter is the manifest that named it, and an adapter is
+very often a package that belongs in the project rather than on the machine.
+
+`launch` is passed to the adapter exactly as written, once its
+[placeholders](#placeholders) are filled in — plus `${file}`, which is the file
+you were looking at when you pressed the key. There is no list here of the
+fields textfold understands, because such a list would be wrong for the next
+adapter you install: what goes in `launch` is whatever that adapter's own
+documentation says goes in it. `"request": "attach"` sends an `attach` instead
+— see [Attaching to something already
+running](#attaching-to-something-already-running).
+
+The arguments your program takes go in [your settings for that
+plugin](#settings-for-a-plugin), under `debuggers`, by adapter name — merged
+key by key, so naming one field leaves the rest as it shipped:
+
+```json
+{
+  "debuggers": {
+    "debugpy": { "launch": { "args": ["--verbose", "input.txt"] } }
+  }
+}
+```
+
+An adapter is switched on and off like a language server, with its own row in
+the plugins list.
+
+**One session at a time.** Not a limitation that was hard to lift and left: a
+person debugging is debugging *a thing*, and the whole of the interface — F5,
+the arrow in the margin, the panel — is about that thing.
+
+It still has a name, and that is not a contradiction. Stopping a session kills
+its adapter; killing an adapter is what makes the thread reading it notice the
+pipe close and post one last message; and that message arrives *after* the
+next session has been started, on the same channel, into the same slot. With
+nothing on it to say which session it was about, the new one is told its
+adapter has gone before it has finished starting, and everything after is
+ignored because a session that has ended stays ended. From the outside: press
+the key twice and the debugger stops working, for every file, with the program
+running perfectly well and nothing on the screen to say so.
+
+---
+
 ## Settings
 
 `~/.config/textfold/config.json`. Everything is optional; a file with nothing
@@ -1190,8 +1618,8 @@ is read, so `"python/ruff": false` goes on meaning what it meant.
 
 | | |
 |---|---|
-| `languages` | how to colour a language, comment it out, and which servers to run — see [Languages](#languages) |
-| `tools` | programs to run on the file: formatters, linters, test runs — see [Tools](#tools) |
+| `languages` | how to colour a language, comment it out, which servers to run and what debugs it — see [Languages](#languages) |
+| `tools` | programs to run on the file: formatters, linters, builds, test runs — see [Tools](#tools) |
 | `host` | a program of its own that stays running — see [A plugin that is a program](#a-plugin-that-is-a-program) |
 | `commands` | things that program answers to, each a command like any other |
 | `panels` | buffers that program fills, in a tab or docked to an edge — see [A panel of its own](#a-panel-of-its-own) |
@@ -1265,8 +1693,20 @@ there would be no way to *shorten* a list you cannot see.
 |---|---|
 | `settings` | over what the plugin's own program is told at startup |
 | `servers.<name>` | over one of its language servers: `settings`, `init_options`, `env`, `args`, `roots`, `command` |
+| `debuggers.<name>` | over one of its debug adapters: `launch`, `attach`, `env`, `args`, `roots`, `command` |
+| `tools.<name>` | over one of the programs it runs on your files: `command`, `args`, `roots`, `pattern`, `on_save` |
 
 `env` merges too, so naming one variable does not drop the others.
+
+`tools` is where a project with a build of its own says so. What ships for C is
+a compile of the one file in front of you, because one file is what somebody
+has when they first press F5; a project of nine files and a `Makefile` says:
+
+```json
+{ "tools": { "cc": { "command": "make", "args": [] } } }
+```
+
+and F5 goes on meaning what it meant.
 
 What you cannot say here is anything about what a plugin *is* — its id, its
 commands, what it needs, how to install it. Those are the plugin, not your
@@ -1602,6 +2042,7 @@ what it printed*, and that is a table rather than code.
 | `roots` | what marks the top of the project it runs in. Absent means `.git` |
 | `stdin` | whether the buffer goes in on standard input. Absent means yes for a formatter and no for everything else |
 | `on_save` | whether to run it every time the file is written |
+| `builds` | whether this is the language's build — the one F5 runs before it debugs |
 | `pattern` | how to read a line of output as a problem, for `"problems"` |
 
 `output` is one of four things:
@@ -1626,6 +2067,22 @@ takes a minute costs a minute of it running, not a minute of the editor being
 gone. A tool that prints nothing when it was meant to rewrite the file is
 treated as having failed, and the buffer is left alone: emptying somebody's
 file over a tool that fell over quietly is not a recoverable kind of wrong.
+
+A tool whose output goes to `"problems"` also keeps the whole of what it
+printed when it is the build, for the same reason: `pattern` is a filter, and a
+filter that matches nothing is indistinguishable from a program that said
+nothing. `build-output` is the unfiltered version.
+
+**`builds`** is what makes a tool the language's build. There is at most one
+per language, and it is the tool **Ctrl-Shift-B** runs and the one **F5** runs
+first: `gdb` cannot open a program nobody has compiled, and an editor that
+knows how to start a debugger but not how to make the thing it debugs has left
+the interesting half in another window. A build that failed stops there rather
+than starting a debugger on yesterday's binary — everything looks right, and
+the code being stepped through is not the code on screen. This is the whole of
+what makes C's `cc` special; in every other respect it is a tool like the rest,
+which is why it can be switched off, renamed, given a key, or pointed at `make`
+in your own settings.
 
 **`on_save`** puts a tool in the right half of the save. One that rewrites the
 file runs *before* the write, with the formatter, so what lands on disk is what
@@ -1927,6 +2384,24 @@ the editor hands it straight back and never looks inside it. That is the whole
 interaction model, and it is enough for a tree, a form, a toolbar or a list of
 problems.
 
+**A span with an `action` behaves like a button, and looks like one.** It
+lights up under the pointer, in the same colour every list in textfold uses for
+the row you are pointing at — so the way to find out whether something can be
+clicked is no longer to click it. The span keeps its own colour: what says
+"folder" or "heading" or "greyed out" is the foreground, and a highlight that
+repainted the text would throw that away to say something the background
+already says. A span with **no** action never lights, so the pointer is never
+somewhere the highlight is not, and never promises a click will do something
+when it will not.
+
+And clicking one **does not move the caret**. It opened a file, folded a tree,
+stepped a program; leaving a text cursor sitting in the middle of its label
+would say something was edited there, in a buffer that cannot be typed into —
+and it would move the one thing the keyboard uses to pick a row, so a click
+would quietly change what `Enter` means next. Clicking a panel anywhere that is
+*not* an action still places the caret, which is how you put it somewhere on
+purpose.
+
 A panel **is a buffer**. It splits, it scrolls, it has a border, and `Alt-,`
 gets you back to it — because it is the same `Document` as everything else,
 with two differences: it is read-only, and its colours come from the plugin
@@ -2105,8 +2580,10 @@ colours and no explanation, which is an afternoon.
 
 Per language: `extensions`, `filenames` (for the many files with no extension),
 `filename_patterns`, `shebangs`, `line_comment`, `block_comment`, `brackets`,
-`lsp_id`, `servers`, `grammar`. Per server: `name`, `command`, `args`, `roots`,
-`settings`, `init_options`, `env`.
+`lsp_id`, `servers`, `debuggers`, `grammar`. Per server: `name`, `command`,
+`args`, `roots`, `settings`, `init_options`, `env`. Per debugger: `name`,
+`command`, `args`, `roots`, `launch`, `attach`, `env`, `see` — see
+[Debugging](#debugging).
 
 `filename_patterns` is for the files that are neither a whole name nor an
 extension. `Dockerfile.dev` and `prod.Dockerfile` are both everywhere and
@@ -2143,6 +2620,9 @@ place, which is what lets you swap one out rather than end up with both:
 The other way to say the same thing is `{ "plugins": { "rust-analyzer": false } }`,
 which switches the shipped one off and leaves yours the only one there.
 
+`debuggers` merges by exactly the same rules, for the same reason: what a
+language *is* and what debugs it are very often two different plugins.
+
 Turning a server's settings up:
 
 ```json
@@ -2167,8 +2647,10 @@ you can see and switch off rather than something you have to remember.
 ### Placeholders
 
 A server's `args`, `env`, `settings` and `init_options` may use placeholders,
-which is how Python's servers are told where the project's virtual environment
-is without any of that being written into the editor as a special case:
+and so may a debug adapter's `command`, `args`, `env` and `launch`, and a
+tool's `args`. This is how
+Python's servers are told where the project's virtual environment is without
+any of that being written into the editor as a special case:
 
 | | |
 |---|---|
@@ -2176,6 +2658,12 @@ is without any of that being written into the editor as a special case:
 | `${venv_bin}` | the `bin` (or `Scripts`) inside it |
 | `${python}` | the interpreter inside it |
 | `${root}` | the project root |
+| `${file}` | the file being debugged or worked on — a debug adapter or a tool |
+| `${file_dir}` | the directory it is in — a debug adapter or a tool |
+| `${file_stem}` | the same without its extension: `src/main.c` becomes `src/main`, which is what `cc -g -o` makes out of it — a debug adapter or a tool |
+| `${file_base}` | its own name without its extension: `src/Main.java` becomes `Main`, which is what that class is called — a debug adapter or a tool |
+| `${file_uri}` | the file as a language server writes a path, for a question going to one — a debug adapter only |
+| `${tools}` | where textfold puts what it fetched, so a plugin can name it afterwards |
 | `${java_home}` | a JDK new enough to run a Java language server — see [Java](#java) |
 | `${java}` | the `java` inside it |
 | `${java_runtimes}` | every JDK here, in the shape jdtls' `java.configuration.runtimes` wants |
@@ -2186,6 +2674,12 @@ rather than half-filled — the setting simply is not sent, which is right: a
 `pythonPath` pointing at nothing because a substitution left a hole is worse
 than no `pythonPath`. A server that mentions no placeholder is never even
 looked up, so this costs nothing for every other language.
+
+A debug adapter is the one exception, and only for the program it runs: an
+ordinary script in an ordinary directory has no virtual environment and is
+exactly the thing somebody wants to debug, so `${python}` there falls back to
+the `python3` on your `PATH` rather than leaving a command that cannot be run
+at all.
 
 `${java_runtimes}` is a list rather than a string, and a value that is nothing
 but one placeholder is replaced by the whole value. That is the only way a
@@ -2372,12 +2866,36 @@ uninstall are the same `Plan`, run on a thread with what it says arriving as
 events, or run straight through by `--install` with what it says printed.
 
 **Everything textfold talks to that is not a person talks the same way.** A
-language server and a plugin's own program are both a child process, a thread
-that does nothing but frame JSON off its output, and a note of what each
-outstanding question meant — written once, in `rpc`, and used twice. Which is
-most of the reason a plugin can be written in any language: the format was
-picked because every language already has a library for it, not because it was
-the easiest to write here.
+language server, a plugin's own program and a debug adapter are all a child
+process, a thread that does nothing but frame JSON off its output, and a note
+of what each outstanding question meant — written once, in `rpc`, and used
+three times. The Debug Adapter Protocol is not JSON-RPC; it wraps the same
+three kinds of message in fields of its own, and that is a *dialect* chosen
+when a peer is started, so it costs four lines rather than a second copy of
+the framing, the threads and the process handling. Which is also most of the
+reason a plugin can be written in any language: the format was picked because
+every language already has a library for it, not because it was the easiest to
+write here.
+
+**Where the bytes come from is not the conversation.** Nearly every peer is a
+program textfold starts, talking on its own standard input and output. One is
+not: Java's debug adapter lives inside the Java language server, which starts
+one on request and hands back a port. So a peer is a pair of streams and,
+where there is one, a child process to stop afterwards — and everything above
+that, the framing and the three kinds of message and the note of what each
+outstanding question meant, is written once and does not know which it got.
+
+**Nothing textfold starts can take the terminal.** Every peer gets a session of
+its own, not merely a process group. The group is so that stopping one stops
+everything it started — a peer is very often a program that runs another
+program, and killing only the one you spawned leaves the other holding a
+quarter of a gigabyte forever. The session is because a debugger runs *your*
+program, and a program run in a terminal expects to read from it: `debugpy`'s
+launcher does what a shell does and calls `tcsetpgrp` to put the program it
+started in the foreground. Of our terminal. From that moment every key you
+press goes to the program being debugged, and textfold is a text editor that
+has stopped answering the keyboard. A peer with no controlling terminal has
+none to hand over.
 
 **A command is a number, and the list is open.** `Cmd` is an index into a
 registry, so a key binding, a palette row, a menu row and a status-bar button
@@ -2396,8 +2914,9 @@ cannot, which is what keeps the two from drifting.
 
 The modules: `text` (positions and selections), `doc` (the rope, undo, files),
 `edit` (every operation), `view` (panes, scrolling, folding, the screen↔text
-map), `syntax` (tree-sitter), `lang` (the language table), `rpc` (JSON-RPC on a
-pipe), `lsp` and `host` (the two things that speak it), `git` (branch and diff),
+map), `syntax` (tree-sitter), `lang` (the language table), `rpc` (framed JSON on a
+pipe), `lsp`, `host` and `dap` (the three things that speak it — language
+servers, plugins, debug adapters), `git` (branch and diff),
 `picker` (the fuzzy list), `menu` (the context menus), `keys` and `cmd` (the
 vocabulary), `plugin` (the manifests) and `pack` (getting one onto the machine
 and off it again), `app` (state and dispatch), `ui` (drawing), `theme`,

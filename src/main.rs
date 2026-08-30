@@ -8,6 +8,7 @@
 mod app;
 mod cmd;
 mod config;
+mod dap;
 mod diff;
 mod doc;
 mod edit;
@@ -21,6 +22,7 @@ mod menu;
 mod pack;
 mod picker;
 mod plugin;
+mod proc;
 mod repo;
 mod rpc;
 mod session;
@@ -182,6 +184,10 @@ fn main() -> Result<()> {
                 let state = if plugin::is_on(&server.id) { "on " } else { "off" };
                 println!("{state}    {:<20} runs {}", server.id, server.command);
             }
+            for debugger in &plugin.debuggers {
+                let state = if plugin::is_on(&debugger.id) { "on " } else { "off" };
+                println!("{state}    {:<20} debugs with {}", debugger.id, debugger.command);
+            }
             for tool in &plugin.tools {
                 let state = if plugin::is_on(&tool.id) { "on " } else { "off" };
                 println!("{state}    {:<20} runs {}", tool.id, tool.command);
@@ -244,6 +250,9 @@ fn main() -> Result<()> {
             }
             for server in &language.servers {
                 about.push(server.command.clone());
+            }
+            for debugger in &language.debuggers {
+                about.push(format!("debugged by {}", debugger.name));
             }
             println!("{name:<14} {}", about.join(", "));
         }
@@ -332,6 +341,10 @@ fn main() -> Result<()> {
     app.remember_session(true);
     app.lsp.shutdown_all();
     app.hosts.shutdown_all();
+    // And the program being debugged, which unlike a language server is
+    // somebody's own process sitting suspended in the middle of a function.
+    // Leaving it there is leaving a process that will never finish.
+    app.debug.stop();
     stop(wants_mouse, wants_keys);
     result
 }

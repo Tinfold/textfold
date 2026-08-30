@@ -1,7 +1,7 @@
 {
   "id": "python",
   "name": "Python",
-  "about": "What Python is: colours, comments, and what a .py file is",
+  "about": "What Python is: colours, comments, what a .py file is, and how to debug one",
   "languages": {
     "python": {
       "extensions": [
@@ -16,7 +16,26 @@
       "line_comment": "#",
       "grammar": {
         "built_in": "python"
-      }
+      },
+      "debuggers": [
+        {
+          "name": "debugpy",
+          "command": "${python}",
+          "args": [
+            "-m",
+            "debugpy.adapter"
+          ],
+          "launch": {
+            "request": "launch",
+            "type": "python",
+            "program": "${file}",
+            "cwd": "${root}",
+            "console": "internalConsole",
+            "justMyCode": true
+          },
+          "see": "debugpy goes in the environment this project uses: `python -m pip install debugpy`, with that environment's python."
+        }
+      ]
     }
   }
 }

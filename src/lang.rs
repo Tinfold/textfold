@@ -38,6 +38,7 @@ use std::sync::{Mutex, OnceLock, RwLock};
 
 use ropey::Rope;
 use serde::Deserialize;
+use serde_json::Value;
 use tree_sitter::Language;
 
 /// Which language, as a document holds onto one. An index into the registry,
@@ -84,6 +85,16 @@ pub struct Lang {
     /// The language servers to try, in order. More than one is normal: Python
     /// gets a type checker and a linter, and both are wanted.
     pub servers: Vec<Server>,
+
+    /// The debug adapters that can run a file of this language, best first.
+    ///
+    /// A list rather than one, for the same reason the servers are: which
+    /// adapter is right for a Python file depends on what is installed, and a
+    /// language can perfectly well have two — one that launches a program and
+    /// one that attaches to a running process. The first that starts is the
+    /// one used, which is what makes "debug this file" a key rather than a
+    /// form to fill in.
+    pub debuggers: Vec<Debugger>,
 
     /// Whether a plugin that is on defined this. A language whose plugin has
     /// been switched off keeps its id and its name and loses everything else,
@@ -133,6 +144,134 @@ pub struct Server {
     /// `workspace/configuration`. This is where rust-analyzer's settings go.
     pub settings: Option<serde_json::Value>,
     pub env: BTreeMap<String, String>,
+}
+
+/// A debug adapter, as a table of what to run and what to ask it for.
+///
+/// The shape is deliberately the shape of a [`Server`]: a command, its
+/// arguments, what marks the top of a project, and an environment. What it
+/// adds is [`Debugger::launch`] — the arguments to the one request that says
+/// *what to debug*, which a language server has no equivalent of because a
+/// language server is told about a project and a debugger is told about a run.
+#[derive(Clone, Debug)]
+pub struct Debugger {
+    /// What the settings file and the plugin list call it: `python/debugpy`.
+    pub id: String,
+    /// The short half of that: `debugpy`.
+    pub name: String,
+    /// The program to run, for an adapter that is one. Empty for an adapter a
+    /// language server starts — see [`Debugger::from_server`].
+    pub command: String,
+    pub args: Vec<String>,
+    /// Files that mark the top of a project, as for a server — this is the
+    /// directory the adapter is started in and the one `${root}` means.
+    pub roots: Vec<String>,
+    /// What goes in the `launch` (or `attach`) request, verbatim, once its
+    /// `${…}` have been filled in.
+    ///
+    /// Kept opaque on purpose. Every adapter has its own vocabulary here —
+    /// `program` and `justMyCode` for Python, `program` and `args` for lldb,
+    /// `runtimeExecutable` for node — and a table of the fields textfold
+    /// understands would be a table that is wrong for the next adapter
+    /// somebody installs. The manifest says what the adapter wants, the
+    /// placeholders say which file and which project, and this module does not
+    /// need an opinion about either.
+    pub launch: Value,
+    /// The same, for attaching to a program that is already running, where the
+    /// adapter can do that at all.
+    ///
+    /// Separate from `launch` rather than replacing it, because a debugger is
+    /// very often both: `gdb` runs your program *and* attaches to one that is
+    /// already up, and which of those somebody wants is a thing they say at
+    /// the moment they say it, not a thing the project is configured for once.
+    ///
+    /// `${pid}` and `${program}` are what a process picked from the list fills
+    /// in — see [`crate::dap::about_process`]. Everything else in it is the
+    /// adapter's own vocabulary, exactly as in `launch`.
+    pub attach: Option<Value>,
+    pub env: BTreeMap<String, String>,
+    /// Where the adapter comes from, when it is not a program of ours.
+    pub from_server: Option<FromServer>,
+    /// One line about how to get it, shown when it will not start.
+    ///
+    /// An adapter is very often a package that has to be installed into the
+    /// project rather than onto the machine — `debugpy` belongs in the virtual
+    /// environment, not in `/usr/bin` — which is exactly the kind of thing
+    /// textfold cannot install for you and exactly the kind of thing somebody
+    /// needs told. The manifest that named the adapter is the one place that
+    /// knows the answer.
+    pub see: Option<String>,
+}
+
+/// An adapter that lives inside a language server.
+///
+/// Java's does, and it is not an oddity so much as the shape the Java tooling
+/// has: the thing that knows where a class file is and what the classpath
+/// should be *is* the language server, so the debug adapter was written as a
+/// plugin to it rather than as a program of its own. Asking that server to
+/// start one is a single `workspace/executeCommand`, and the answer is a port.
+///
+/// Which means the whole of the difference, from here, is where the bytes come
+/// from. Everything after the connection is the protocol every other adapter
+/// speaks.
+#[derive(Clone, Debug)]
+pub struct FromServer {
+    /// Which language server to ask, by the command it is run as: `jdtls`.
+    pub server: String,
+    /// The command to ask it to execute:
+    /// `vscode.java.startDebugSession`.
+    pub start: String,
+    /// Something to ask the server before launching, whose answer goes into
+    /// the launch arguments.
+    pub resolve: Option<Resolve>,
+}
+
+/// A question for the language server whose answer the adapter needs.
+///
+/// Java's adapter will not launch without a classpath, and the only thing that
+/// knows what the classpath is — after Maven, Gradle, and jdtls compiling into
+/// a workspace directory of its own — is the language server. VS Code's Java
+/// extension asks it in code; here it is a row in a manifest, because "ask
+/// this, put the answer there" is a shape and not a language.
+///
+/// So textfold knows nothing about classpaths, and a plugin for some other
+/// language whose adapter needs a fact only its server has does not need a
+/// change here.
+#[derive(Clone, Debug)]
+pub struct Resolve {
+    /// The command to execute: `java.project.getClasspaths`.
+    pub command: String,
+    /// What to pass it, with the same `${…}` everything else here gets.
+    pub arguments: Vec<Value>,
+    /// Which field of the answer goes into which field of `launch`, by name.
+    /// `classPaths` from `classpaths`.
+    pub into: BTreeMap<String, String>,
+}
+
+impl Debugger {
+    /// The language server that starts this adapter, where one does.
+    pub fn started_by(&self) -> Option<&FromServer> {
+        self.from_server.as_ref()
+    }
+
+    /// Whether this adapter can attach to a program that is already running.
+    pub fn can_attach(&self) -> bool {
+        self.attach.is_some()
+    }
+
+    /// Whether this launches a program or attaches to one already running.
+    ///
+    /// The adapter is asked in one of two words and it matters which: an
+    /// `attach` sent as a `launch` is refused by every adapter there is. Taken
+    /// from the launch object itself, where `"request": "attach"` is what
+    /// every editor's configuration format calls it, so the manifest reads the
+    /// way the adapter's own documentation does.
+    pub fn request(&self) -> &'static str {
+        match self.launch.get("request").and_then(Value::as_str) {
+            Some("attach") => "attach",
+            _ => "launch",
+        }
+    }
 }
 
 impl Lang {
@@ -445,13 +584,19 @@ const REPOSITORY: &str = ".git";
 /// is deliberate: a server pointed at your home directory will try to index
 /// all of it.
 pub fn project_root(from: &Path, markers: &[String]) -> PathBuf {
-    let start = if from.is_dir() {
-        from
-    } else {
-        from.parent().unwrap_or(Path::new("."))
-    };
+    marked_root(from, markers).unwrap_or_else(|| starting_at(from).to_path_buf())
+}
+
+/// The same walk, answering `None` where no marker was found at all.
+///
+/// The half worth telling apart. "The project is here, because there is a
+/// `Cargo.toml` in it" and "nobody said, so have the directory the file is in"
+/// are different kinds of answer, and a caller that knows something this
+/// function does not — the editor knows which directory it was opened on —
+/// can do better than the guess. See [`crate::app::App::root_for`].
+pub fn marked_root(from: &Path, markers: &[String]) -> Option<PathBuf> {
     let mut best: Option<(PathBuf, usize)> = None;
-    for dir in start.ancestors() {
+    for dir in starting_at(from).ancestors() {
         if let Some(rank) = markers.iter().position(|m| marker_is_in(dir, m)) {
             let outranks = match &best {
                 None => true,
@@ -465,7 +610,16 @@ pub fn project_root(from: &Path, markers: &[String]) -> PathBuf {
             break;
         }
     }
-    best.map_or_else(|| start.to_path_buf(), |(dir, _)| dir)
+    best.map(|(dir, _)| dir)
+}
+
+/// Where the walk begins: the directory itself, or the one the file is in.
+fn starting_at(from: &Path) -> &Path {
+    if from.is_dir() {
+        from
+    } else {
+        from.parent().unwrap_or(Path::new("."))
+    }
 }
 
 /// Whether `dir` holds `marker`, which is a file name or a `*.ext` pattern.
@@ -565,6 +719,7 @@ fn blank(id: LangId, name: &str) -> Lang {
         block_comment: None,
         brackets: default_brackets(),
         servers: Vec::new(),
+        debuggers: Vec::new(),
         provided: false,
         grammar: None,
         compiled: OnceLock::new(),
@@ -641,6 +796,20 @@ fn apply(lang: &mut Lang, plugin: &str, def: &FileLang, problems: &mut Vec<Strin
                 continue;
             }
             lang.servers.push(s.clone().into_server(plugin));
+        }
+    }
+    // The same bargain as the servers above, and for the same reason: the
+    // adapter for a language is very often a different plugin from the one
+    // that says what the language is.
+    if let Some(v) = &def.debuggers {
+        for d in v.iter().filter(|d| d.is_whole()) {
+            let name = d.plugin_name();
+            let id = crate::plugin::server_id(plugin, &name);
+            lang.debuggers.retain(|already| already.name != name);
+            if !crate::plugin::is_on(&id) {
+                continue;
+            }
+            lang.debuggers.push(d.clone().into_debugger(plugin));
         }
     }
     if let Some(g) = &def.grammar {
@@ -779,6 +948,8 @@ pub struct FileLang {
     #[serde(default)]
     pub servers: Option<Vec<FileServer>>,
     #[serde(default)]
+    pub debuggers: Option<Vec<FileDebugger>>,
+    #[serde(default)]
     grammar: Option<FileGrammar>,
 }
 
@@ -819,6 +990,160 @@ impl FileLang {
             || self.block_comment.is_some()
             || self.brackets.is_some()
             || self.grammar.is_some()
+    }
+}
+
+/// A debug adapter as a manifest writes it.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct FileDebugger {
+    /// What to call it in the plugin list and in the settings file. Absent
+    /// means the command, as for a server.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The program to run. Absent for an adapter a language server starts,
+    /// which is named by `server` and `start` instead.
+    #[serde(default)]
+    pub command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    roots: Vec<String>,
+    /// The arguments to `launch` or `attach`, in the adapter's own words.
+    #[serde(default)]
+    launch: Option<serde_json::Value>,
+    /// The arguments for attaching to something already running, where the
+    /// adapter can. `${pid}` and `${program}` are the process picked.
+    #[serde(default)]
+    attach: Option<serde_json::Value>,
+    #[serde(default)]
+    env: BTreeMap<String, String>,
+    /// One line about how to get it, shown when it will not start.
+    #[serde(default)]
+    see: Option<String>,
+    /// The language server that starts this adapter, by the command it runs
+    /// as. With `start`, and instead of `command`.
+    #[serde(default)]
+    server: Option<String>,
+    /// The command to ask that server to execute, which answers with a port.
+    #[serde(default)]
+    start: Option<String>,
+    /// Something to ask the server first, whose answer fills in part of
+    /// `launch`.
+    #[serde(default)]
+    resolve: Option<FileResolve>,
+}
+
+/// A `resolve` as a manifest writes it.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct FileResolve {
+    pub command: String,
+    #[serde(default)]
+    pub arguments: Vec<Value>,
+    /// `{ "classPaths": "classpaths" }` — the field of `launch` on the left,
+    /// the field of the server's answer on the right.
+    #[serde(default)]
+    pub into: BTreeMap<String, String>,
+}
+
+impl FileDebugger {
+    /// The half of its id after the slash.
+    pub fn plugin_name(&self) -> String {
+        let fallback = self
+            .command
+            .as_deref()
+            .or(self.server.as_deref())
+            .unwrap_or("debugger");
+        self.name
+            .as_deref()
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .unwrap_or(fallback)
+            .to_lowercase()
+    }
+
+    /// What is actually run, for the list of things you can switch off. The
+    /// program for an adapter that is one, and the server that starts it for
+    /// an adapter that is not.
+    pub fn runs(&self) -> String {
+        match (&self.command, &self.server) {
+            (Some(command), _) => command.clone(),
+            (None, Some(server)) => format!("{server}, which starts it"),
+            (None, None) => String::new(),
+        }
+    }
+
+    /// Whether it says enough to be startable at all: a program to run, or a
+    /// server to ask and something to ask it. A manifest that says neither is
+    /// a debugger that could never do anything, and is dropped with a word
+    /// rather than offered and then failing when somebody presses the key.
+    pub fn is_whole(&self) -> bool {
+        let program = self.command.as_deref().is_some_and(|c| !c.trim().is_empty());
+        let asked = self.server.as_deref().is_some_and(|s| !s.trim().is_empty())
+            && self.start.as_deref().is_some_and(|s| !s.trim().is_empty());
+        program || asked
+    }
+
+    /// Lay somebody's own settings over what the plugin shipped. The same
+    /// rules as a server's: named parts replace, objects merge key by key.
+    ///
+    /// `launch` merging rather than replacing is the point of it. Saying
+    /// `"launch": {"args": ["--verbose"]}` should add the arguments to the run
+    /// and leave `program` and `cwd` exactly as the plugin wrote them —
+    /// otherwise every person who wants to pass one flag has to copy the whole
+    /// object out of the manifest and keep it up to date by hand.
+    pub fn apply_override(&mut self, said: &crate::plugin::FileDebuggerOverride) {
+        if let Some(command) = said.command() {
+            self.command = Some(command.to_string());
+        }
+        if let Some(args) = said.args() {
+            self.args = args.to_vec();
+        }
+        if let Some(roots) = said.roots() {
+            self.roots = roots.to_vec();
+        }
+        crate::plugin::merge_into(&mut self.launch, said.launch());
+        crate::plugin::merge_into(&mut self.attach, said.attach());
+        for (name, value) in said.env() {
+            self.env.insert(name.clone(), value.clone());
+        }
+    }
+
+    /// What a manifest's adapter becomes in the table.
+    pub fn into_debugger(self, plugin: &str) -> Debugger {
+        let name = self.plugin_name();
+        let from_server = match (self.server, self.start) {
+            (Some(server), Some(start)) if !server.trim().is_empty() => Some(FromServer {
+                server: server.trim().to_string(),
+                start: start.trim().to_string(),
+                resolve: self.resolve.map(|r| Resolve {
+                    command: r.command,
+                    arguments: r.arguments,
+                    into: r.into,
+                }),
+            }),
+            _ => None,
+        };
+        Debugger {
+            id: crate::plugin::server_id(plugin, &name),
+            command: self.command.unwrap_or_default(),
+            args: self.args,
+            from_server,
+            roots: if self.roots.is_empty() {
+                vec![REPOSITORY.into()]
+            } else {
+                self.roots
+            },
+            launch: self.launch.unwrap_or_else(|| serde_json::json!({})),
+            // Nothing said means it cannot attach, which is different from
+            // an empty object: an adapter told to `attach` with no arguments
+            // is an adapter asked to attach to nothing in particular.
+            attach: self.attach.filter(|value| !value.is_null()),
+            env: self.env,
+            see: self.see,
+            name,
+        }
     }
 }
 
@@ -951,6 +1276,56 @@ mod tests {
         // support does not work" turns out to mean.
         let dockerfile = by_name("dockerfile").expect("the plugin ships");
         assert!(get(dockerfile).grammar().is_some());
+    }
+
+    #[test]
+    fn a_debugger_can_be_one_a_language_server_starts_rather_than_a_program() {
+        // Java's is. The adapter is an OSGi bundle inside jdtls, so there is
+        // no command to run — there is a server to ask, something to ask it,
+        // and a fact only it knows that has to go into the launch first.
+        let langs: BTreeMap<String, FileLang> = serde_json::from_str(
+            r#"{"java":{"debuggers":[{
+                 "name":"java-debug",
+                 "server":"jdtls",
+                 "start":"vscode.java.startDebugSession",
+                 "resolve":{"command":"java.project.getClasspaths",
+                            "arguments":["${file_uri}"],
+                            "into":{"classPaths":"classpaths"}},
+                 "launch":{"mainClass":"${file_base}"}}]}}"#,
+        )
+        .expect("a manifest");
+        let debugger = langs["java"].debuggers.as_ref().expect("some")[0]
+            .clone()
+            .into_debugger("jdtls");
+        assert_eq!(debugger.id, "jdtls/java-debug");
+        assert!(debugger.command.is_empty(), "there is no program to run");
+        let from = debugger.started_by().expect("a server to ask");
+        assert_eq!(from.server, "jdtls");
+        assert_eq!(from.start, "vscode.java.startDebugSession");
+        let resolve = from.resolve.as_ref().expect("something to resolve");
+        assert_eq!(resolve.command, "java.project.getClasspaths");
+        assert_eq!(resolve.into["classPaths"], "classpaths");
+    }
+
+    #[test]
+    fn a_debugger_that_names_neither_a_program_nor_a_server_is_not_offered() {
+        // One that could never start is dropped rather than put in the list
+        // and then failing when somebody presses the key.
+        let neither: FileDebugger =
+            serde_json::from_str(r#"{"name":"nothing","launch":{}}"#).expect("a manifest");
+        assert!(!neither.is_whole());
+        let program: FileDebugger =
+            serde_json::from_str(r#"{"command":"gdb"}"#).expect("a manifest");
+        assert!(program.is_whole());
+        let asked: FileDebugger =
+            serde_json::from_str(r#"{"name":"x","server":"jdtls","start":"go"}"#)
+                .expect("a manifest");
+        assert!(asked.is_whole());
+        // Half of the pair is not enough: a server with nothing to ask it is
+        // as useless as a command that is not there.
+        let half: FileDebugger =
+            serde_json::from_str(r#"{"name":"x","server":"jdtls"}"#).expect("a manifest");
+        assert!(!half.is_whole());
     }
 
     #[test]

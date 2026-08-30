@@ -79,6 +79,27 @@ pub enum Ask {
         /// cursor has moved on can be dropped.
         at: usize,
     },
+    /// A server has been asked to start a debug adapter for us. The answer is
+    /// the port it started one on — see [`crate::dap`], and
+    /// [`crate::lang::FromServer`] for why Java works this way.
+    ///
+    /// The whole of what to do with the answer travels with it, because by
+    /// the time it comes back the person may have changed file: which adapter
+    /// this was, which project, and which file they asked to debug.
+    DebugAdapter {
+        config: Box<crate::lang::Debugger>,
+        root: PathBuf,
+        file: PathBuf,
+    },
+    /// Something the adapter needs to know before it can launch, which only
+    /// the server knows — Java's classpath. The answer is folded into the
+    /// launch arguments and then the adapter is asked for. See
+    /// [`crate::lang::Resolve`].
+    DebugLaunch {
+        config: Box<crate::lang::Debugger>,
+        root: PathBuf,
+        file: PathBuf,
+    },
     /// The fixes a server would make to a whole file on its own — a linter's
     /// autofixes, an import list put in order. Asked of every server at once
     /// before a save, and applied without anybody choosing from a list.
@@ -486,6 +507,7 @@ impl Servers {
                 root,
                 env: &filled.env,
                 label: &config.command,
+                dialect: rpc::Dialect::JsonRpc,
             },
             self.tx.clone(),
             move |incoming| crate::app::Event::Lsp(id, incoming),
@@ -1059,6 +1081,44 @@ impl Servers {
             }),
             Ask::Command,
         );
+    }
+
+    /// The server of this name that is running for this document's project.
+    ///
+    /// By the command it runs as, which is what a manifest naming another
+    /// plugin's server has to go on — a debugger inside `jdtls` says
+    /// `"server": "jdtls"`, and that is the same word the plugin list shows.
+    pub fn named(&self, name: &str, doc: &Document) -> Option<ServerId> {
+        self.for_doc(doc)
+            .into_iter()
+            .find(|id| self.get(*id).is_some_and(|s| s.name == name))
+    }
+
+    /// Ask a language server to start a debug adapter and say where it is.
+    ///
+    /// Answers whether the question could be asked at all. A server that is
+    /// still starting cannot be — it has not read the project yet, and for
+    /// Java "still reading the project" is most of the first minute — and
+    /// saying so is better than a refusal nobody can act on.
+    pub fn start_debug_session(
+        &mut self,
+        id: ServerId,
+        command: &str,
+        arguments: &[Value],
+        ask: Ask,
+    ) -> bool {
+        let Some(server) = self.get_mut(id) else {
+            return false;
+        };
+        if !server.is_ready() {
+            return false;
+        }
+        server.request(
+            "workspace/executeCommand",
+            json!({ "command": command, "arguments": arguments }),
+            ask,
+        );
+        true
     }
 
     /// Ask the server to fill in a code action it sent in outline.

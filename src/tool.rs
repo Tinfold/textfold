@@ -38,6 +38,25 @@ pub struct Finished {
     pub err: String,
 }
 
+impl Finished {
+    /// Everything it printed, both pipes together.
+    ///
+    /// Not the order a terminal would have shown them in — two pipes read
+    /// separately cannot be put back in step, and pretending otherwise would
+    /// be inventing an interleaving. What it is instead is *complete*, which
+    /// is the property that matters: a compiler puts everything on standard
+    /// error, `make` puts its recipes on standard output and the failure on
+    /// standard error, and reading only one of them is how a build comes to
+    /// fail without saying why.
+    pub fn printed(&self) -> String {
+        match (self.out.trim().is_empty(), self.err.trim().is_empty()) {
+            (true, _) => self.err.clone(),
+            (_, true) => self.out.clone(),
+            _ => format!("{}\n{}", self.out.trim_end(), self.err),
+        }
+    }
+}
+
 /// Start one. Returns as soon as the thread is running.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn(
