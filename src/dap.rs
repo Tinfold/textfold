@@ -395,8 +395,14 @@ impl Session {
         for line in complaints {
             self.say(line);
         }
+        // What was run, for an adapter that is a program. One that lives
+        // inside a language server was not run by us at all, and "textfold
+        // ran:" with nothing after it is a line that raises a question rather
+        // than answering one.
         let ran = self.ran.clone();
-        self.say(format!("textfold ran: {ran}"));
+        if !ran.trim().is_empty() {
+            self.say(format!("textfold ran: {ran}"));
+        }
         // Only where the adapter asked for an interpreter in the first place.
         // See [`Session::from`].
         if let Some(from) = self.from.clone() {
@@ -407,15 +413,24 @@ impl Session {
         }
         // And the way out, spelled out. Somebody whose interpreter is the
         // wrong one can say so in a settings file, and telling them where is
-        // the difference between a fixable problem and a wall.
+        // the difference between a fixable problem and a wall. An adapter a
+        // language server starts is not one you can point elsewhere, so it is
+        // offered `launch` and `attach` instead of `command` — the two things
+        // about it that *are* yours to change.
         let (plugin, name) = match self.adapter.split_once('/') {
             Some((plugin, name)) => (plugin.to_string(), name.to_string()),
             None => (self.adapter.clone(), self.adapter.clone()),
         };
-        self.say(format!(
-            "to run something else: {{\"debuggers\": {{\"{name}\": \
-             {{\"command\": \"…\"}}}}}} in your settings for the {plugin} plugin"
-        ));
+        self.say(match self.ran.trim().is_empty() {
+            true => format!(
+                "to change what it is asked for: {{\"debuggers\": {{\"{name}\": \
+                 {{\"launch\": {{…}}}}}}}} in your settings for the {plugin} plugin"
+            ),
+            false => format!(
+                "to run something else: {{\"debuggers\": {{\"{name}\": \
+                 {{\"command\": \"…\"}}}}}} in your settings for the {plugin} plugin"
+            ),
+        });
     }
 
     /// The one line worth putting in the status bar when it would not start.
@@ -1471,6 +1486,45 @@ fn shorten(value: &str) -> String {
     crate::text::truncate(&flat, VALUE_SHOWN)
 }
 
+/// The package name in the `Cargo.toml` at the root of the project, which is
+/// what the binary it builds is called.
+///
+/// A hand-rolled read of two lines rather than a TOML parser, and deliberately
+/// a shy one: it looks only for a `name` under `[package]`, stops at the next
+/// section, and answers `None` for anything it is not sure about. A wrong name
+/// here is a debugger opening a file that is not there, which says so; a TOML
+/// dependency for one field would be a dependency for one field.
+///
+/// A virtual workspace has no `[package]` at all, and gets `None` — the
+/// members are separate binaries and there is no one answer.
+fn package_name(root: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    let mut in_package = false;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            in_package = line == "[package]";
+            continue;
+        }
+        if !in_package {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "name" {
+            continue;
+        }
+        // `name = "thing"  # a comment`, and the quotes are the only thing
+        // that says where the value stops.
+        let value = value.trim();
+        let quoted = value.strip_prefix(['"', '\''])?;
+        let end = quoted.find(['"', '\''])?;
+        return Some(quoted[..end].to_string()).filter(|name| !name.is_empty());
+    }
+    None
+}
+
 /// The class `file` declares, qualified by the package it is in.
 ///
 /// Java requires a public class to be named after its file, so the name is the
@@ -1598,6 +1652,14 @@ pub fn filled(
     if let Some(class) = declared_class(file) {
         vars.set("file_class", class);
     }
+    // What Cargo will have called the binary. `${file_stem}` is the answer for
+    // a language whose compiler writes its output beside the source; for one
+    // with a build system it is not even close — you do not debug
+    // `src/main.rs`, you debug `target/debug/whatever-the-package-is-called`,
+    // and the only place that name is written down is `Cargo.toml`.
+    if let Some(name) = package_name(root) {
+        vars.set("crate", name);
+    }
     // And as a language server writes a path, for a question that is going to
     // one — see [`crate::lang::Resolve`].
     vars.set("file_uri", crate::lsp::uri_of(file));
@@ -1662,6 +1724,136 @@ pub fn filled(
 /// a hole in it: an adapter handed `"program": ""` goes looking for a file
 /// called nothing, where one handed no `program` at all works it out from the
 /// pid it was given.
+/// Whether an attach request needs a process picked for it.
+///
+/// The two shapes of attaching, and the difference is what the person has to
+/// do. An adapter that attaches to a *process* — `gdb`, `lldb` — needs one
+/// chosen, because a pid means nothing until somebody points at it. An adapter
+/// that attaches to a *port* — `debugpy`, `dlv`, the Java one — needs nothing
+/// chosen at all: the port is written down in the settings, the program is
+/// waiting on it, and there is exactly one thing to connect to.
+///
+/// Asking is what keeps the second kind from being made to answer a question
+/// with one right answer. A list of a hundred and fifty processes, none of
+/// which matters, is not a choice; it is a form to get past.
+/// Whether an attach request wants an address filled in — a host and a port
+/// somebody has to say.
+///
+/// The manifest decides whether you are asked, by writing a placeholder or a
+/// number. `"port": 5005` is a project that always debugs on 5005 and should
+/// never be questioned about it; `"port": "${port}"` is one where the answer
+/// changes, and the question is a prompt with the last answer already in it.
+pub fn needs_an_address(attach: &Value) -> bool {
+    let text = attach.to_string();
+    text.contains("${host") || text.contains("${port")
+}
+
+/// The address a manifest suggests, for the box to open with.
+///
+/// `${port:5678}` — a placeholder with a default after a colon, the way a
+/// shell writes one. It is worth the two characters of syntax because the
+/// conventional port is a fact about the *adapter*: JDWP is 5005 and debugpy
+/// is 5678, and a first guess that is wrong for one of them is an edit every
+/// person using it makes once, forever.
+///
+/// Only a first guess. What is actually attached to is what comes back from
+/// the box, and after the first time that is whatever was said last.
+pub fn suggested_address(attach: &Value) -> Option<(String, u16)> {
+    let text = attach.to_string();
+    let default_of = |name: &str| -> Option<&str> {
+        let at = text.find(&format!("${{{name}:"))?;
+        let rest = &text[at + name.len() + 3..];
+        Some(&rest[..rest.find('}')?])
+    };
+    let port = default_of("port")?.parse().ok()?;
+    Some((default_of("host").unwrap_or("127.0.0.1").to_string(), port))
+}
+
+/// The attach request with an address in it.
+///
+/// `${port}` becomes a number for the same reason `${pid}` does: every adapter
+/// refuses a port that arrives as a string. See [`about_process`].
+pub fn at_address(attach: &Value, host: &str, port: u16) -> Value {
+    let mut out = attach.clone();
+    fill_address(&mut out, host, port);
+    out
+}
+
+fn fill_address(value: &mut Value, host: &str, port: u16) {
+    match value {
+        Value::Object(fields) => {
+            for value in fields.values_mut() {
+                fill_address(value, host, port);
+            }
+        }
+        Value::Array(items) => {
+            for value in items.iter_mut() {
+                fill_address(value, host, port);
+            }
+        }
+        Value::String(text) => {
+            // Whatever default the manifest wrote goes with the placeholder:
+            // it was the suggestion for the box, and the box has answered.
+            let filled = without_defaults(text)
+                .replace("${host}", host)
+                .replace("${port}", &port.to_string());
+            match text.trim().starts_with("${port") && filled.trim() == port.to_string() {
+                true => *value = json!(port),
+                false => *text = filled,
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `${port:5678}` written back as `${port}`, so that one substitution handles
+/// a placeholder whether or not it came with a suggestion.
+fn without_defaults(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(at) = rest.find("${") {
+        out.push_str(&rest[..at]);
+        let Some(end) = rest[at..].find('}').map(|n| at + n) else {
+            break;
+        };
+        let name = &rest[at + 2..end];
+        let name = name.split_once(':').map_or(name, |(name, _)| name);
+        out.push_str(&format!("${{{name}}}"));
+        rest = &rest[end + 1..];
+    }
+    out.push_str(rest);
+    out
+}
+
+/// An address as somebody writes one, as a host and a port.
+///
+/// `5005` on its own is a port on this machine, because that is what everybody
+/// means by it and typing `127.0.0.1:` first is a toll. A bare host is not
+/// accepted: a debugger with no port is not a debugger that will connect, and
+/// guessing one would be guessing which of two programs to talk to.
+pub fn read_address(said: &str) -> Option<(String, u16)> {
+    let said = said.trim();
+    if said.is_empty() {
+        return None;
+    }
+    let (host, port) = match said.rsplit_once(':') {
+        // `[::1]:5005`, whose colons are its own.
+        Some((host, port)) => (host.trim().trim_matches(['[', ']']), port),
+        None => ("127.0.0.1", said),
+    };
+    let port: u16 = port.trim().parse().ok()?;
+    let host = match host.is_empty() {
+        true => "127.0.0.1",
+        false => host,
+    };
+    Some((host.to_string(), port))
+}
+
+pub fn needs_a_process(attach: &Value) -> bool {
+    let text = attach.to_string();
+    text.contains("${pid}") || text.contains("${program}")
+}
+
 pub fn about_process(attach: &Value, pid: u32, program: Option<&Path>) -> Value {
     let program = program.map(|path| path.display().to_string());
     let mut out = attach.clone();
@@ -2007,6 +2199,81 @@ mod tests {
         running.wait().ok();
         std::fs::remove_dir_all(&root).ok();
         assert!(alive, "stopping the debugger killed a program it did not start");
+    }
+
+    #[test]
+    fn what_cargo_calls_the_binary_is_read_out_of_the_manifest() {
+        // `${file_stem}` is the answer for a compiler that writes its output
+        // beside the source. For one with a build system it is not close: you
+        // do not debug `src/main.rs`, you debug `target/debug/wordcount`, and
+        // the only place that name is written down is `Cargo.toml`.
+        let root = a_project("cargo");
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[package]\nname = \"word-count\"  # what it is called\nversion = \"0.1.0\"\n\n\
+             [dependencies]\nname = \"not this one\"\n",
+        )
+        .expect("written");
+        assert_eq!(package_name(&root).as_deref(), Some("word-count"));
+
+        // A virtual workspace has no `[package]`, and there is no one answer
+        // — its members are separate binaries.
+        std::fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"a\", \"b\"]\n",
+        )
+        .expect("written");
+        assert_eq!(package_name(&root), None);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn an_address_is_read_the_way_somebody_would_write_one() {
+        // A bare number is a port on this machine, because that is what
+        // everybody means by it and typing `127.0.0.1:` first is a toll.
+        assert_eq!(read_address("5005"), Some(("127.0.0.1".into(), 5005)));
+        assert_eq!(read_address("  5005 "), Some(("127.0.0.1".into(), 5005)));
+        assert_eq!(read_address("10.0.0.2:5005"), Some(("10.0.0.2".into(), 5005)));
+        assert_eq!(read_address("box.local:9"), Some(("box.local".into(), 9)));
+        // An address whose own colons are its own.
+        assert_eq!(read_address("[::1]:5005"), Some(("::1".into(), 5005)));
+        // And a host with no port is refused rather than guessed at: a
+        // debugger with no port will not connect, and picking one would be
+        // picking which of two programs to talk to.
+        assert_eq!(read_address("localhost"), None);
+        assert_eq!(read_address(""), None);
+        assert_eq!(read_address("5005 or so"), None);
+        assert_eq!(read_address("70000"), None, "not a port at all");
+    }
+
+    #[test]
+    fn an_address_reaches_an_adapter_as_a_host_and_a_number() {
+        let attach = json!({
+            "request": "attach",
+            "hostName": "${host}",
+            "port": "${port}",
+            "note": "waiting on ${host}:${port}",
+        });
+        let filled = at_address(&attach, "10.0.0.2", 5099);
+        assert_eq!(filled["hostName"], json!("10.0.0.2"));
+        // A port is a number for the same reason a pid is.
+        assert_eq!(filled["port"], json!(5099));
+        assert!(filled["port"].is_number(), "{filled}");
+        assert_eq!(filled["note"], json!("waiting on 10.0.0.2:5099"));
+    }
+
+    #[test]
+    fn a_manifest_decides_whether_it_is_asked_where_to_attach() {
+        // A project that always debugs on one port should never be questioned
+        // about it, and one where the answer changes should be asked. The
+        // difference is a number or a placeholder, which is the manifest's to
+        // write.
+        assert!(needs_an_address(&json!({ "port": "${port}" })));
+        assert!(needs_an_address(&json!({ "listen": { "host": "${host}" } })));
+        assert!(!needs_an_address(&json!({ "port": 5005 })));
+        // And neither kind of address is a process to pick out of a list.
+        assert!(!needs_a_process(&json!({ "port": "${port}" })));
+        assert!(needs_a_process(&json!({ "pid": "${pid}" })));
     }
 
     #[test]

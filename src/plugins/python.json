@@ -33,7 +33,14 @@
             "console": "internalConsole",
             "justMyCode": true
           },
-          "see": "debugpy goes in the environment this project uses: `python -m pip install debugpy`, with that environment's python."
+          "attach": {
+            "request": "attach",
+            "listen": {
+              "host": "${host:127.0.0.1}",
+              "port": "${port:5678}"
+            }
+          },
+          "see": "debugpy goes in the environment this project uses: `python -m pip install debugpy`, with that environment's python. To attach: run debug-attach, say which port to listen on, then start your program with `python -m debugpy --connect PORT your_program.py` — textfold listens and the program connects to it."
         }
       ]
     }

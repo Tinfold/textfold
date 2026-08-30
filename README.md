@@ -1035,18 +1035,80 @@ not say what a process is running is **dropped** rather than left empty: an
 adapter handed `"program": ""` goes looking for a file called nothing, where one
 handed no `program` at all works it out from the pid.
 
-An adapter that attaches over a port rather than to a process id says so the
-same way, and needs no picker — there is nothing to choose:
+**An adapter that attaches over a port gets no picker**, because there is
+nothing to pick out of a list: one program is waiting on it, and a hundred and
+fifty processes none of which matters is not a choice but a form to get past.
+It gets a question instead —
+
+```
+Attach to  127.0.0.1:5005
+```
+
+— with the **last address this project used** already in it, so the second time
+is Enter. A bare number is a port on this machine, since that is what everybody
+means by it. Remembered per *project*, in `config.json`, and not in the plugin's
+settings: a port written there would be the port every Java project you ever
+open tried to attach to.
+
+Which of the two you get is the manifest's to say, and it says it by what it
+writes:
+
+| in `attach` | what happens |
+|---|---|
+| `"pid": "${pid}"` | a list of running programs |
+| `"port": "${port:5005}"` | a box, opening on `5005` |
+| `"port": 5005` | neither — it just connects |
+
+The `:5005` is only the first guess, for the first time. It is worth the two
+characters because the conventional port is a fact about the *adapter* — JDWP
+is 5005 and debugpy is 5678 — and one default for both is an edit that every
+person using the other one makes once, forever.
+
+**Python** ships that way. `debug-attach` asks which port, starts `debugpy`
+listening on it, and the program connects out:
+
+```
+$ python -m debugpy --connect 5678 main.py
+```
+
+Run `debug-attach` first — the editor is the one listening — then start the
+program.
+
+**Java** attaches to a JVM over JDWP, which is a port too. The adapter is a
+plugin to the language server rather than a program — see below — and that
+changes nothing here: `debug-attach` asks jdtls for a session and sends the
+attach down the socket. The JVM has to have been started for it, and where to
+find it is the same question, asked the same way. One line in your settings for
+the `jdtls` plugin turns it on:
 
 ```json
-{ "debuggers": { "debugpy": { "attach": {
-    "request": "attach",
-    "connect": { "host": "127.0.0.1", "port": 5678 }
+{ "debuggers": { "java-debug": { "attach": {
+    "request": "attach", "hostName": "${host:127.0.0.1}", "port": "${port:5005}"
 } } } }
 ```
 
-in [your settings for that plugin](#settings-for-a-plugin), against a program
-started with `python -m debugpy --listen 5678 --wait-for-client`.
+```
+$ java -agentlib:jdwp=transport=dt_socket,server=y,suspend=n,address=127.0.0.1:5005 \
+       -cp target/classes com.example.Main
+```
+
+**What ships knowing how to attach**, today: **C**, **C++** and **Rust** by
+process id, through `gdb` or `lldb-dap`; **Python** by port, through `debugpy`;
+**Java** by port, through jdtls, once the port is named as above. Go,
+JavaScript and C# ship no debug adapter at all, so there is nothing to attach
+with until you name one — the shape is the same as any other, and `attach` is
+one more key in it.
+
+**Rust**, out of the box, with `gdb` 14 or newer or with `lldb-dap` — whichever
+is installed, tried in that order. F5 runs `cargo build` first, and `program`
+defaults to `${root}/target/debug/${crate}`, where `${crate}` is the name in
+`Cargo.toml`: you do not debug `src/main.rs`, you debug what Cargo built. A
+workspace with no `[package]` of its own, or a binary that is not named after
+the package, needs saying:
+
+```json
+{ "debuggers": { "gdb": { "launch": { "program": "${root}/target/debug/other" } } } }
+```
 
 **Java**, through the `jdtls` plugin, which fetches the adapter as part of
 installing itself. Java's debugger is not a program: it is a plugin to the
@@ -2662,6 +2724,9 @@ any of that being written into the editor as a special case:
 | `${file_dir}` | the directory it is in — a debug adapter or a tool |
 | `${file_stem}` | the same without its extension: `src/main.c` becomes `src/main`, which is what `cc -g -o` makes out of it — a debug adapter or a tool |
 | `${file_base}` | its own name without its extension: `src/Main.java` becomes `Main`, which is what that class is called — a debug adapter or a tool |
+| `${crate}` | the package name in the project's `Cargo.toml`, which is what Cargo calls the binary — a debug adapter only |
+| `${pid}`, `${program}` | the process picked out of the list — an `attach` only |
+| `${host}`, `${port}` | the address asked for, `${port:5005}` to suggest one — an `attach` only |
 | `${file_uri}` | the file as a language server writes a path, for a question going to one — a debug adapter only |
 | `${tools}` | where textfold puts what it fetched, so a plugin can name it afterwards |
 | `${java_home}` | a JDK new enough to run a Java language server — see [Java](#java) |

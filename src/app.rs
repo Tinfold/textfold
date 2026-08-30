@@ -338,6 +338,9 @@ pub enum PromptKind {
     PluginAsked,
     /// An expression to work out where the program is stopped.
     DebugEvaluate,
+    /// Where to attach the debugger, for an adapter that meets a program at an
+    /// address rather than picking one out of a list.
+    DebugAddress,
 }
 
 impl PromptKind {
@@ -352,6 +355,7 @@ impl PromptKind {
             PromptKind::ReplaceWith => "Replace with",
             PromptKind::PluginAsked => "A plugin asks",
             PromptKind::DebugEvaluate => "Value of",
+            PromptKind::DebugAddress => "Attach to",
         }
     }
 }
@@ -4643,6 +4647,16 @@ impl App {
             PromptKind::PluginAsked => {
                 self.overlay = Overlay::None;
                 self.settle_plugin_question(json!(input));
+            }
+            PromptKind::DebugAddress => {
+                self.overlay = Overlay::None;
+                let Some((host, port)) = crate::dap::read_address(&input) else {
+                    return self.say_bad(format!(
+                        "{input:?} is not a port or a host and port — 5005, or 10.0.0.2:5005"
+                    ));
+                };
+                self.remember_address(&format!("{host}:{port}"));
+                self.attach_with(None, Some((host, port)));
             }
             PromptKind::DebugEvaluate => {
                 self.overlay = Overlay::None;
@@ -11233,6 +11247,22 @@ impl App {
                 "nothing installed here knows how to attach to a running {name} program"
             ));
         }
+        // An adapter that attaches to a *port* has nothing to pick out of a
+        // list: one program is waiting on it, and a hundred and fifty
+        // processes none of which matters is not a choice but a form to get
+        // past. What it may want instead is the address, which is a question
+        // with a keyboard rather than a list. See [`crate::dap::needs_a_process`].
+        let attaches: Vec<&Value> = lang::get(language)
+            .debuggers
+            .iter()
+            .filter_map(|d| d.attach.as_ref())
+            .collect();
+        if !attaches.iter().copied().any(crate::dap::needs_a_process) {
+            if attaches.iter().copied().any(crate::dap::needs_an_address) {
+                return self.ask_debug_address();
+            }
+            return self.attach_with(None, None);
+        }
         let running = crate::proc::running();
         if running.is_empty() {
             return self.say("nothing of yours is running to attach to");
@@ -11293,6 +11323,79 @@ impl App {
             // since.
             return self.say(format!("process {pid} is not there any more"));
         };
+        self.attach_with(Some(process), None);
+    }
+
+    /// Ask where to attach, with the last answer for this project already in
+    /// the box.
+    ///
+    /// A port is a number nobody holds in their head, and it is different for
+    /// the two JVMs somebody has up. Remembered per project rather than per
+    /// plugin, because a port written in a settings file would be the port
+    /// every Java project you ever open tries to attach to — which is the same
+    /// objection the jdtls plugin already makes about `mainClass`.
+    fn ask_debug_address(&mut self) {
+        let known = self.remembered_address();
+        let mut prompt = Prompt::new(PromptKind::DebugAddress);
+        prompt.caret = known.chars().count();
+        prompt.input = known;
+        self.overlay = Overlay::Prompt(prompt);
+    }
+
+    /// Where this project was last attached, or where the manifest says to
+    /// start looking.
+    fn remembered_address(&self) -> String {
+        let root = self.attach_root();
+        if let Some(said) = self
+            .config
+            .debug_addresses
+            .get(&root.display().to_string())
+        {
+            return said.clone();
+        }
+        // Nothing remembered, so whatever the adapter says is conventional for
+        // it: 5005 for JDWP, 5678 for debugpy. See
+        // [`crate::dap::suggested_address`].
+        let suggested = lang::get(self.here().language)
+            .debuggers
+            .iter()
+            .filter_map(|d| d.attach.as_ref())
+            .find_map(crate::dap::suggested_address);
+        match suggested {
+            Some((host, port)) => format!("{host}:{port}"),
+            None => "127.0.0.1:5005".to_string(),
+        }
+    }
+
+    fn remember_address(&mut self, address: &str) {
+        let root = self.attach_root().display().to_string();
+        self.config
+            .debug_addresses
+            .insert(root, address.to_string());
+        self.remember_settings();
+    }
+
+    /// The project an attach is remembered against.
+    fn attach_root(&self) -> PathBuf {
+        let doc = self.here();
+        let roots: Vec<String> = lang::get(doc.language)
+            .debuggers
+            .iter()
+            .flat_map(|d| d.roots.clone())
+            .collect();
+        match doc.path.clone() {
+            Some(path) => self.root_for(&path, &roots),
+            None => self.project.clone(),
+        }
+    }
+
+    /// Attach: to a process that was picked, to an address that was typed, or
+    /// to whatever the settings already name.
+    fn attach_with(
+        &mut self,
+        process: Option<crate::proc::Process>,
+        address: Option<(String, u16)>,
+    ) {
         let doc = self.here();
         let language = doc.language;
         let path = doc
@@ -11313,19 +11416,48 @@ impl App {
             let root = self.root_for(&path, &config.roots);
             // The attach request, with the process in it, put where a launch
             // would go. Everything after this is the debugger it always was —
-            // the same `initialize`, the same breakpoints, the same panel.
+            // the same `initialize`, the same breakpoints, the same panel, and
+            // the same two ways of getting hold of an adapter.
             let mut config = config.clone();
             let Some(attach) = config.attach.clone() else {
                 continue;
             };
-            config.launch = crate::dap::about_process(&attach, pid, process.program.as_deref());
+            let attach = match &address {
+                Some((host, port)) => crate::dap::at_address(&attach, host, *port),
+                None => attach,
+            };
+            config.launch = match &process {
+                Some(process) => {
+                    crate::dap::about_process(&attach, process.pid, process.program.as_deref())
+                }
+                None => attach,
+            };
+            // An adapter that lives inside a language server is asked for
+            // rather than started. Java's debugger attaches to a JVM over a
+            // port, and it is the same question as launching one — see
+            // [`App::ask_server_for_adapter`], which finishes the job.
+            if config.started_by().is_some() {
+                match self.ask_server_for_adapter(&config, &root, &path) {
+                    Ok(()) => return,
+                    Err(why) => {
+                        why_not = Some(why);
+                        continue;
+                    }
+                }
+            }
             let environment = self.lsp.environments.get(&root).cloned();
             match self.debug.start(&config, &root, &path, environment.as_deref()) {
                 Ok(()) => {
-                    self.say_good(format!(
-                        "{}: attached to {} ({pid})",
-                        config.name, process.name
-                    ));
+                    self.say_good(match (&process, &address) {
+                        (Some(process), _) => format!(
+                            "{}: attached to {} ({})",
+                            config.name, process.name, process.pid
+                        ),
+                        (None, Some((host, port))) => {
+                            format!("{}: attaching to {host}:{port}", config.name)
+                        }
+                        (None, None) => format!("{}: attaching", config.name),
+                    });
                     return self.open_debug_panel();
                 }
                 Err(why) => why_not = Some(why),
@@ -14626,6 +14758,46 @@ mod tests {
     }
 
     #[test]
+    fn attaching_over_a_port_asks_which_one_and_remembers_the_answer() {
+        // A port is a number nobody holds in their head, and it is different
+        // for the two JVMs somebody has up. Remembered per *project*, because
+        // a port in a settings file is per-plugin: it would be the port every
+        // Java project you ever open tried to attach to.
+        let (mut app, _rx) = editor();
+        let path = scratch("attach-port.py");
+        std::fs::write(&path, "print(1)\n").expect("written");
+        app.open_path(&path);
+        app.project = path.parent().expect("a directory").to_path_buf();
+
+        app.run(Cmd::DEBUG_ATTACH);
+        // A question rather than a list: there is one program waiting on the
+        // port and nothing to choose between.
+        let asked = match &app.overlay {
+            Overlay::Prompt(prompt) => prompt.input.clone(),
+            _ => panic!("no question was asked: {}", app.status.text),
+        };
+        // And the first guess is the adapter's own conventional port rather
+        // than one number for everything: debugpy's is 5678, JDWP's is 5005,
+        // and a default that is wrong for one of them is an edit every person
+        // using it makes once, forever.
+        assert_eq!(asked, "127.0.0.1:5678", "not what debugpy's own examples use");
+
+        // Answering it attaches, and is remembered against this project.
+        let root = app.attach_root().display().to_string();
+        app.remember_address("127.0.0.1:5099");
+        assert_eq!(
+            app.config.debug_addresses.get(&root).map(String::as_str),
+            Some("127.0.0.1:5099")
+        );
+        assert_eq!(app.remembered_address(), "127.0.0.1:5099", "asked twice");
+
+        // And something that is not an address is refused rather than
+        // half-understood.
+        assert_eq!(crate::dap::read_address("localhost"), None);
+        std::fs::remove_file(&path).ok();
+    }
+
+    #[test]
     fn attaching_offers_the_projects_own_programs_first() {
         // On a machine with two hundred processes on it, the one you want is
         // nearly always the thing you just built — and the editor knows which
@@ -14649,13 +14821,28 @@ mod tests {
             .spawn()
             .expect("started");
 
-        app.run(Cmd::DEBUG_ATTACH);
-        let rows: Vec<Row> = match &app.overlay {
-            Overlay::Picker(picker) => {
-                (0..picker.len()).filter_map(|at| picker.row(at).cloned()).collect()
+        // A process is not in `/proc` the instant `spawn` returns, and on a
+        // loaded machine it can be a moment behind. The list is asked for
+        // again rather than once, or this is a test that fails for being run
+        // beside the others.
+        let mut rows: Vec<Row> = Vec::new();
+        for _ in 0..40 {
+            app.run(Cmd::DEBUG_ATTACH);
+            rows = match &app.overlay {
+                Overlay::Picker(picker) => {
+                    (0..picker.len()).filter_map(|at| picker.row(at).cloned()).collect()
+                }
+                _ => panic!("no list went up: {}", app.status.text),
+            };
+            let both = [ours.id(), theirs.id()].iter().all(|pid| {
+                rows.iter()
+                    .any(|row| matches!(row.choice, Choice::Process(it) if it == *pid))
+            });
+            if both {
+                break;
             }
-            _ => panic!("no list went up: {}", app.status.text),
-        };
+            std::thread::sleep(Duration::from_millis(50));
+        }
         let at = |pid: u32| {
             rows.iter()
                 .position(|row| matches!(row.choice, Choice::Process(it) if it == pid))

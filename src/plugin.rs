@@ -2129,6 +2129,44 @@ mod tests {
     }
 
     #[test]
+    fn every_language_that_can_be_debugged_can_also_be_built() {
+        // The pair that has to hold, whatever a language calls the two halves.
+        // `gdb` cannot open a program nobody has compiled, and shipping the
+        // debugger without the build leaves the interesting half in another
+        // window — which is exactly how this started.
+        let registry = load();
+        let has_build = |language: &str| {
+            registry
+                .plugins
+                .iter()
+                .flat_map(|plugin| plugin.tools.iter())
+                .any(|tool| tool.builds && tool.wants(language))
+        };
+        // The languages textfold ships a compiler story for. A script run by
+        // an interpreter has nothing to compile first and is not in it.
+        for name in ["c", "cpp", "rust"] {
+            let id = crate::lang::by_name(name)
+                .unwrap_or_else(|| panic!("{name} is not a language here"));
+            let lang = crate::lang::get(id);
+            assert!(
+                !lang.debuggers.is_empty(),
+                "{name} can be built and not debugged"
+            );
+            assert!(has_build(name), "{name} can be debugged and not built");
+            // And every one of them says what file to debug, since for a
+            // compiled language that can never be the file you are looking at.
+            for debugger in &lang.debuggers {
+                let program = debugger.launch.get("program").and_then(|p| p.as_str());
+                assert!(
+                    program.is_some_and(|p| !p.is_empty()),
+                    "{name}/{} debugs nothing in particular",
+                    debugger.name
+                );
+            }
+        }
+    }
+
+    #[test]
     fn what_ships_for_a_compiled_language_knows_how_to_attach_to_one() {
         // A debugger that can only run programs it started is half a debugger.
         // What ships has to say *how* it attaches, because where the process
@@ -2143,7 +2181,7 @@ mod tests {
                 file.into_plugin(id, Source::BuiltIn).0
             })
             .collect();
-        for (plugin, language) in [("c", "c"), ("cpp", "cpp")] {
+        for (plugin, language) in [("c", "c"), ("cpp", "cpp"), ("python", "python")] {
             let file = shipped
                 .iter()
                 .find(|p| p.id == plugin)
@@ -2162,9 +2200,12 @@ mod tests {
             );
             let attach = debugger.attach.expect("just checked");
             assert_eq!(attach["request"], serde_json::json!("attach"));
-            // And it says where the process goes, or attaching would be a
+            // And it says how to reach the program: a process to point at,
+            // or a port to meet it on. An `attach` that says neither is a
             // request to attach to nothing in particular.
-            assert_eq!(attach["pid"], serde_json::json!("${pid}"), "{attach}");
+            let by_process = crate::dap::needs_a_process(&attach);
+            let by_port = attach.get("listen").is_some() || attach.get("connect").is_some();
+            assert!(by_process || by_port, "{language}: {attach}");
         }
     }
 

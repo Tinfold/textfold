@@ -140,6 +140,12 @@ pub struct Config {
     /// for the project that has three, where only you know which.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub python_environments: BTreeMap<String, String>,
+    /// The address `debug-attach` last used, by project. Remembered for the
+    /// same reason an environment is: a choice you have to make again every
+    /// morning is not a choice, it is a chore — and unlike an environment it
+    /// is a number nobody can be expected to hold in their head.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub debug_addresses: BTreeMap<String, String>,
 
     /// Which plugins and language servers are off, by id: `"python/ruff":
     /// false`. Anything not named here is on.

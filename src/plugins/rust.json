@@ -1,7 +1,7 @@
 {
   "id": "rust",
   "name": "Rust",
-  "about": "What Rust is: colours, comments, and what a .rs file is",
+  "about": "What Rust is: colours, comments, what a .rs file is, and how to build and debug one",
   "languages": {
     "rust": {
       "extensions": [
@@ -14,7 +14,70 @@
       ],
       "grammar": {
         "built_in": "rust"
-      }
+      },
+      "debuggers": [
+        {
+          "name": "lldb-dap",
+          "command": "lldb-dap",
+          "roots": [
+            "Cargo.toml",
+            ".git"
+          ],
+          "launch": {
+            "request": "launch",
+            "program": "${root}/target/debug/${crate}",
+            "cwd": "${root}"
+          },
+          "attach": {
+            "request": "attach",
+            "pid": "${pid}"
+          },
+          "see": "You do not debug src/main.rs, you debug what Cargo built: `program` defaults to ${root}/target/debug/${crate}, where ${crate} is the name in Cargo.toml. A workspace with no [package] of its own, or a binary that is not the package name, needs saying: {\"debuggers\": {\"gdb\": {\"launch\": {\"program\": \"…\"}}}} in your settings for this plugin. Needs gdb 14 or newer, or lldb-dap."
+        },
+        {
+          "name": "gdb",
+          "command": "gdb",
+          "args": [
+            "--interpreter=dap"
+          ],
+          "roots": [
+            "Cargo.toml",
+            ".git"
+          ],
+          "launch": {
+            "request": "launch",
+            "program": "${root}/target/debug/${crate}",
+            "cwd": "${root}"
+          },
+          "attach": {
+            "request": "attach",
+            "program": "${program}",
+            "pid": "${pid}"
+          },
+          "see": "You do not debug src/main.rs, you debug what Cargo built: `program` defaults to ${root}/target/debug/${crate}, where ${crate} is the name in Cargo.toml. A workspace with no [package] of its own, or a binary that is not the package name, needs saying: {\"debuggers\": {\"gdb\": {\"launch\": {\"program\": \"…\"}}}} in your settings for this plugin. Needs gdb 14 or newer, or lldb-dap."
+        }
+      ]
     }
-  }
+  },
+  "tools": [
+    {
+      "name": "cargo-build",
+      "about": "Build this project with debugging in it, so there is something to debug",
+      "command": "cargo",
+      "args": [
+        "build",
+        "--message-format=short"
+      ],
+      "languages": [
+        "rust"
+      ],
+      "roots": [
+        "Cargo.toml",
+        ".git"
+      ],
+      "output": "problems",
+      "pattern": "%f:%l:%c: %t: %m",
+      "builds": true
+    }
+  ]
 }
