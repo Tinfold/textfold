@@ -190,6 +190,57 @@ pub struct Lens {
     pub command: Option<serde_json::Value>,
 }
 
+/// What a language server last said about a file, beyond what is wrong with it.
+///
+/// Four answers to four different questions, held together because they have
+/// one life between them: each is worked out against a particular version of
+/// the file, each is a set of positions in it, all of them are carried along
+/// when the text moves, and all of them are asked for again once the typing
+/// stops. Four fields on `Document` were four chances to carry three of them
+/// and forget the fourth.
+#[derive(Default, Debug)]
+pub struct Said {
+    /// What the server says the names in this file *are*, as colours.
+    ///
+    /// Beside the tree-sitter colours rather than instead of them: the grammar
+    /// knows the shape of the code without knowing anything about it, and the
+    /// server knows that this name is a constant and that one is a type. Where
+    /// both have an opinion the server's wins, because it is the one that had
+    /// to look something up to have it.
+    pub semantic: Vec<(Range, crate::theme::Role)>,
+    /// The types and names the code does not say. See [`Inlay`].
+    pub inlays: Vec<Inlay>,
+    /// The notes a server offers about the lines. See [`Lens`].
+    pub lenses: Vec<Lens>,
+    /// Everywhere in this file the thing under the cursor is mentioned, so
+    /// that all of them can be lit while the cursor is on one.
+    pub highlights: Vec<Range>,
+}
+
+impl Said {
+    /// Take these positions across an edit.
+    ///
+    /// All of it is about to be asked for again, so this is only what holds
+    /// until the answer arrives — but that is the difference between the
+    /// colours sitting still while you type and them trailing a character
+    /// behind the text.
+    ///
+    /// The highlights are the exception and go: they are about the word the
+    /// cursor was on, and an edit has very likely changed that word.
+    pub fn carry(&mut self, edits: &[AppliedEdit], len: usize) {
+        for (range, _) in &mut self.semantic {
+            *range = carried_range(*range, edits, len);
+        }
+        for inlay in &mut self.inlays {
+            inlay.at = carried(inlay.at, edits, len);
+        }
+        for lens in &mut self.lenses {
+            lens.at = carried(lens.at, edits, len);
+        }
+        self.highlights.clear();
+    }
+}
+
 /// The text, where it came from, and what has been done to it.
 pub struct Document {
     pub id: DocId,
@@ -236,21 +287,9 @@ pub struct Document {
     /// What the language servers have said about this file: one list, with
     /// each server's own findings replaced whole when it sends new ones.
     pub diagnostics: Vec<Diagnostic>,
-    /// What the server says the names in this file *are*, as colours.
-    ///
-    /// Beside the tree-sitter colours rather than instead of them: the grammar
-    /// knows the shape of the code without knowing anything about it, and the
-    /// server knows that this name is a constant and that one is a type. Where
-    /// both have an opinion the server's wins, because it is the one that had
-    /// to look something up to have it.
-    pub semantic: Vec<(Range, crate::theme::Role)>,
-    /// The types and names the code does not say. See [`Inlay`].
-    pub inlays: Vec<Inlay>,
-    /// The notes a server offers about the lines. See [`Lens`].
-    pub lenses: Vec<Lens>,
-    /// Everywhere in this file the thing under the cursor is mentioned, so
-    /// that all of them can be lit while the cursor is on one.
-    pub highlights: Vec<Range>,
+    /// What a language server last said about this file, beyond what is wrong
+    /// with it. See [`Said`].
+    pub said: Said,
     /// What makes this a plugin's buffer rather than a file's.
     pub panel: Option<Panel>,
     /// Where the debugger should stop, as character positions.
@@ -681,10 +720,7 @@ impl Document {
             recolour_tries: 0,
             syntax: None,
             diagnostics: Vec::new(),
-            semantic: Vec::new(),
-            inlays: Vec::new(),
-            lenses: Vec::new(),
-            highlights: Vec::new(),
+            said: Said::default(),
             panel: None,
             breakpoints: Vec::new(),
             bookmarks: Vec::new(),
@@ -774,10 +810,7 @@ impl Document {
             recolour_tries: 0,
             syntax: None,
             diagnostics: Vec::new(),
-            semantic: Vec::new(),
-            inlays: Vec::new(),
-            lenses: Vec::new(),
-            highlights: Vec::new(),
+            said: Said::default(),
             panel: None,
             breakpoints: Vec::new(),
             bookmarks: Vec::new(),
@@ -863,6 +896,7 @@ impl Document {
     /// any other and a wide character in one takes two columns.
     pub fn inlay_columns(&self) -> Vec<(usize, usize)> {
         let mut notes: Vec<(usize, usize)> = self
+            .said
             .inlays
             .iter()
             .map(|hint| {

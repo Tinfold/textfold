@@ -146,7 +146,7 @@ impl App {
         // that belongs to the tab beneath it, and the arrow is what is on the
         // screen there.
         if let Some(to) = self
-            .tab_nudges
+            .hits.nudges
             .iter()
             .find(|(area, _)| hits(*area, column, row))
             .map(|(_, to)| *to)
@@ -155,7 +155,7 @@ impl App {
             return;
         }
         if let Some((id, close)) = self
-            .tab_hits
+            .hits.tabs
             .iter()
             .find(|(area, _, _)| hits(*area, column, row))
             .map(|(_, id, close)| (*id, *close))
@@ -187,7 +187,7 @@ impl App {
 
         // The status bar.
         if let Some(cmd) = self
-            .status_hits
+            .hits.status
             .iter()
             .find(|(area, _)| hits(*area, column, row))
             .map(|(_, cmd)| *cmd)
@@ -413,7 +413,7 @@ impl App {
             return;
         }
         if let Some(id) = self
-            .tab_hits
+            .hits.tabs
             .iter()
             .find(|(area, _, _)| hits(*area, column, row))
             .map(|(_, id, _)| *id)

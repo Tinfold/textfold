@@ -1203,9 +1203,8 @@ impl App {
         // too — and the cursor may have been sitting on this spot since before
         // there was anything wrong with it, which is exactly what opening a
         // file at a compiler's line and column looks like.
-        if self.fixes_at.is_some_and(|(doc, _)| doc == doc_id) {
-            self.fixes = None;
-            self.fixes_at = None;
+        if self.fixes.is_about_doc(doc_id) {
+            self.fixes.forget();
         }
     }
 
@@ -1496,7 +1495,7 @@ impl App {
         }
         // A hover over something red is a hover over something you may be
         // about to fix. Saying so here is where a person is already looking.
-        if let Some(fixes) = self.fixes.as_ref().filter(|f| f.doc == doc)
+        if let Some(fixes) = self.fixes.found.as_ref().filter(|f| f.doc == doc)
             && let Some(title) = fixes.headline()
         {
             let key = self
@@ -1718,7 +1717,7 @@ impl App {
         }
         let Value::Array(items) = &value else {
             if let Some(document) = self.doc_mut(doc) {
-                document.highlights.clear();
+                document.said.highlights.clear();
             }
             return;
         };
@@ -1730,7 +1729,7 @@ impl App {
         // worth lighting anything up for.
         let ranges = if ranges.len() > 1 { ranges } else { Vec::new() };
         if let Some(document) = self.doc_mut(doc) {
-            document.highlights = ranges;
+            document.said.highlights = ranges;
         }
     }
 
@@ -1762,7 +1761,7 @@ impl App {
             })
             .collect();
         if let Some(document) = self.doc_mut(doc) {
-            document.lenses = lenses;
+            document.said.lenses = lenses;
         }
     }
 
@@ -1866,7 +1865,7 @@ impl App {
             }
         }
         if let Some(document) = self.doc_mut(doc) {
-            document.semantic = spans;
+            document.said.semantic = spans;
         }
     }
 
@@ -1902,7 +1901,7 @@ impl App {
             })
             .collect();
         if let Some(document) = self.doc_mut(doc) {
-            document.inlays = hints;
+            document.said.inlays = hints;
         }
     }
 

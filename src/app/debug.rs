@@ -748,49 +748,43 @@ impl App {
     /// times", recorded and played within the minute — and a register to name
     /// is a thing to remember for a macro that will not outlive the hour.
     pub(super) fn record_macro(&mut self) {
-        match self.recording.take() {
+        match self.recorder.stop() {
             None => {
-                self.recording = Some(Vec::new());
+                self.recorder.start();
                 self.say("recording — run it again to stop");
             }
-            Some(steps) => {
-                let n = steps.len();
-                if n == 0 {
-                    return self.say("nothing was recorded");
-                }
-                self.macro_steps = steps;
-                self.say_good(format!("{} recorded", count("step", n)));
-            }
+            Some(0) => self.say("nothing was recorded"),
+            Some(n) => self.say_good(format!("{} recorded", count("step", n))),
         }
     }
 
     /// Whether something is being recorded, for the status bar to say so. A
     /// recorder nobody can see running is a recorder somebody left on.
     pub fn is_recording(&self) -> bool {
-        self.recording.is_some()
+        self.recorder.on()
     }
 
     /// Do it all again.
     pub(super) fn play_macro(&mut self) {
-        if self.recording.is_some() {
+        if self.recorder.on() {
             // Playing what is still being recorded would record what it
             // played, and the recording would grow while it ran.
             return self.say("still recording — run record-macro to stop");
         }
-        if self.macro_steps.is_empty() {
+        if self.recorder.kept().is_empty() {
             return self.say("nothing recorded to play");
         }
-        if self.playing {
+        if self.recorder.playing {
             return;
         }
-        self.playing = true;
-        for step in self.macro_steps.clone() {
+        self.recorder.playing = true;
+        for step in self.recorder.kept().to_vec() {
             match step {
                 Recorded::Did(cmd) => self.run(cmd),
                 Recorded::Typed(c) => self.type_char(c),
             }
         }
-        self.playing = false;
+        self.recorder.playing = false;
     }
 
     /// Put back the stretch of this file the cursor is standing in, as it was

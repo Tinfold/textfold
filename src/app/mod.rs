@@ -705,7 +705,6 @@ fn word_span(line: &str, column: usize) -> Option<(String, usize, usize)> {
     worth_following.then_some((word, start, end))
 }
 
-
 /// Whether every letter of `needle` appears in `haystack`, in order.
 fn subsequence(haystack: &str, needle: &str) -> bool {
     let mut chars = haystack.chars();
@@ -1171,6 +1170,144 @@ enum Drag {
     Popup,
 }
 
+/// What the language servers would do about the problem under the cursor,
+/// asked for before anybody asks for it.
+///
+/// This is the whole of "you have not imported that" being something you can
+/// see rather than something you have to go looking for — and it is four
+/// pieces of state that only mean anything together: an answer, the spot it is
+/// an answer *about*, when to ask, and how many times we have asked and been
+/// turned away. An answer kept after the cursor has moved is a fix for
+/// somewhere else, offered for here.
+#[derive(Default)]
+pub struct Fixes {
+    /// What came back, gathering as the servers answer.
+    pub found: Option<Gathered>,
+    /// Where it is about, so the same question is not asked twice for a cursor
+    /// that has not moved — and so an answer that arrives late can be told it
+    /// is about somewhere nobody is standing any more.
+    at: Option<(DocId, usize)>,
+    /// When to ask, having waited for the cursor to stop. Walking along a line
+    /// of red would otherwise be one request per character.
+    due: Option<Instant>,
+    /// How many times we have asked about this spot and been turned away. A
+    /// server that is still catching up answers "content modified" rather than
+    /// answering, and the first ask after a file opens nearly always is.
+    tries: u8,
+}
+
+impl Fixes {
+    /// Whether what is held is about this spot.
+    fn about(&self, doc: DocId, at: usize) -> bool {
+        self.at == Some((doc, at))
+    }
+
+    /// Start again, about somewhere else: nothing found, nothing asked, and
+    /// no answer from before carried over to a place it was not about.
+    fn now_about(&mut self, doc: DocId, at: usize) {
+        self.found = None;
+        self.at = Some((doc, at));
+        self.tries = 0;
+    }
+
+    /// Whether what is held is about this file at all — asked when the file
+    /// changes under it, since a fix worked out against text that has been
+    /// edited is a fix for a file that no longer exists.
+    fn is_about_doc(&self, doc: DocId) -> bool {
+        self.at.is_some_and(|(held, _)| held == doc)
+    }
+
+    /// Forget it entirely — the file changed under it.
+    fn forget(&mut self) {
+        self.found = None;
+        self.at = None;
+        self.tries = 0;
+    }
+}
+
+/// Where things ended up on the screen, so that a click is answered by what is
+/// actually there rather than by working out where it ought to be.
+///
+/// Filled in by the drawing, every frame, and read by the mouse. They are one
+/// thing because they are forgotten as one: three lists written by two
+/// different pieces of the drawing, and one of them left over from last frame
+/// is a click that goes to the tab that used to be in that column.
+#[derive(Default)]
+pub struct Hits {
+    /// Each tab: where it is, which buffer it is for, and whether that spot is
+    /// its close cross.
+    pub tabs: Vec<(Rect, DocId, bool)>,
+    /// The ‹ › at the ends of the tab row, and where each one scrolls to.
+    /// Answered before the tabs, since an arrow sits on top of the tab it
+    /// borrowed its column from.
+    pub nudges: Vec<(Rect, u16)>,
+    /// The parts of the status bar, every one of which is a button.
+    pub status: Vec<(Rect, Cmd)>,
+}
+
+impl Hits {
+    /// What was on the screen is about to stop being true.
+    pub fn forget(&mut self) {
+        self.tabs.clear();
+        self.nudges.clear();
+        self.status.clear();
+    }
+}
+
+/// What you are recording, and what you recorded.
+///
+/// One macro, not a keyboard full of them. The overwhelming majority of what
+/// anybody records is "this, and now the same thing forty more times",
+/// recorded and played within the minute — and a register to name is one more
+/// thing to remember about a macro that will not outlive the hour.
+#[derive(Default)]
+struct Recorder {
+    /// What is being taken down, while something is. See [`Recorded`].
+    taking: Option<Vec<Recorded>>,
+    /// The last thing recorded, waiting to be played again.
+    kept: Vec<Recorded>,
+    /// Whether it is playing. A macro with "play the macro" in the middle of
+    /// it is a loop with no way out and an editor that has stopped answering
+    /// the keyboard — and one recorded through a plugin could ask for exactly
+    /// that, so it is refused here rather than assumed impossible.
+    playing: bool,
+}
+
+impl Recorder {
+    /// Whether something is being taken down.
+    fn on(&self) -> bool {
+        self.taking.is_some()
+    }
+
+    /// Start taking one down, throwing away the last.
+    fn start(&mut self) {
+        self.taking = Some(Vec::new());
+    }
+
+    /// Stop, and keep what was taken down. Answers how many steps it was, or
+    /// `None` where nothing was being recorded.
+    fn stop(&mut self) -> Option<usize> {
+        let steps = self.taking.take()?;
+        let n = steps.len();
+        if n > 0 {
+            self.kept = steps;
+        }
+        Some(n)
+    }
+
+    /// Take one thing down, if anything is being taken down.
+    fn remember(&mut self, step: Recorded) {
+        if let Some(steps) = &mut self.taking {
+            steps.push(step);
+        }
+    }
+
+    /// What there is to play.
+    fn kept(&self) -> &[Recorded] {
+        &self.kept
+    }
+}
+
 /// One thing a macro remembers.
 ///
 /// Commands and characters rather than keystrokes. A key is a fact about your
@@ -1268,21 +1405,12 @@ pub struct App {
     /// The whole screen, as last drawn.
     pub screen: Rect,
 
-    /// Where the tabs were drawn, and what is under each: which buffer, and
-    /// whether that spot is its close cross. Filled in by the drawing every
-    /// frame, so a click is answered by what is actually on the screen rather
-    /// than by working out where it ought to be.
-    pub tab_hits: Vec<(Rect, DocId, bool)>,
+    /// Where everything the mouse can hit ended up. See [`Hits`].
+    pub hits: Hits,
     /// How far along the row of tabs the visible part starts, in columns. More
     /// files than fit across a terminal is the ordinary case once you have
     /// been working for an hour, so the row scrolls.
     pub tab_scroll: u16,
-    /// The ‹ › at the ends of the tab row, and where each one scrolls to.
-    /// Answered before [`App::tab_hits`], since an arrow sits on top of the
-    /// tab it borrowed its column from.
-    pub tab_nudges: Vec<(Rect, u16)>,
-    /// The same for the status bar, whose parts are buttons.
-    pub status_hits: Vec<(Rect, Cmd)>,
 
     drag: Option<Drag>,
     last_click: Option<(Instant, u16, u16, u8)>,
@@ -1294,19 +1422,13 @@ pub struct App {
     /// were last told, so that nothing is sent twice.
     selection_due: Option<Instant>,
     selection_told: Option<(DocId, usize)>,
-    /// What the language server would do about the problem under the cursor,
-    /// fetched before anybody asks so that it can be offered rather than
-    /// waited for. This is the whole of "you have not imported that" being
-    /// something you can see instead of something you have to go looking for.
-    pub fixes: Option<Gathered>,
+    /// What could be done about the problem under the cursor. See [`Fixes`].
+    pub fixes: Fixes,
     /// What every server offered to do about the selection, gathering as they
     /// answer, for the list somebody asked for by hand.
     offer: Option<Gathered>,
     /// A save waiting on the servers' own fixes and on the formatter.
     before_save: Option<BeforeSave>,
-    /// Where the fixes were last asked about, so the same question is not
-    /// asked twice for a cursor that has not moved.
-    fixes_at: Option<(DocId, usize)>,
     /// When to ask the servers for the things that are about the file rather
     /// than about the cursor: its colours, its inlay hints, its lenses, and —
     /// for a server that waits to be asked — what is wrong with it. One timer
@@ -1317,13 +1439,6 @@ pub struct App {
     /// one under the cursor. After a pause, because walking a line with the
     /// arrow keys would otherwise be a question per character.
     highlights_due: Option<Instant>,
-    /// When to ask, having waited for the cursor to stop. Walking along a line
-    /// of red would otherwise be one request per character.
-    fixes_due: Option<Instant>,
-    /// How many times we have asked about this spot and been turned away. A
-    /// server that is still catching up answers "content modified" rather than
-    /// answering, and the first ask after a file opens nearly always is.
-    fixes_tries: u8,
     /// Whether the first copy of the session has said where copied text goes.
     /// Once, because "copied 12 characters through wl-copy and OSC 52" is
     /// worth reading the first time and noise every time after.
@@ -1349,14 +1464,8 @@ pub struct App {
     /// what makes the next one come sooner.
     unsettled: bool,
 
-    /// What is being recorded, while something is. See [`Recorded`].
-    recording: Option<Vec<Recorded>>,
-    /// The last thing recorded, waiting to be played again.
-    macro_steps: Vec<Recorded>,
-    /// Whether a macro is playing, so that one cannot play itself. A macro
-    /// with "play the macro" in the middle of it is a loop with no way out and
-    /// an editor that has stopped answering the keyboard.
-    playing: bool,
+    /// What you are recording, and what you recorded. See [`Recorder`].
+    recorder: Recorder,
 
     /// The install or uninstall that is running, and everything it has said.
     ///
@@ -1417,9 +1526,7 @@ impl App {
             plugin_waiting: None,
             unsettled: false,
             installing: None,
-            recording: None,
-            macro_steps: Vec::new(),
-            playing: false,
+            recorder: Recorder::default(),
             caret: None,
             tx,
             clipboard: String::new(),
@@ -1432,24 +1539,21 @@ impl App {
             quit: false,
             mouse_on: config.mouse(),
             screen: Rect::new(0, 0, 80, 24),
-            tab_hits: Vec::new(),
+            hits: Hits::default(),
             tab_scroll: 0,
-            tab_nudges: Vec::new(),
-            status_hits: Vec::new(),
             drag: None,
             last_click: None,
             resting: None,
             completion_due: None,
             selection_due: None,
             selection_told: None,
-            fixes: None,
+            fixes: Fixes::default(),
             offer: None,
             before_save: None,
-            fixes_at: None,
-            fixes_due: None,
+
             lsp_extras_due: None,
             highlights_due: None,
-            fixes_tries: 0,
+
             said_clipboard: false,
             git_checked: Instant::now() - GIT_CHECK_EVERY,
             disk_checked: Instant::now(),
@@ -1983,7 +2087,7 @@ impl App {
     pub fn idle(&self) -> Duration {
         if self.completion_due.is_some()
             || self.selection_due.is_some()
-            || self.fixes_due.is_some()
+            || self.fixes.due.is_some()
             || self.highlights_due.is_some()
             || self.lsp_extras_due.is_some()
             || self.resting.is_some()
@@ -2055,7 +2159,7 @@ impl App {
             return;
         }
         let Some((_, to)) = self
-            .tab_nudges
+            .hits.nudges
             .iter()
             .find(|(area, _)| hits(*area, at.0, at.1))
         else {
@@ -2103,25 +2207,23 @@ impl App {
     fn check_fixes(&mut self) {
         let id = self.view().doc;
         let at = self.view().cursor();
-        if self.fixes_at != Some((id, at)) {
+        if !self.fixes.about(id, at) {
             // The cursor has moved, so last time's answer is about somewhere
             // else. Ask again once it stops.
-            self.fixes = None;
-            self.fixes_at = Some((id, at));
-            self.fixes_tries = 0;
+            self.fixes.now_about(id, at);
             let on_a_problem = self
                 .doc(id)
                 .is_some_and(|d| d.diagnostics.iter().any(|p| p.range.contains(at)));
-            self.fixes_due = on_a_problem.then(|| Instant::now() + FIX_DELAY);
+            self.fixes.due = on_a_problem.then(|| Instant::now() + FIX_DELAY);
             // The cursor is somewhere else, so the words lit up as being the
             // same thing as the one it was on are about the word before.
             if let Some(doc) = self.doc_mut(id) {
-                doc.highlights.clear();
+                doc.said.highlights.clear();
             }
             self.highlights_due = Some(Instant::now() + FIX_DELAY);
             return;
         }
-        if !now_due(&mut self.fixes_due) {
+        if !now_due(&mut self.fixes.due) {
             return;
         }
         let range = Range::point(at);
@@ -2134,7 +2236,7 @@ impl App {
         // of the two answers first is a race nobody should be running.
         let asked = lsp.quick_fixes(doc, range);
         if !asked.is_empty() {
-            self.fixes = Some(Gathered::new(id, at, asked));
+            self.fixes.found = Some(Gathered::new(id, at, asked));
         }
     }
 
@@ -2209,6 +2311,7 @@ impl App {
         let Some(doc) = self.doc(id) else { return };
         let line = text::line_of(&doc.rope, at);
         let found = doc
+            .said
             .lenses
             .iter()
             .find(|lens| text::line_of(&doc.rope, lens.at) == line)
@@ -2236,27 +2339,27 @@ impl App {
     /// question is a server we should stop asking, and the cost of being wrong
     /// about that is one code action nobody was told about.
     fn retry_fixes(&mut self, doc: DocId, at: usize) {
-        if self.fixes_at != Some((doc, at)) || self.fixes_tries >= FIX_TRIES {
+        if !self.fixes.about(doc, at) || self.fixes.tries >= FIX_TRIES {
             return;
         }
-        self.fixes_tries += 1;
-        self.fixes_due = Some(Instant::now() + FIX_DELAY * 2);
+        self.fixes.tries += 1;
+        self.fixes.due = Some(Instant::now() + FIX_DELAY * 2);
     }
 
     fn take_quick_fixes(&mut self, server: ServerId, doc: DocId, at: usize, value: Value) {
         // Anything that came back about somewhere the cursor has since left is
         // an answer to a question nobody is asking any more.
-        if self.fixes_at != Some((doc, at)) {
+        if !self.fixes.about(doc, at) {
             return;
         }
-        let Some(gathered) = self.fixes.as_mut().filter(|g| g.doc == doc && g.at == at) else {
+        let Some(gathered) = self.fixes.found.as_mut().filter(|g| g.doc == doc && g.at == at) else {
             return;
         };
         gathered.take(server, value);
         if gathered.is_empty() && gathered.settled() {
             // Nobody had anything. Better to have nothing waiting than an
             // empty list the status bar has to describe.
-            self.fixes = None;
+            self.fixes.forget();
         }
     }
 
@@ -2267,7 +2370,7 @@ impl App {
     /// scroll to the top of a file to add a line they already know the text
     /// of. Several means a list, because there is a choice to make.
     fn fix_it(&mut self) {
-        let Some(fixes) = self.fixes.as_ref().filter(|g| !g.is_empty()) else {
+        let Some(fixes) = self.fixes.found.as_ref().filter(|g| !g.is_empty()) else {
             // Nothing waiting: it may simply not have come back yet, or there
             // may be nothing wrong here at all.
             let on_a_problem = {
@@ -2292,7 +2395,7 @@ impl App {
                 .and_then(Value::as_str)
                 .unwrap_or("fixed it")
                 .to_string();
-            self.fixes = None;
+            self.fixes.forget();
             self.do_code_action(server, action);
             return self.say_good(title);
         }
@@ -2572,9 +2675,7 @@ impl App {
         if self.refuse_if_read_only() {
             return;
         }
-        if let Some(steps) = &mut self.recording {
-            steps.push(Recorded::Typed(c));
-        }
+        self.recorder.remember(Recorded::Typed(c));
         let auto_pairs = self.config.auto_pairs();
         let (doc, view) = self.pair();
         let edits = edit::insert_char(doc, view, c, auto_pairs);
@@ -2699,24 +2800,9 @@ impl App {
             }
             doc.bookmarks.sort_unstable();
             doc.bookmarks.dedup();
-            // And everything a server worked out about the file: its colours,
-            // the types it wrote in, the notes about each line. All of them
-            // are positions in a file that has just changed, and all of them
-            // are about to be asked again — carrying them across the edit in
-            // the meantime is the difference between the colours staying still
-            // while you type and them jumping about a character behind it.
-            for (range, _) in &mut doc.semantic {
-                *range = carry_range(*range);
-            }
-            for inlay in &mut doc.inlays {
-                inlay.at = carry(inlay.at);
-            }
-            for lens in &mut doc.lenses {
-                lens.at = carry(lens.at);
-            }
-            // The highlights are the exception: they are about the word the
-            // cursor was on, and the edit has very likely changed that word.
-            doc.highlights.clear();
+            // And everything a server worked out about the file, which is one
+            // thing and moves as one. See [`crate::doc::Said::carry`].
+            doc.said.carry(&edits, len);
         }
         // The adapter is running against the file as it was, so an edit that
         // moved a breakpoint has to be passed on or it goes on stopping at the
@@ -2786,11 +2872,8 @@ impl App {
         // Everything but the two commands that work the recorder. A macro with
         // "stop recording" in it stops the recording it is played into, and
         // one with "play the macro" in it is a loop.
-        if cmd != Cmd::RECORD_MACRO
-            && cmd != Cmd::PLAY_MACRO
-            && let Some(steps) = &mut self.recording
-        {
-            steps.push(Recorded::Did(cmd));
+        if cmd != Cmd::RECORD_MACRO && cmd != Cmd::PLAY_MACRO {
+            self.recorder.remember(Recorded::Did(cmd));
         }
         let behaviour = cmd.behaviour();
         if cmd.writes() && self.refuse_if_read_only() {
@@ -2816,181 +2899,6 @@ impl App {
                 "{} came from a plugin that is switched off",
                 cmd.name()
             )),
-        }
-    }
-
-    fn select_all(&mut self) {
-        let (doc, view) = self.pair();
-        edit::select_all(doc, view);
-    }
-
-    fn select_line(&mut self) {
-        let (doc, view) = self.pair();
-        edit::select_line(doc, view);
-        self.scroll_into_view();
-    }
-
-    fn select_word(&mut self) {
-        let (doc, view) = self.pair();
-        edit::select_word(doc, view);
-    }
-
-    fn add_cursor_above(&mut self) {
-        let tab_width = self.config.tab_width();
-        let (doc, view) = self.pair();
-        edit::add_cursor_vertically(doc, view, tab_width, false);
-        self.scroll_into_view();
-    }
-
-    fn add_cursor_below(&mut self) {
-        let tab_width = self.config.tab_width();
-        let (doc, view) = self.pair();
-        edit::add_cursor_vertically(doc, view, tab_width, true);
-        self.scroll_into_view();
-    }
-
-    fn add_cursor_at_next_match(&mut self) {
-        let (doc, view) = self.pair();
-        let found = edit::add_cursor_next_match(doc, view);
-        if !found {
-            self.say("no more of those");
-        } else {
-            self.scroll_into_view();
-        }
-    }
-
-    fn select_every_match(&mut self) {
-        let (doc, view) = self.pair();
-        let count = edit::select_all_matches(doc, view);
-        if count > 1 {
-            self.say(format!("{count} cursors"));
-        }
-    }
-
-    fn cursors_to_line_ends(&mut self) {
-        let (doc, view) = self.pair();
-        edit::cursors_to_line_ends(doc, view);
-    }
-
-    fn collapse_cursors(&mut self) {
-        self.view_mut().sel.collapse_to_primary();
-        self.scroll_into_view();
-    }
-
-    fn insert_newline(&mut self) {
-        let tab_width = self.config.tab_width();
-        let (doc, view) = self.pair();
-        let mut edits = edit::newline(doc, view, tab_width);
-        edits.extend(edit::newline_closing(doc, view, tab_width));
-        self.after_edit(edits);
-        self.completion = None;
-    }
-
-    fn delete_backward(&mut self) {
-        let tab_width = self.config.tab_width();
-        let (doc, view) = self.pair();
-        let edits = edit::delete_backward(doc, view, tab_width);
-        self.after_edit(edits);
-        self.refresh_completion();
-    }
-
-    fn delete_forward(&mut self) {
-        let (doc, view) = self.pair();
-        let edits = edit::delete_forward(doc, view);
-        self.after_edit(edits);
-    }
-
-    fn delete_word_backward(&mut self) {
-        let (doc, view) = self.pair();
-        let edits = edit::delete_word_backward(doc, view);
-        self.after_edit(edits);
-    }
-
-    fn delete_word_forward(&mut self) {
-        let (doc, view) = self.pair();
-        let edits = edit::delete_word_forward(doc, view);
-        self.after_edit(edits);
-    }
-
-    fn delete_to_line_start(&mut self) {
-        let (doc, view) = self.pair();
-        let edits = edit::delete_to_line_start(doc, view);
-        self.after_edit(edits);
-    }
-
-    fn delete_to_line_end(&mut self) {
-        let (doc, view) = self.pair();
-        let edits = edit::delete_to_line_end(doc, view);
-        self.after_edit(edits);
-    }
-
-    fn delete_line(&mut self) {
-        let (doc, view) = self.pair();
-        let edits = edit::delete_line(doc, view);
-        self.after_edit(edits);
-    }
-
-    fn duplicate_line(&mut self) {
-        let (doc, view) = self.pair();
-        let edits = edit::duplicate_line(doc, view);
-        self.after_edit(edits);
-    }
-
-    fn move_line_up(&mut self) {
-        let (doc, view) = self.pair();
-        let edits = edit::move_lines(doc, view, false);
-        self.after_edit(edits);
-    }
-
-    fn move_line_down(&mut self) {
-        let (doc, view) = self.pair();
-        let edits = edit::move_lines(doc, view, true);
-        self.after_edit(edits);
-    }
-
-    fn join_lines(&mut self) {
-        let (doc, view) = self.pair();
-        let edits = edit::join_lines(doc, view);
-        self.after_edit(edits);
-    }
-
-    fn toggle_comment(&mut self) {
-        let tab_width = self.config.tab_width();
-        let (doc, view) = self.pair();
-        match edit::toggle_comment(doc, view, tab_width) {
-            Some(edits) => self.after_edit(edits),
-            None => {
-                let name = lang::get(self.here().language).name.clone();
-                self.say(format!("textfold does not know how to comment {name}"));
-            }
-        }
-    }
-
-    fn change_case(&mut self, case: edit::Case) {
-        let (doc, view) = self.pair();
-        let edits = edit::change_case(doc, view, case);
-        self.after_edit(edits);
-    }
-
-    /// Reorder the lines under the selection, or the whole file when there is
-    /// nothing selected. See [`edit::shuffle_lines`].
-    fn shuffle_lines(&mut self, how: edit::Shuffle) {
-        let (doc, view) = self.pair();
-        let edits = edit::shuffle_lines(doc, view, how);
-        if edits.is_empty() {
-            return self.say("nothing to reorder");
-        }
-        self.after_edit(edits);
-    }
-
-    fn paste(&mut self) {
-        let text = self.system_clipboard();
-        if text.is_empty() {
-            self.say("nothing to paste");
-        } else {
-            let (doc, view) = self.pair();
-            let edits = edit::insert_atomic(doc, view, &text);
-            self.after_edit(edits);
         }
     }
 
@@ -3047,222 +2955,6 @@ impl App {
         let found = self.restore_session(true);
         if found > 0 {
             self.say_good(format!("brought back {}", count("file", found)));
-        }
-    }
-
-    fn motion(&mut self, motion: Motion, extend: bool) {
-        let tab_width = self.config.tab_width();
-        let far = matches!(motion, Motion::DocStart | Motion::DocEnd);
-        if far {
-            self.view_mut().mark_jump();
-        }
-        let (doc, view) = self.pair();
-        edit::move_cursors(doc, view, motion, extend, tab_width);
-        self.dismiss_popups();
-        self.scroll_into_view();
-    }
-
-    fn dismiss_popups(&mut self) {
-        self.hover = None;
-        self.signature = None;
-    }
-
-    /// Keep the open list of suggestions honest after an edit that changed
-    /// the word being completed.
-    ///
-    /// Narrowing what is already on the screen answers the keystroke without
-    /// a round trip, and for a list the server called complete that is the
-    /// whole of it. For one it called partial it is not: the name you are
-    /// typing towards may not be in the list at all — a server asked about
-    /// `Ha` offers a few of the unimported names it could reach and says
-    /// there are more — so the question is asked again as well, with what is
-    /// already there standing in until the answer arrives.
-    fn refresh_completion(&mut self) {
-        self.accept_when_resolved = None;
-        let typed = self.typed_since_completion();
-        let Some(completion) = &mut self.completion else {
-            return;
-        };
-        let incomplete = completion.incomplete;
-        match typed {
-            Some(prefix) => {
-                completion.narrow(&prefix);
-                if completion.is_empty() && !incomplete {
-                    self.completion = None;
-                }
-            }
-            // The cursor has left the word this list was about.
-            None => {
-                self.completion = None;
-                return;
-            }
-        }
-        if incomplete {
-            self.completion_due = Some(Instant::now() + COMPLETION_DELAY);
-            // An empty list is a box with nothing in it. Better to take it
-            // off the screen and let the answer put it back.
-            if self.completion.as_ref().is_some_and(Completion::is_empty) {
-                self.completion = None;
-            }
-        }
-        self.resolve_selected();
-    }
-
-    fn scroll(&mut self, rows: isize) {
-        let tab_width = self.config.tab_width();
-        let at = self.focus.min(self.panes.len() - 1);
-        let id = self.panes[at].doc;
-        let Some(index) = self.docs.iter().position(|d| d.id == id) else {
-            return;
-        };
-        let (docs, panes) = (&self.docs, &mut self.panes);
-        view::scroll_by(&mut panes[at], &docs[index], tab_width, rows);
-    }
-
-    fn centre(&mut self) {
-        let line = text::line_of(&self.here().rope, self.view().cursor());
-        let height = self.view().height();
-        let view = self.view_mut();
-        view.top = line.saturating_sub(height / 2);
-        view.top_row = 0;
-    }
-
-    fn on_tab(&mut self, out: bool) {
-        // Tab with a completion list open takes the suggestion, which is what
-        // it does everywhere and why it is bound to indent rather than the
-        // other way round.
-        if self.completion.is_some() && !out {
-            self.accept_completion();
-            return;
-        }
-        let tab_width = self.config.tab_width();
-        let (doc, view) = self.pair();
-        let edits = edit::indent(doc, view, tab_width, out);
-        self.after_edit(edits);
-    }
-
-    fn undo(&mut self, backwards: bool) {
-        let (doc, view) = self.pair();
-        let done = if backwards { doc.undo() } else { doc.redo() };
-        let Some((edits, selections)) = done else {
-            self.say(if backwards {
-                "nothing to undo"
-            } else {
-                "nothing to redo"
-            });
-            return;
-        };
-        view.sel = selections;
-        view.sel.clamp(doc.len_chars());
-        self.after_edit(edits);
-        self.scroll_into_view();
-    }
-
-    /// What Ctrl-V should put in.
-    ///
-    /// Whatever is on the desktop's clipboard, where that can be asked for,
-    /// so that a copy made in a browser pastes into the editor without going
-    /// through the terminal's own paste key. Where it cannot, what Ctrl-C last
-    /// took, which is the most this can honestly know.
-    fn system_clipboard(&mut self) -> String {
-        if let Some(text) = crate::term::from_clipboard() {
-            self.clipboard = text;
-        }
-        self.clipboard.clone()
-    }
-
-    fn copy(&mut self, cut: bool) {
-        // Copying with nothing selected takes the line, which is what people
-        // mean by Ctrl-C on a line they are standing on.
-        let took_lines = self.view().sel.ranges().iter().all(Range::is_empty);
-        if took_lines {
-            let (doc, view) = self.pair();
-            edit::select_line(doc, view);
-        }
-        let doc = self.here();
-        let text: Vec<String> = self
-            .view()
-            .sel
-            .ranges()
-            .iter()
-            .map(|range| doc.slice(*range))
-            .collect();
-        self.clipboard = text.join("\n");
-        crate::term::to_clipboard(&self.clipboard);
-
-        if cut {
-            let (doc, view) = self.pair();
-            let edits = edit::insert(doc, view, "");
-            self.after_edit(edits);
-        } else if took_lines {
-            // Put the cursor back rather than leaving the line selected: you
-            // asked to copy it, not to select it.
-            self.view_mut().sel.collapse_selections();
-        }
-        let count = self.clipboard.chars().count();
-        let did = if cut { "cut" } else { "copied" };
-        if self.said_clipboard {
-            self.say(format!("{did} {count} characters"));
-        } else {
-            // Where a copy goes is the one thing about a terminal editor
-            // nobody can work out by looking, so it is said once, on the first
-            // copy, and then never again.
-            self.said_clipboard = true;
-            self.say(format!(
-                "{did} {count} characters — {}",
-                crate::term::clipboard_story()
-            ));
-        }
-    }
-
-    fn on_paste(&mut self, text: &str) {
-        if self.refuse_if_read_only() {
-            return;
-        }
-        match &mut self.overlay {
-            Overlay::Picker(picker) => {
-                for c in text.chars().filter(|c| !c.is_control()) {
-                    picker.type_char(c);
-                }
-                return;
-            }
-            Overlay::Prompt(prompt) => {
-                for c in text.chars().filter(|c| !c.is_control()) {
-                    prompt.insert(c);
-                }
-                self.on_prompt_changed();
-                return;
-            }
-            // A menu has nothing to type into. Pasting is you having finished
-            // with it, so it closes and the text goes where it was going.
-            Overlay::Menu(_) => self.overlay = Overlay::None,
-            _ => {}
-        }
-        if self.hover.as_ref().is_some_and(|h| h.focused) {
-            self.hover = None;
-        }
-        // A pasted `\r\n` is the terminal's idea of a line break, not the
-        // file's; the rope only ever holds `\n`.
-        let text = text.replace("\r\n", "\n").replace('\r', "\n");
-        let (doc, view) = self.pair();
-        let edits = edit::insert_atomic(doc, view, &text);
-        self.after_edit(edits);
-    }
-
-    fn escape(&mut self) {
-        // In order of how much is in the way, so one press takes off one
-        // layer and you never lose something you did not mean to.
-        if self.completion.is_some() {
-            self.completion = None;
-        } else if self.hover.is_some() || self.signature.is_some() {
-            self.dismiss_popups();
-        } else if self.view().sel.len() > 1 {
-            self.view_mut().sel.collapse_to_primary();
-            self.scroll_into_view();
-        } else if !self.view().sel.primary().is_empty() {
-            self.view_mut().sel.collapse_selections();
-        } else if self.status.showing() {
-            self.status = Status::quiet();
         }
     }
 
@@ -4333,7 +4025,7 @@ impl App {
     /// the arrows there rather than by this.
     fn tab_spans(&self) -> Vec<(DocId, u16, u16)> {
         let mut out: Vec<(DocId, u16, u16)> = Vec::new();
-        for (area, id, _) in &self.tab_hits {
+        for (area, id, _) in &self.hits.tabs {
             match out.iter_mut().find(|(seen, ..)| seen == id) {
                 Some(span) => {
                     span.1 = span.1.min(area.x);
@@ -4576,7 +4268,7 @@ impl App {
                     // Off means gone now, not gone the next time somebody
                     // asks a server something.
                     for doc in &mut self.docs {
-                        doc.inlays.clear();
+                        doc.said.inlays.clear();
                     }
                 }
                 self.ask_the_servers_about_this_file();
@@ -4591,7 +4283,7 @@ impl App {
                 self.config.code_lenses = Some(on);
                 if !on {
                     for doc in &mut self.docs {
-                        doc.lenses.clear();
+                        doc.said.lenses.clear();
                     }
                 }
                 self.ask_the_servers_about_this_file();
@@ -4762,6 +4454,7 @@ fn file_rows(files: &[PathBuf], project: &Path) -> Vec<Row> {
 // rather than a neighbour, so what was private to `app` when this was one file
 // is private to `app` still — and what one piece needs from another says so,
 // which is the only thing that changed.
+mod typing;
 mod overlays;
 pub(crate) use overlays::*;
 mod find;

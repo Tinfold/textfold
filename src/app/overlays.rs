@@ -449,7 +449,7 @@ impl App {
                 row("Go to definition", Cmd::GOTO_DEFINITION).enabled(can("definitionProvider")),
                 row("Find references", Cmd::REFERENCES).enabled(can("referencesProvider")),
                 row("Rename…", Cmd::RENAME).enabled(can("renameProvider") && writable),
-                row("Fix it", Cmd::FIX_IT).enabled(self.fixes.is_some()),
+                row("Fix it", Cmd::FIX_IT).enabled(self.fixes.found.is_some()),
                 row("What can be done here…", Cmd::CODE_ACTION)
                     .enabled(can("codeActionProvider") && writable),
                 row("What is this?", Cmd::HOVER).enabled(can("hoverProvider")),
