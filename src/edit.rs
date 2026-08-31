@@ -48,16 +48,7 @@ pub enum Motion {
 /// rather than one character to the left of where the cursor happened to be.
 pub fn move_cursors(doc: &Document, view: &mut View, motion: Motion, extend: bool, tab_width: usize) {
     let rope = &doc.rope;
-    let folds = view.folded(rope);
-    let hints = doc.inlay_columns();
-    let layout = Layout {
-        rope,
-        hints: &hints,
-        width: view.width(),
-        tab_width,
-        wrap: view.wrap,
-        folds: &folds,
-    };
+    let layout = Layout::of(view, doc, tab_width);
     let height = view.height();
 
     // Vertical movement aims for a column, and keeps aiming for it across
@@ -1141,15 +1132,11 @@ pub fn select_word(doc: &Document, view: &mut View) {
 
 /// Another cursor a line above or below the primary, in the same column.
 pub fn add_cursor_vertically(doc: &Document, view: &mut View, tab_width: usize, down: bool) {
-    let folds = view.folded(&doc.rope);
-    let hints = doc.inlay_columns();
+    // Never wrapped: a cursor added above or below goes on the line above or
+    // below, not on the row.
     let layout = Layout {
-        rope: &doc.rope,
-        hints: &hints,
-        width: view.width(),
-        tab_width,
         wrap: false,
-        folds: &folds,
+        ..Layout::of(view, doc, tab_width)
     };
     // Grow from the edge of the block of cursors, so holding the key keeps
     // adding rather than fighting over one line.

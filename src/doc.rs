@@ -535,6 +535,29 @@ pub fn read_whole(path: &Path) -> Result<Option<(Vec<u8>, Stamp)>> {
     Ok(None)
 }
 
+/// Where a position ends up after a run of edits, kept inside the document.
+///
+/// Every mark textfold keeps is a position in a file somebody is typing in: a
+/// breakpoint, a bookmark, a diagnostic, the types a server wrote into a line,
+/// the notes it put beside one. All of them move the same way, and this is
+/// that way — written once, so that the next kind of mark is one line rather
+/// than another loop to get subtly wrong.
+pub fn carried(at: usize, edits: &[AppliedEdit], len: usize) -> usize {
+    let mut at = at;
+    for edit in edits {
+        at = edit.map(at);
+    }
+    at.min(len)
+}
+
+/// The same, for both ends of a range.
+pub fn carried_range(range: Range, edits: &[AppliedEdit], len: usize) -> Range {
+    Range::new(
+        carried(range.anchor, edits, len),
+        carried(range.head, edits, len),
+    )
+}
+
 /// How many bytes of a file are looked at before deciding it is not text.
 /// The window git uses. A file that is text for its first eight thousand bytes
 /// and binary after that exists; reading a gigabyte to find one does not pay

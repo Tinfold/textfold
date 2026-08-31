@@ -2688,12 +2688,10 @@ impl App {
         // that text is on now, not on whatever ended up there.
         let mut breakpoints_moved = false;
         if let Some(doc) = self.doc_mut(id) {
+            let carry = |at: usize| crate::doc::carried(at, &edits, len);
+            let carry_range = |range| crate::doc::carried_range(range, &edits, len);
             for diagnostic in &mut doc.diagnostics {
-                let mut range = diagnostic.range;
-                for edit in &edits {
-                    range = Range::new(edit.map(range.anchor), edit.map(range.head));
-                }
-                diagnostic.range = range.clamped(len);
+                diagnostic.range = carry_range(diagnostic.range);
             }
             // And so do the breakpoints, for a stronger reason: a breakpoint
             // left on a line number while the code moved off it is a debugger
@@ -2701,11 +2699,7 @@ impl App {
             // not believing your own program.
             let was = doc.breakpoint_lines();
             for at in &mut doc.breakpoints {
-                let mut moved = *at;
-                for edit in &edits {
-                    moved = edit.map(moved);
-                }
-                *at = moved.min(len);
+                *at = carry(*at);
             }
             doc.breakpoints.sort_unstable();
             doc.breakpoints.dedup();
@@ -2714,41 +2708,24 @@ impl App {
             // piece of code rather than on a line number, and nobody tells it
             // when the code moves.
             for at in &mut doc.bookmarks {
-                let mut moved = *at;
-                for edit in &edits {
-                    moved = edit.map(moved);
-                }
-                *at = moved.min(len);
+                *at = carry(*at);
             }
             doc.bookmarks.sort_unstable();
             doc.bookmarks.dedup();
             // And everything a server worked out about the file: its colours,
-            // the types it wrote in, the notes about each line, the lit-up
-            // mentions of the word under the cursor. All of them are positions
-            // in a file that has just changed, and all of them are about to be
-            // asked again — carrying them across the edit in the meantime is
-            // the difference between the colours staying still while you type
-            // and them jumping about a character behind the text.
+            // the types it wrote in, the notes about each line. All of them
+            // are positions in a file that has just changed, and all of them
+            // are about to be asked again — carrying them across the edit in
+            // the meantime is the difference between the colours staying still
+            // while you type and them jumping about a character behind it.
             for (range, _) in &mut doc.semantic {
-                let mut moved = *range;
-                for edit in &edits {
-                    moved = Range::new(edit.map(moved.anchor), edit.map(moved.head));
-                }
-                *range = moved.clamped(len);
+                *range = carry_range(*range);
             }
             for inlay in &mut doc.inlays {
-                let mut at = inlay.at;
-                for edit in &edits {
-                    at = edit.map(at);
-                }
-                inlay.at = at.min(len);
+                inlay.at = carry(inlay.at);
             }
             for lens in &mut doc.lenses {
-                let mut at = lens.at;
-                for edit in &edits {
-                    at = edit.map(at);
-                }
-                lens.at = at.min(len);
+                lens.at = carry(lens.at);
             }
             // The highlights are the exception: they are about the word the
             // cursor was on, and the edit has very likely changed that word.
@@ -3080,12 +3057,9 @@ impl App {
     }
 
     fn bring_back_session(&mut self) {
-        let count = self.restore_session(true);
-        if count > 0 {
-            self.say_good(format!(
-                "brought back {count} {}",
-                plural("file", count)
-            ));
+        let found = self.restore_session(true);
+        if found > 0 {
+            self.say_good(format!("brought back {}", count("file", found)));
         }
     }
 
@@ -3901,7 +3875,7 @@ impl App {
 
         let printed = done.printed();
         let found = crate::tool::problems(pattern, &printed);
-        let mut count = 0;
+        let mut marked = 0;
         for problem in found {
             let full = match problem.file.is_absolute() {
                 true => problem.file.clone(),
@@ -3932,9 +3906,9 @@ impl App {
                 data: None,
                 told,
             });
-            count += 1;
+            marked += 1;
         }
-        match count {
+        match marked {
             0 if done.ok => self.say_good(format!("{}: nothing to report", tool.name)),
             // It failed, and nothing it said was in the shape a margin holds.
             // The first line is very often the whole story — `ld: undefined
@@ -3944,9 +3918,9 @@ impl App {
                 Some(first) => self.say_bad(format!("{}: {first}", tool.name)),
                 None => self.say_bad(format!("{} failed and said nothing", tool.name)),
             },
-            n => self.say(format!("{}: {n} {}", tool.name, plural("problem", n))),
+            n => self.say(format!("{}: {}", tool.name, count("problem", n))),
         }
-        count
+        marked
     }
 
     /// Put some text in a buffer of its own, for reading rather than editing,
@@ -4249,10 +4223,10 @@ impl App {
         }
         match (closed, kept) {
             (0, 0) => self.say("nothing to close"),
-            (n, 0) => self.say(format!("closed {n} {}", plural("buffer", n))),
+            (n, 0) => self.say(format!("closed {}", count("buffer", n))),
             (n, k) => self.say(format!(
-                "closed {n} {}, kept {k} with unsaved changes",
-                plural("buffer", n)
+                "closed {}, kept {k} with unsaved changes",
+                count("buffer", n)
             )),
         }
     }
@@ -4721,11 +4695,16 @@ fn places(n: usize) -> &'static str {
 }
 
 /// `buffer` or `buffers`, for the counts a status line reports.
-fn plural(word: &'static str, n: usize) -> String {
-    if n == 1 {
-        word.to_string()
-    } else {
-        format!("{word}s")
+/// `1 line`, `3 lines` — the number and the word together.
+///
+/// Together because they are never wanted apart, and because writing them
+/// apart is exactly how a status line comes to say `1 lines`: the count is in
+/// one place, the plural is worked out in another, and nothing holds the two
+/// in step.
+pub(crate) fn count(word: &'static str, n: usize) -> String {
+    match n {
+        1 => format!("{n} {word}"),
+        _ => format!("{n} {word}s"),
     }
 }
 

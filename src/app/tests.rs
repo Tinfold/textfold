@@ -2362,12 +2362,8 @@ fn a_drag_out_of_one_pane_stays_in_the_pane_it_began_in() {
     // and what used to take the rope past its end.
     let doc = app.doc(short).expect("a buffer");
     let layout = crate::view::Layout {
-        rope: &doc.rope,
-        hints: &[],
-        width: app.panes[from].area.width as usize,
-        tab_width: 4,
         wrap: true,
-        folds: &[],
+        ..crate::view::Layout::of(&app.panes[from], doc, 4)
     };
     layout.place(range.head);
     layout.place(range.anchor);
@@ -3627,15 +3623,11 @@ fn a_note_drawn_into_a_line_is_counted_in_the_width_of_it() {
         }];
     }
     let doc = app.doc(id).expect("open");
-    let hints = doc.inlay_columns();
     let layout = crate::view::Layout {
-        rope: &doc.rope,
-        hints: &hints,
-        width: 80,
-        tab_width: 4,
         wrap: false,
-        folds: &[],
-    };
+        ..crate::view::Layout::of(&app.panes[0], doc, 4)
+    }
+    .across(80);
     // The `x` is at character 4 and still in column 4: a note goes in
     // *before* the character it belongs to, and this one belongs to the
     // space after the x.
@@ -3744,11 +3736,11 @@ fn folding_hides_the_body_and_keeps_the_line_that_says_what_it_was() {
     let folds = app.view().folded(&doc.rope);
     let layout = crate::view::Layout {
         rope: &doc.rope,
-        hints: &[],
+        hints: Vec::new(),
         width: 80,
         tab_width: 4,
         wrap: false,
-        folds: &folds,
+        folds,
     };
     assert_eq!(layout.rows_in(0), 1);
     assert_eq!(layout.rows_in(1), 0);

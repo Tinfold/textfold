@@ -759,7 +759,7 @@ impl App {
                     return self.say("nothing was recorded");
                 }
                 self.macro_steps = steps;
-                self.say_good(format!("{n} {} recorded", plural("step", n)));
+                self.say_good(format!("{} recorded", count("step", n)));
             }
         }
     }
@@ -887,9 +887,8 @@ impl App {
         let patch = crate::git::patch_for(&name, &base, &now, &hunk);
         match repo.stage(&path, &patch) {
             Ok(()) => self.say_good(format!(
-                "staged {} {} of {name}",
-                hunk.lines.len(),
-                plural("line", hunk.lines.len())
+                "staged {} of {name}",
+                count("line", hunk.lines.len())
             )),
             // Git's own words. "does not apply" nearly always means the index
             // already has part of this file in it, and paraphrasing that would
@@ -948,11 +947,9 @@ impl App {
         let Some(conflict) = to else { return };
         self.go_to_line(conflict.start);
         self.say(format!(
-            "conflict, {} {} yours and {} {} theirs",
-            conflict.ours().len(),
-            plural("line", conflict.ours().len()),
-            conflict.theirs().len(),
-            plural("line", conflict.theirs().len()),
+            "conflict, {} yours and {} theirs",
+            count("line", conflict.ours().len()),
+            count("line", conflict.theirs().len()),
         ));
     }
 
@@ -1029,7 +1026,7 @@ impl App {
         doc.bookmarks.clear();
         match had {
             0 => self.say(format!("no bookmarks in {name}")),
-            n => self.say_good(format!("{n} {} gone", plural("bookmark", n))),
+            n => self.say_good(format!("{} gone", count("bookmark", n))),
         }
     }
 

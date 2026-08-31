@@ -481,16 +481,9 @@ fn draw_pane(frame: &mut Frame, app: &App, index: usize, ground: Color) -> Optio
         return None;
     }
 
-    let folds = view.folded(&doc.rope);
-    let hints = doc.inlay_columns();
-    let layout = Layout {
-        rope: &doc.rope,
-        hints: &hints,
-        width: area.width as usize,
-        tab_width,
-        wrap: view.wrap,
-        folds: &folds,
-    };
+    // The area it is actually being drawn in, which is what the pane says
+    // less whatever the margin took.
+    let layout = Layout::of(view, doc, tab_width).across(area.width as usize);
     let (first, last) = view::visible_lines(view, doc, tab_width);
 
     // Colours for everything on screen, worked out once for the whole visible
@@ -1117,15 +1110,7 @@ fn draw_gutter(buf: &mut Buffer, app: &App, view: &View, doc: &Document, it: Gut
 /// disagree about how wide it is — a button and the thing that answers it
 /// being two different opinions is how a mark becomes unclickable.
 pub fn fold_mark(hidden: usize) -> String {
-    format!(" \u{22ef} {hidden} {} ", plural_lines(hidden))
-}
-
-/// `line` or `lines`, for the note on a folded row.
-pub fn plural_lines(n: usize) -> &'static str {
-    match n {
-        1 => "line",
-        _ => "lines",
-    }
+    format!(" \u{22ef} {} ", crate::app::count("line", hidden))
 }
 
 /// Where you asked the debugger to stop. A filled dot, because that is what
@@ -1491,13 +1476,13 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
     if errors + warnings > 0 {
         let mut said = String::new();
         if errors > 0 {
-            said.push_str(&format!("{errors} error{}", plural(errors)));
+            said.push_str(&crate::app::count("error", errors));
         }
         if warnings > 0 {
             if !said.is_empty() {
                 said.push_str(", ");
             }
-            said.push_str(&format!("{warnings} warning{}", plural(warnings)));
+            said.push_str(&crate::app::count("warning", warnings));
         }
         chips.push((
             said,
@@ -1650,9 +1635,6 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
     app.status_hits = hits;
 }
 
-fn plural(n: usize) -> &'static str {
-    if n == 1 { "" } else { "s" }
-}
 
 // ---------------------------------------------------------------------------
 // What floats over the top.
@@ -1706,16 +1688,7 @@ pub fn cursor_cell(app: &App) -> Option<(u16, u16)> {
 fn screen_position_of(app: &App, at: usize) -> Option<Position> {
     let view = app.view();
     let doc = app.doc(view.doc)?;
-    let folds = view.folded(&doc.rope);
-    let hints = doc.inlay_columns();
-    let layout = Layout {
-        rope: &doc.rope,
-        hints: &hints,
-        width: view.area.width.max(1) as usize,
-        tab_width: app.config.tab_width(),
-        wrap: view.wrap,
-        folds: &folds,
-    };
+    let layout = Layout::of(view, doc, app.config.tab_width());
     let at = at.min(doc.len_chars());
     let row = view::screen_row(view, &layout, at)?;
     let (_, column) = layout.place(at);

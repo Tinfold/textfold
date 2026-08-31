@@ -651,8 +651,8 @@ impl App {
         };
         self.view_mut().mark_jump();
         self.go_to_line(line);
-        let count = self.git.changed_lines(id);
-        self.say(format!("{count} changed {}", plural("line", count)));
+        let changed = self.git.changed_lines(id);
+        self.say(format!("{} changed", count("line", changed)));
     }
 
     /// Go looking for a name across the project, having been given only the

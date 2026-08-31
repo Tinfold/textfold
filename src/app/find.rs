@@ -328,11 +328,10 @@ impl App {
         };
         self.overlay = Overlay::Confirm(Confirm {
             message: format!(
-                "replace {} with {with} — {hits} {} in {} {}{over}",
+                "replace {} with {with} — {} in {}{over}",
                 what.needle,
-                plural("place", hits),
-                what.files.len(),
-                plural("file", what.files.len()),
+                count("place", hits),
+                count("file", what.files.len()),
             ),
             choices: vec![
                 ('r', "replace them, leaving the files unsaved".into()),
@@ -397,9 +396,9 @@ impl App {
             n => format!(" — {n} read-only, left alone"),
         };
         self.say_good(format!(
-            "replaced {changed} {} in {files} {}, unsaved{left}",
-            plural("place", changed),
-            plural("file", files),
+            "replaced {} in {}, unsaved{left}",
+            count("place", changed),
+            count("file", files),
         ));
     }
 
@@ -591,7 +590,7 @@ impl App {
         let (from, to) = (doc.rope.byte_to_char(from), doc.rope.byte_to_char(to));
         match self.fold(from, to) {
             0 => self.say("nothing to fold here"),
-            n => self.say(format!("folded {n} {}", plural("line", n))),
+            n => self.say(format!("folded {}", count("line", n))),
         }
     }
 
@@ -684,7 +683,7 @@ impl App {
         }
         match folded {
             0 => self.say("nothing left to fold"),
-            n => self.say_good(format!("folded {n} {}", plural("thing", n))),
+            n => self.say_good(format!("folded {}", count("thing", n))),
         }
     }
 
@@ -694,7 +693,7 @@ impl App {
         self.view_mut().folds.clear();
         match had {
             0 => self.say("nothing is folded"),
-            n => self.say_good(format!("{n} {} unfolded", plural("fold", n))),
+            n => self.say_good(format!("{} unfolded", count("fold", n))),
         }
     }
 

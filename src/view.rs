@@ -396,7 +396,6 @@ impl View {
 /// Everything about how a document is laid out on a pane. Passed around rather
 /// than stored, because it is a fact about the pane's current size and the
 /// current settings, and both change.
-#[derive(Clone, Copy)]
 pub struct Layout<'a> {
     pub rope: &'a Rope,
     pub width: usize,
@@ -405,13 +404,17 @@ pub struct Layout<'a> {
     /// The notes drawn into the text that are not in it, as `(position,
     /// width)` pairs — [`crate::doc::Document::inlay_columns`].
     ///
+    /// Held rather than borrowed, and filled in by [`Layout::of`], because a
+    /// layout built without them is a layout that maps the screen to the text
+    /// wrongly on every line that has one — and does it silently.
+    ///
     /// They are here rather than only in the drawing because a note takes room
     /// on a line, and every question this module answers — which row is that
     /// position on, what is under the pointer, where does this line wrap — is
     /// about room. A note drawn but not counted is a line whose characters are
     /// no longer where the editor thinks they are, and a click that lands two
     /// words to the left of where it was aimed.
-    pub hints: &'a [(usize, usize)],
+    pub hints: Vec<(usize, usize)>,
     /// The stretches of lines the pane has folded away, as `(first, last)`
     /// line pairs — [`View::folded`].
     ///
@@ -421,10 +424,34 @@ pub struct Layout<'a> {
     /// because a wrapped line has always been several rows; a line worth
     /// nothing is a line that scrolling, cursor movement and drawing all step
     /// over without any of them being told about folding.
-    pub folds: &'a [(usize, usize)],
+    pub folds: Vec<(usize, usize)>,
 }
 
 impl<'a> Layout<'a> {
+    /// The layout a pane is looking at a document through.
+    ///
+    /// The one way to build one. Everything about how the screen maps to the
+    /// text — how wide the pane is, whether it wraps, what is folded away,
+    /// what notes are drawn into it — is gathered here rather than at the
+    /// dozen places that ask a question of it, because every one of those
+    /// places got it right only by remembering to.
+    pub fn of(view: &View, doc: &'a Document, tab_width: usize) -> Self {
+        Self {
+            rope: &doc.rope,
+            width: view.width(),
+            tab_width,
+            wrap: view.wrap,
+            hints: doc.inlay_columns(),
+            folds: view.folded(&doc.rope),
+        }
+    }
+
+    /// The same, laid out on a pane of a different width — the drawing knows
+    /// the exact area it has, which is not always what the pane says.
+    pub fn across(self, width: usize) -> Self {
+        Self { width, ..self }
+    }
+
     /// Where each folded row of a line begins, as character indices. Always at
     /// least one, since even an empty line is one row on screen.
     ///
@@ -632,16 +659,7 @@ pub fn screen_row(view: &View, layout: &Layout, at: usize) -> Option<usize> {
 /// the file. Jumping from the first line of a ten-thousand-line file to the
 /// last is the same amount of work as pressing Down.
 pub fn scroll_to_cursor(view: &mut View, doc: &Document, tab_width: usize, pad: usize) {
-    let folds = view.folded(&doc.rope);
-    let hints = doc.inlay_columns();
-    let layout = Layout {
-        rope: &doc.rope,
-        hints: &hints,
-        width: view.width(),
-        tab_width,
-        wrap: view.wrap,
-        folds: &folds,
-    };
+    let layout = Layout::of(view, doc, tab_width);
     let at = view.cursor();
     let line = text::line_of(&doc.rope, at);
     let (row, col) = layout.place(at);
@@ -722,16 +740,7 @@ fn step_down(view: &mut View, layout: &Layout, doc: &Document) -> bool {
 /// Move the view by `rows`, without touching the cursors. The mouse wheel, and
 /// the commands that scroll.
 pub fn scroll_by(view: &mut View, doc: &Document, tab_width: usize, rows: isize) {
-    let folds = view.folded(&doc.rope);
-    let hints = doc.inlay_columns();
-    let layout = Layout {
-        rope: &doc.rope,
-        hints: &hints,
-        width: view.width(),
-        tab_width,
-        wrap: view.wrap,
-        folds: &folds,
-    };
+    let layout = Layout::of(view, doc, tab_width);
     let mut left = rows.unsigned_abs();
     if rows > 0 {
         while left > 0 {
@@ -768,16 +777,7 @@ pub fn position_at_screen(
     row: usize,
     col: usize,
 ) -> usize {
-    let folds = view.folded(&doc.rope);
-    let hints = doc.inlay_columns();
-    let layout = Layout {
-        rope: &doc.rope,
-        hints: &hints,
-        width: view.width(),
-        tab_width,
-        wrap: view.wrap,
-        folds: &folds,
-    };
+    let layout = Layout::of(view, doc, tab_width);
     let mut line = view.top;
     let mut sub = view.top_row;
     let mut left = row;
@@ -811,16 +811,7 @@ pub fn position_at_screen(
 /// The visible stretch of the file, as lines. What the drawing walks, and what
 /// the highlighter is asked about.
 pub fn visible_lines(view: &View, doc: &Document, tab_width: usize) -> (usize, usize) {
-    let folds = view.folded(&doc.rope);
-    let hints = doc.inlay_columns();
-    let layout = Layout {
-        rope: &doc.rope,
-        hints: &hints,
-        width: view.width(),
-        tab_width,
-        wrap: view.wrap,
-        folds: &folds,
-    };
+    let layout = Layout::of(view, doc, tab_width);
     let mut line = view.top;
     let mut rows = layout.rows_in(line).saturating_sub(view.top_row);
     while rows < view.height() && line + 1 < doc.len_lines() {
@@ -854,12 +845,12 @@ mod tests {
         let doc = doc_of("one\ntwo\nthree\nfour\n");
         let layout = Layout {
             rope: &doc.rope,
-            hints: &[],
+            hints: Vec::new(),
             width: 40,
             tab_width: 4,
             wrap: false,
             // Lines 1 and 2 are folded onto line 0.
-            folds: &[(0, 2)],
+            folds: Vec::from([(0, 2)]),
         };
         assert_eq!(layout.rows_in(0), 1, "the line it is folded onto stays");
         assert_eq!(layout.rows_in(1), 0);
@@ -912,11 +903,11 @@ mod tests {
         let doc = doc_of("short\n");
         let layout = Layout {
             rope: &doc.rope,
-            hints: &[],
+            hints: Vec::new(),
             width: 40,
             tab_width: 4,
             wrap: true,
-            folds: &[],
+            folds: Vec::new(),
         };
         assert_eq!(layout.rows_of(0), vec![0]);
     }
@@ -926,11 +917,11 @@ mod tests {
         let doc = doc_of("the quick brown fox jumps\n");
         let layout = Layout {
             rope: &doc.rope,
-            hints: &[],
+            hints: Vec::new(),
             width: 10,
             tab_width: 4,
             wrap: true,
-            folds: &[],
+            folds: Vec::new(),
         };
         let rows = layout.rows_of(0);
         let text = doc.rope.to_string();
@@ -950,11 +941,11 @@ mod tests {
         let doc = doc_of("supercalifragilistic\n");
         let layout = Layout {
             rope: &doc.rope,
-            hints: &[],
+            hints: Vec::new(),
             width: 8,
             tab_width: 4,
             wrap: true,
-            folds: &[],
+            folds: Vec::new(),
         };
         let rows = layout.rows_of(0);
         assert!(rows.len() >= 3, "{rows:?}");
@@ -990,11 +981,11 @@ mod tests {
         scroll_to_cursor(&mut view, &doc, 4, 3);
         let layout = Layout {
             rope: &doc.rope,
-            hints: &[],
+            hints: Vec::new(),
             width: 40,
             tab_width: 4,
             wrap: false,
-            folds: &[],
+            folds: Vec::new(),
         };
         let row = screen_row(&view, &layout, view.cursor()).expect("on screen");
         assert!((3..10 - 3).contains(&row), "row {row}");
