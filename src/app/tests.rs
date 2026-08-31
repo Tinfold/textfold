@@ -2096,6 +2096,15 @@ fn attaching_offers_the_projects_own_programs_first() {
     // nearly always the thing you just built — and the editor knows which
     // those are, so making somebody scroll past `pipewire` to find it
     // would be withholding an answer it already has.
+    // Offering them first means knowing what each process is *running*, and
+    // that is a thing only some machines will say: it comes out of `/proc`,
+    // and a machine without one is listed through `ps`, which gives a command
+    // line and no executable path. Where nothing can be placed in a project,
+    // there is no order here to test — so this says so rather than failing for
+    // the operating system it is on.
+    if !crate::proc::running().iter().any(|p| p.program.is_some()) {
+        return;
+    }
     let (mut app, _rx) = editor();
     let path = scratch("attach-me.c");
     std::fs::write(&path, "int main(void){return 0;}\n").expect("written");

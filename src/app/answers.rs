@@ -1837,13 +1837,15 @@ impl App {
         };
         let mut spans = Vec::new();
         let (mut line, mut column) = (0u64, 0u64);
-        for token in data.chunks_exact(5) {
-            let Some(&[down, across, length, kind, _mods]) = token
+        // Five at a time, as arrays rather than as slices, so the five names
+        // below are the compiler's business rather than a length check.
+        let (tokens, _) = data.as_chunks::<5>();
+        for token in tokens {
+            let Some([down, across, length, kind, _mods]) = token
                 .iter()
                 .map(Value::as_u64)
                 .collect::<Option<Vec<u64>>>()
-                .as_deref()
-                .and_then(|it| <&[u64; 5]>::try_from(it).ok())
+                .and_then(|it| <[u64; 5]>::try_from(it).ok())
             else {
                 break;
             };

@@ -840,15 +840,11 @@ fn draw_row(
                 .bg(line_bg)
                 .fg(theme.faint)
                 .add_modifier(Modifier::ITALIC);
-            let mut x = area.x as usize + column.saturating_sub(skip);
-            for c in text.chars() {
-                if x >= (area.x + area.width) as usize {
-                    break;
-                }
+            let from = area.x as usize + column.saturating_sub(skip);
+            for (x, c) in (from..(area.x + area.width) as usize).zip(text.chars()) {
                 if let Some(cell) = buf.cell_mut(Position::new(x as u16, it.screen)) {
                     cell.set_style(style).set_char(c);
                 }
-                x += 1;
             }
             column += text.chars().count();
         }
@@ -867,15 +863,11 @@ fn draw_row(
             .bg(theme.selection)
             .fg(theme.faint)
             .add_modifier(Modifier::ITALIC);
-        let mut x = area.x as usize + column.saturating_sub(skip);
-        for c in note.chars() {
-            if x >= (area.x + area.width) as usize {
-                break;
-            }
+        let from = area.x as usize + column.saturating_sub(skip);
+        for (x, c) in (from..(area.x + area.width) as usize).zip(note.chars()) {
             if let Some(cell) = buf.cell_mut(Position::new(x as u16, it.screen)) {
                 cell.set_style(style).set_char(c);
             }
-            x += 1;
         }
     }
 
@@ -1361,7 +1353,7 @@ fn draw_tabs(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
     app.tab_nudges.clear();
     let starts = || tabs.iter().map(|(_, _, _, at, _)| *at);
     if scroll > 0 {
-        let back = starts().filter(|at| *at < scroll).next_back().unwrap_or(0);
+        let back = starts().rfind(|at| *at < scroll).unwrap_or(0);
         arrow(buf, area.x, area.y, '\u{2039}', theme);
         app.tab_nudges.push((Rect::new(area.x, area.y, 1, 1), back));
     }
@@ -1738,7 +1730,7 @@ fn beside(screen: Rect, at: Position, width: u16, height: u16) -> Rect {
     let width = width.min(screen.width);
     let height = height.min(screen.height.saturating_sub(2));
     let below = at.y + 1;
-    let y = if below + height <= screen.y + screen.height - 1 {
+    let y = if below + height < screen.y + screen.height {
         below
     } else {
         at.y.saturating_sub(height).max(screen.y)

@@ -874,7 +874,12 @@ mod tests {
         // simpler: give it a moment and find it by what it is.
         std::thread::sleep(std::time::Duration::from_millis(600));
         let child = peer.child.as_ref().expect("a child").id();
-        let grandchildren = descendants_of(child);
+        let Some(grandchildren) = descendants_of(child) else {
+            // Nowhere to look. The peer is stopped anyway, so the test leaves
+            // nothing running behind it.
+            peer.stop();
+            return;
+        };
         assert!(
             !grandchildren.is_empty(),
             "the test peer never started anything, so this proves nothing"
@@ -894,14 +899,17 @@ mod tests {
         }
     }
 
-    /// Every process under `pid`, out of `/proc`. Linux only, which is where
-    /// this is checked; the behaviour it checks is every unix's.
+    /// Every process under `pid`, out of `/proc`.
+    ///
+    /// `None` where this machine cannot be asked — which is every one that is
+    /// not Linux. The behaviour being tested is every unix's; the ability to
+    /// *watch* it happen is Linux's, and a test that cannot see what it is
+    /// checking has to say so rather than quietly find nothing and call that
+    /// a pass or a failure.
     #[cfg(target_os = "linux")]
-    fn descendants_of(pid: u32) -> Vec<u32> {
+    fn descendants_of(pid: u32) -> Option<Vec<u32>> {
         let mut found = Vec::new();
-        let Ok(entries) = std::fs::read_dir("/proc") else {
-            return found;
-        };
+        let entries = std::fs::read_dir("/proc").ok()?;
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             let Ok(other) = name.parse::<u32>() else {
@@ -918,12 +926,12 @@ mod tests {
                 found.push(other);
             }
         }
-        found
+        Some(found)
     }
 
     #[cfg(all(unix, not(target_os = "linux")))]
-    fn descendants_of(_pid: u32) -> Vec<u32> {
-        Vec::new()
+    fn descendants_of(_pid: u32) -> Option<Vec<u32>> {
+        None
     }
 
     #[test]

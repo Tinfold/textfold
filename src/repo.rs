@@ -395,10 +395,12 @@ pub fn sha256(data: &[u8]) -> String {
     }
     message.extend_from_slice(&bits.to_be_bytes());
 
-    for block in message.chunks_exact(64) {
+    let (blocks, _) = message.as_chunks::<64>();
+    for block in blocks {
         let mut w = [0u32; 64];
-        for (at, word) in block.chunks_exact(4).enumerate() {
-            w[at] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+        let (words, _) = block.as_chunks::<4>();
+        for (at, word) in words.iter().enumerate() {
+            w[at] = u32::from_be_bytes(*word);
         }
         for at in 16..64 {
             let s0 = w[at - 15].rotate_right(7) ^ w[at - 15].rotate_right(18) ^ (w[at - 15] >> 3);

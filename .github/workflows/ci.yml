@@ -12,8 +12,6 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  # A build that warns is a build that is on its way to breaking.
-  RUSTFLAGS: -D warnings
 
 jobs:
   test:
@@ -43,4 +41,9 @@ jobs:
 
       - run: cargo build --locked --all-targets
       - run: cargo test --locked
-      - run: cargo clippy --locked --all-targets
+      # A build that warns is a build on its way to breaking — but only ours.
+      # As `RUSTFLAGS` this would be handed to the dependencies as well, and a
+      # new compiler warning in somebody else's crate is not a reason for this
+      # to go red. Clippy runs the compiler's own lints too, so nothing is lost
+      # by asking here rather than everywhere.
+      - run: cargo clippy --locked --all-targets -- -D warnings

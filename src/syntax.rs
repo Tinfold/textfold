@@ -118,10 +118,9 @@ pub fn role_for(name: &str) -> Option<Role> {
         {
             return Some(*role);
         }
-        match candidate.rfind('.') {
-            Some(at) => candidate = &candidate[..at],
-            None => return None,
-        }
+        // Back to the last dot, and try the shorter name; a name with no dots
+        // left in it is a name nothing here knows.
+        candidate = &candidate[..candidate.rfind('.')?];
     }
 }
 
