@@ -239,6 +239,8 @@ capital. Replacing with something selected replaces only inside the selection.
 | Key | |
 |---|---|
 | Ctrl-Space | suggest |
+| Tab / Alt-A | take what a plugin is offering in the text — Copilot, and the like |
+| Enter | take the row that is lit in the suggestion list |
 | F12, Ctrl-Enter | go to the definition |
 | Shift-F12 | everywhere this is used |
 | Alt-K | what the language server knows about this; again to read it |
@@ -2630,21 +2632,28 @@ A plugin can offer text where the cursor is, drawn in place but not put in:
 ```
 
 The first line of it appears after the cursor in the colour of something that
-is not there yet, with `+10 lines` after it if there is more. `Tab` takes it,
-`Esc` waves it away, and moving the cursor or changing the text takes the offer
-back — it was worked out about the text as it was, and the text has moved on.
-An empty `text` clears it, which is how a plugin says "never mind" without a
-second message.
+is not there yet, with `+10 lines` after it if there is more. **`Tab` takes it,
+and so does `Alt-A`**; `Esc` waves it away, and moving the cursor or changing
+the text takes the offer back — it was worked out about the text as it was, and
+the text has moved on. An empty `text` clears it, which is how a plugin says
+"never mind" without a second message.
+
+**Two keys because two things can be offering at once.** The suggestion list is
+very often up as well — textfold asks for completions as you type — and both
+wanted `Tab`. So they have one each: **Enter** takes the row that is lit in the
+list, **Tab** takes the greyed-out text sitting at the cursor, and **Alt-A**
+takes that too for when Tab is wanted for something else. The one that is drawn
+*in the text in front of you* gets the key that is already pointing at it.
 
 Taking it is an ordinary edit: one thing to undo, and the language servers hear
 about it, because a suggestion becomes your text the moment you take it and is
 your text in every way afterwards. The plugin is told `hint/taken` or
 `hint/dropped` either way, so it knows whether to offer something else.
 
-`Tab` is still indent every other time. The key is not conditional — the offer
-is: while one is on the screen it takes the handful of keys that steer it, the
-same way the completion list does, and the rest of the time nothing has
-changed.
+`Tab` is still indent every other time, and still the list's while nothing is
+being offered in the text. The key is not conditional — the offer is: while one
+is on the screen it takes the handful of keys that steer it, and the rest of
+the time nothing has changed.
 
 Only the line the cursor is on is drawn over, and only to the right of the
 cursor, so nothing that is really in your file is ever covered by something

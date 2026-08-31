@@ -228,6 +228,16 @@ impl Said {
     /// The highlights are the exception and go: they are about the word the
     /// cursor was on, and an edit has very likely changed that word.
     pub fn carry(&mut self, edits: &[AppliedEdit], len: usize) {
+        // What the edit went through goes, rather than being carried to the
+        // edges of text it is no longer about. A server's colour on a word you
+        // have just typed into is a colour for the word that used to be there,
+        // and it is drawn *over* the grammar's — so keeping it means the thing
+        // you just changed is the one thing on the screen still wearing its
+        // old colours. Dropped, it falls back to the grammar until the server
+        // answers, which is a fraction of a second and correct throughout.
+        self.semantic.retain(|(range, _)| !touched(*range, edits));
+        self.inlays.retain(|inlay| !touched(Range::point(inlay.at), edits));
+        self.lenses.retain(|lens| !touched(Range::point(lens.at), edits));
         for (range, _) in &mut self.semantic {
             *range = carried_range(*range, edits, len);
         }
@@ -572,6 +582,24 @@ pub fn read_whole(path: &Path) -> Result<Option<(Vec<u8>, Stamp)>> {
         }
     }
     Ok(None)
+}
+
+/// Whether any of these edits fell inside a stretch of text — or against
+/// either end of it, since typing at the end of a word makes it a different
+/// word.
+///
+/// Each edit is checked in the coordinates it was made in, which is what the
+/// mapping between them is for: the second edit of a transaction is against
+/// the text the first one left behind.
+fn touched(range: Range, edits: &[AppliedEdit]) -> bool {
+    let mut range = range;
+    for edit in edits {
+        if edit.from <= range.end() && edit.to >= range.start() {
+            return true;
+        }
+        range = carried_range(range, std::slice::from_ref(edit), usize::MAX);
+    }
+    false
 }
 
 /// Where a position ends up after a run of edits, kept inside the document.

@@ -165,6 +165,52 @@ fn a_panel_gets_the_keys_that_would_have_changed_the_text() {
 }
 
 #[test]
+fn a_suggestion_and_a_list_have_a_key_each() {
+    // The bug: the suggestion list took Tab, a plugin's inline offer had
+    // nothing but Tab, and with both on the screen — which is the ordinary
+    // case, since textfold asks for completions as you type — there was no
+    // way at all to take the offer. Now Enter takes the row that is lit and
+    // Tab takes the text sitting at the cursor.
+    let (mut app, _rx) = editor();
+    typed(&mut app, "HashMa");
+    let at = app.view().cursor();
+    suggested(&mut app, at, false, json!([{ "label": "HashMap" }]));
+    suggesting(&mut app, "p::new()");
+    assert!(app.completion.is_some(), "the list is up");
+    assert!(app.hint_showing(), "and so is the offer");
+
+    pressed(&mut app, "tab");
+    assert_eq!(
+        app.here().text(),
+        "HashMap::new()",
+        "Tab took what was offered in the text"
+    );
+}
+
+#[test]
+fn the_list_still_has_enter_while_something_is_offered() {
+    let (mut app, _rx) = editor();
+    typed(&mut app, "HashMa");
+    let at = app.view().cursor();
+    suggested(&mut app, at, false, json!([{ "label": "HashMap" }]));
+    suggesting(&mut app, "p::new()");
+
+    pressed(&mut app, "enter");
+    assert_eq!(app.here().text(), "HashMap", "Enter took the row that was lit");
+}
+
+#[test]
+fn what_a_plugin_offers_has_a_key_of_its_own() {
+    // Tab is indent, and the list's, and this — so there is one key that is
+    // only ever this, for when the other two are in the way.
+    let (mut app, _rx) = editor();
+    typed(&mut app, "x");
+    suggesting(&mut app, " = 1");
+    pressed(&mut app, "alt-a");
+    assert_eq!(app.here().text(), "x = 1");
+}
+
+#[test]
 fn tab_is_still_tab_when_nothing_is_being_offered() {
     // The key is not conditional, the offer is. An editor where Tab
     // stopped indenting because a plugin was installed would be an editor

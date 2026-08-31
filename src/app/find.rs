@@ -1025,6 +1025,9 @@ impl App {
     /// The handful of keys the completion list answers to. Everything else
     /// falls through to the editor, so typing keeps working.
     pub(super) fn completion_key(&mut self, key: Key) -> bool {
+        // Asked before the list is borrowed, and the reason is below: with a
+        // plugin's suggestion on the screen as well, Tab belongs to that one.
+        let offered = self.hint_showing();
         let Some(completion) = &mut self.completion else {
             return false;
         };
@@ -1039,7 +1042,19 @@ impl App {
                 let by = completion.height() as isize;
                 completion.step(by);
             }
-            (KeyCode::Enter, _) | (KeyCode::Tab, KeyModifiers::NONE) => {
+            (KeyCode::Enter, _) => {
+                self.accept_completion();
+                return true;
+            }
+            // Tab, unless a plugin is offering something too. Two things
+            // wanting one key is the whole of why taking a Copilot suggestion
+            // used to be impossible with the list up: the list took Tab, the
+            // suggestion had nothing else, and there was no way to say which
+            // you meant. So they have a key each — Enter takes the row that is
+            // lit, Tab takes the greyed-out text at the cursor — and the one
+            // that is *in the text in front of you* gets the key that is
+            // already pointing at it.
+            (KeyCode::Tab, KeyModifiers::NONE) if !offered => {
                 self.accept_completion();
                 return true;
             }

@@ -333,6 +333,10 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::MOVE_LINE_UP, &["alt-up"]),
     (Cmd::MOVE_LINE_DOWN, &["alt-down"]),
     (Cmd::JOIN_LINES, &["alt-j"]),
+    // Taking what a plugin is offering. Tab does it too, and is what anybody
+    // reaches for — but Tab is also indent, and the suggestion list's, so a
+    // key that means only this is one that always works.
+    (Cmd::ACCEPT_HINT, &["alt-a"]),
     // Recording what you do, and doing it again.
     (Cmd::RECORD_MACRO, &["alt-shift-r"]),
     (Cmd::PLAY_MACRO, &["alt-shift-p"]),

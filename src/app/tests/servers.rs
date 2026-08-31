@@ -3,6 +3,56 @@
 use super::*;
 
 #[test]
+fn a_colour_the_edit_went_through_goes_rather_than_being_carried() {
+    // A server's colours are drawn *over* the grammar's, so one left on a
+    // word you have just typed into is the one thing on the screen still
+    // wearing the colour of the word that used to be there. Dropped, the
+    // grammar has it right until the server answers.
+    let (mut app, _rx) = editor();
+    typed(&mut app, "let count = 1;\n");
+    let id = app.view().doc;
+    let version = app.here().version;
+    let legend = vec!["variable".to_string()];
+    // `count`, on line 0 at column 4, five long.
+    app.take_semantic_tokens(id, version, &legend, json!({ "data": [0, 4, 5, 0, 0] }));
+    assert_eq!(app.here().said.semantic.len(), 1);
+
+    // Type inside the word it is about.
+    app.go_to_line(0);
+    for _ in 0..6 {
+        app.run(Cmd::MOVE_RIGHT);
+    }
+    typed(&mut app, "s");
+    assert!(
+        app.here().said.semantic.is_empty(),
+        "the colour was about a word that no longer exists"
+    );
+}
+
+#[test]
+fn a_colour_the_edit_did_not_reach_is_carried_along() {
+    let (mut app, _rx) = editor();
+    typed(&mut app, "let count = 1;\nlet other = 2;\n");
+    let id = app.view().doc;
+    let version = app.here().version;
+    let legend = vec!["variable".to_string()];
+    // `other`, on the second line.
+    app.take_semantic_tokens(id, version, &legend, json!({ "data": [1, 4, 5, 0, 0] }));
+    let was = app.here().said.semantic[0].0;
+
+    // Type on the line above it: the colour moves with its word rather than
+    // going, because nothing about that word changed.
+    app.go_to_line(0);
+    typed(&mut app, "// ");
+    let now = app.here().said.semantic.first().map(|(range, _)| *range);
+    assert_eq!(
+        now,
+        Some(Range::new(was.start() + 3, was.end() + 3)),
+        "it should have moved along with the text"
+    );
+}
+
+#[test]
 fn taking_a_suggestion_puts_it_in_as_one_thing_to_undo() {
     let (mut app, _rx) = editor();
     typed(&mut app, "let x = ");

@@ -2232,8 +2232,6 @@ impl App {
         }
         let count = changes.len();
 
-        // Every pane looking at this document has to hear about it, including
-        // the focused one — which may not even be showing this file.
         let App { docs, panes, .. } = self;
         let Some(doc) = docs.iter_mut().find(|d| d.id == id) else {
             return 0;
@@ -2244,20 +2242,18 @@ impl App {
             .map(|p| p.sel.clone())
             .unwrap_or_default();
         let applied = doc.apply_atomic(changes, &anchor);
-        let len = doc.len_chars();
-        for pane in panes.iter_mut().filter(|p| p.doc == id) {
-            pane.absorb(&applied, len);
-        }
 
-        let App { docs, lsp, hosts, .. } = self;
-        if let Some(doc) = docs.iter().find(|d| d.id == id) {
-            lsp.did_change(doc, &applied);
-            hosts.changed(doc, &applied);
-        }
-        if let Some(doc) = self.doc_mut(id) {
-            doc.take_pending();
-        }
-        self.scroll_into_view();
+        // And out through the door every other edit goes through, which is
+        // what carries the cursors, the marks in the margin and everything a
+        // server worked out, tells the servers and the plugins, and asks for
+        // the colours again. This used to do a shorter version of that by
+        // hand, and the difference showed as a file that stayed the colour it
+        // was until you typed something else.
+        //
+        // `None`, because no pane has taken these in yet: an edit that came
+        // from a plugin was made against the document rather than through a
+        // pane's selection.
+        self.after_edit_to(id, applied, None);
         count
     }
 }
