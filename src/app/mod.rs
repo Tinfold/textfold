@@ -2000,16 +2000,10 @@ impl App {
     /// Things that happen because time passed rather than because anything
     /// was pressed.
     pub fn tick(&mut self) {
-        if let Some(due) = self.completion_due
-            && due <= Instant::now()
-        {
-            self.completion_due = None;
+        if now_due(&mut self.completion_due) {
             self.ask_for_completions(None, false);
         }
-        if let Some(due) = self.selection_due
-            && due <= Instant::now()
-        {
-            self.selection_due = None;
+        if now_due(&mut self.selection_due) {
             self.tell_plugins_where_the_cursor_is();
         }
         if let Some((since, column, row)) = self.resting
@@ -2127,11 +2121,9 @@ impl App {
             self.highlights_due = Some(Instant::now() + FIX_DELAY);
             return;
         }
-        let Some(due) = self.fixes_due else { return };
-        if due > Instant::now() {
+        if !now_due(&mut self.fixes_due) {
             return;
         }
-        self.fixes_due = None;
         let range = Range::point(at);
         let App { docs, lsp, .. } = self;
         let Some(doc) = docs.iter().find(|d| d.id == id) else {
@@ -2159,11 +2151,9 @@ impl App {
     }
 
     fn check_lsp_extras(&mut self) {
-        let Some(due) = self.lsp_extras_due else { return };
-        if due > Instant::now() {
+        if !now_due(&mut self.lsp_extras_due) {
             return;
         }
-        self.lsp_extras_due = None;
         let want_hints = self.config.inlay_hints();
         let want_lenses = self.config.code_lenses();
         let id = self.view().doc;
@@ -2186,12 +2176,9 @@ impl App {
     }
 
     fn check_highlights(&mut self) {
-        let Some(due) = self.highlights_due else { return };
-        if due > Instant::now() {
-            return;
+        if now_due(&mut self.highlights_due) {
+            self.ask_for_highlights();
         }
-        self.highlights_due = None;
-        self.ask_for_highlights();
     }
 
     /// Ask where else in this file the thing under the cursor is mentioned,
@@ -4701,6 +4688,21 @@ fn places(n: usize) -> &'static str {
 /// apart is exactly how a status line comes to say `1 lines`: the count is in
 /// one place, the plural is worked out in another, and nothing holds the two
 /// in step.
+/// Whether a moment something was waiting for has come round, taking the wait
+/// off if it has.
+///
+/// Every "ask once the typing stops" in the editor is a `Option<Instant>` and
+/// the same four lines: is it set, is it time, clear it, do the thing. Written
+/// once, so that the fifth one is a line rather than a fourth copy of an
+/// if-let somebody could get subtly wrong.
+fn now_due(when: &mut Option<Instant>) -> bool {
+    let ready = when.is_some_and(|at| at <= Instant::now());
+    if ready {
+        *when = None;
+    }
+    ready
+}
+
 pub(crate) fn count(word: &'static str, n: usize) -> String {
     match n {
         1 => format!("{n} {word}"),
