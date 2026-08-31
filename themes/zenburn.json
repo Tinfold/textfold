@@ -1,0 +1,65 @@
+{
+  "name": "zenburn",
+  "about": "Zenburn, the low-contrast one from 2003 that every other muted theme is a descendant of.",
+
+  "ui": {
+    "background": "#3f3f3f",
+    "foreground": "#dcdccc",
+    "muted":      "#9fafaf",
+    "faint":      "#83898d",
+    "accent":     "#8cd0d3",
+    "on_accent":  "#3f3f3f",
+    "success":    "#7f9f7f",
+    "warning":    "#e0cf9f",
+    "error":      "#cc9393",
+    "info":       "#8cd0d3"
+  },
+
+  "editor": {
+    "selection":      "#5f5f5f",
+    "current_line":   "#484848",
+    "gutter":         "#9fafaf",
+    "gutter_current": "#dcdccc",
+    "cursor":         "#8cd0d3",
+    "bracket_match":  "#f0dfaf",
+    "whitespace":     "#545454",
+    "ruler":          "#4a4a4a",
+    "added":          "#7f9f7f",
+    "changed":        "#e0cf9f",
+    "removed":        "#cc9393"
+  },
+
+  "syntax": {
+    "keyword":          "#f0dfaf",
+    "keyword_control":  "#f0dfaf",
+    "function":         "#efef8f",
+    "function_builtin": "#efef8f",
+    "method":           "#efef8f",
+    "macro":            "#efef8f",
+    "type":             "#dfdfbf",
+    "type_builtin":     "#dfdfbf",
+    "constructor":      "#dfdfbf",
+    "string":           "#cc9393",
+    "string_escape":    "#dca3a3",
+    "string_special":   "#dca3a3",
+    "character":        "#cc9393",
+    "number":           "#8cd0d3",
+    "boolean":          "#dca3a3",
+    "comment":          "#7f9f7f",
+    "comment_doc":      "#9fbf9f",
+    "constant":         "#dca3a3",
+    "variable":         "#dcdccc",
+    "variable_builtin": "#dfaf8f",
+    "parameter":        "#dfaf8f",
+    "property":         "#dcdccc",
+    "operator":         "#f0dfaf",
+    "punctuation":      "#dcdccc",
+    "bracket":          "#dcdccc",
+    "delimiter":        "#dcdccc",
+    "attribute":        "#dfaf8f",
+    "namespace":        "#dfdfbf",
+    "tag":              "#f0dfaf",
+    "label":            "#dfaf8f",
+    "error":            "#cc9393"
+  }
+}

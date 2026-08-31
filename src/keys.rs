@@ -283,6 +283,12 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::GOTO_LINE, &["ctrl-g"]),
     (Cmd::JUMP_BACK, &["alt-["]),
     (Cmd::JUMP_FORWARD, &["alt-]"]),
+    // Places you said you were coming back to. `m` for mark, and letters
+    // rather than brackets because a terminal sends `{` for shift-`[` and a
+    // binding written the other way would never arrive.
+    (Cmd::TOGGLE_BOOKMARK, &["alt-shift-m"]),
+    (Cmd::NEXT_BOOKMARK, &["alt-shift-n"]),
+    (Cmd::PREV_BOOKMARK, &["alt-shift-b"]),
     (Cmd::CENTRE_CURSOR, &["alt-m"]),
 
     // Selecting. Shift and a movement, which is what it is everywhere.
@@ -327,6 +333,9 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::MOVE_LINE_UP, &["alt-up"]),
     (Cmd::MOVE_LINE_DOWN, &["alt-down"]),
     (Cmd::JOIN_LINES, &["alt-j"]),
+    // Recording what you do, and doing it again.
+    (Cmd::RECORD_MACRO, &["alt-shift-r"]),
+    (Cmd::PLAY_MACRO, &["alt-shift-p"]),
     (Cmd::INDENT, &["tab"]),
     (Cmd::UNINDENT, &["shift-tab"]),
     // Terminals disagree about Ctrl-/: some send it as Ctrl-_, which is the
@@ -352,6 +361,9 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     // terminal down a pipe. Alt-G is shown in the help, because a key in the
     // help that does nothing on your machine is worse than no help.
     (Cmd::GREP, &["alt-g", "ctrl-shift-f", "f7"]),
+    // Beside the search it is the other half of: what Ctrl-Shift-H is
+    // elsewhere, without asking a terminal to tell Ctrl-Shift-H from Ctrl-H.
+    (Cmd::REPLACE_IN_PROJECT, &["alt-shift-g"]),
     // Beside the keys for the next problem, since stepping through your own
     // changes is the same shape of thing as stepping through the compiler's.
     //
@@ -408,6 +420,12 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::THEME_PICKER, &["alt-t"]),
     (Cmd::TOGGLE_LINE_NUMBERS, &["alt-n"]),
     (Cmd::TOGGLE_WRAP, &["alt-z"]),
+    // Folding away what is under the cursor. `h` for hide: `f` is the search
+    // for the word under the cursor and every other letter that means folding
+    // is already something else.
+    (Cmd::TOGGLE_FOLD, &["alt-h"]),
+    (Cmd::FOLD_ALL, &["alt-shift-h"]),
+    (Cmd::UNFOLD_ALL, &["alt-shift-u"]),
 
     // What a keyboard with a menu key sends, and the key Windows and GTK have
     // both meant by it for thirty years for keyboards without one.

@@ -1,0 +1,65 @@
+{
+  "name": "gruvbox-light",
+  "about": "Gruvbox Light, the warm half of gruvbox \u2014 the same retro groove on paper.",
+
+  "ui": {
+    "background": "#fbf1c7",
+    "foreground": "#3c3836",
+    "muted":      "#665c54",
+    "faint":      "#928374",
+    "accent":     "#076678",
+    "on_accent":  "#fbf1c7",
+    "success":    "#79740e",
+    "warning":    "#b57614",
+    "error":      "#9d0006",
+    "info":       "#427b58"
+  },
+
+  "editor": {
+    "selection":      "#ebdbb2",
+    "current_line":   "#f2e5bc",
+    "gutter":         "#7c6f64",
+    "gutter_current": "#3c3836",
+    "cursor":         "#af3a03",
+    "bracket_match":  "#8f3f71",
+    "whitespace":     "#d5c4a1",
+    "ruler":          "#ebdbb2",
+    "added":          "#79740e",
+    "changed":        "#b57614",
+    "removed":        "#9d0006"
+  },
+
+  "syntax": {
+    "keyword":          "#9d0006",
+    "keyword_control":  "#9d0006",
+    "function":         "#79740e",
+    "function_builtin": "#79740e",
+    "method":           "#79740e",
+    "macro":            "#427b58",
+    "type":             "#b57614",
+    "type_builtin":     "#b57614",
+    "constructor":      "#b57614",
+    "string":           "#79740e",
+    "string_escape":    "#af3a03",
+    "string_special":   "#af3a03",
+    "character":        "#79740e",
+    "number":           "#8f3f71",
+    "boolean":          "#8f3f71",
+    "comment":          "#928374",
+    "comment_doc":      "#7c6f64",
+    "constant":         "#8f3f71",
+    "variable":         "#3c3836",
+    "variable_builtin": "#9d0006",
+    "parameter":        "#af3a03",
+    "property":         "#076678",
+    "operator":         "#427b58",
+    "punctuation":      "#3c3836",
+    "bracket":          "#3c3836",
+    "delimiter":        "#3c3836",
+    "attribute":        "#427b58",
+    "namespace":        "#b57614",
+    "tag":              "#9d0006",
+    "label":            "#af3a03",
+    "error":            "#9d0006"
+  }
+}

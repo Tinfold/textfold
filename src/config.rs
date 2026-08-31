@@ -87,6 +87,14 @@ pub struct Config {
     /// Whether typing an opening bracket or quote puts in the closing one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_pairs: Option<bool>,
+    /// Whether to show the types and parameter names a language server knows
+    /// and the code does not say. See [`crate::doc::Inlay`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inlay_hints: Option<bool>,
+    /// Whether to show the notes a server offers about a line — how many uses
+    /// a function has, and what can be run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_lenses: Option<bool>,
 
     /// Whether a file changed on disk by something else is read again on its
     /// own. Absent means it is, but only where the buffer has no unsaved
@@ -331,6 +339,17 @@ impl Config {
 
     pub fn auto_pairs(&self) -> bool {
         self.auto_pairs.unwrap_or(true)
+    }
+
+    pub fn inlay_hints(&self) -> bool {
+        self.inlay_hints.unwrap_or(true)
+    }
+
+    /// Off unless asked for. A lens is a line of somebody else's opinion at
+    /// the end of your code, and in a terminal the room it takes is room the
+    /// code was using.
+    pub fn code_lenses(&self) -> bool {
+        self.code_lenses.unwrap_or(false)
     }
 
     pub fn mouse(&self) -> bool {

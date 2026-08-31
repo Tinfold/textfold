@@ -27,13 +27,17 @@ textfold                         # an empty buffer
 - [Keys](#keys)
 - [The mouse](#the-mouse)
 - [Comparing two panes](#comparing-two-panes)
+- [Folding](#folding)
 - [One box, several lists](#one-box-several-lists)
 - [Several cursors](#several-cursors)
+- [Bookmarks](#bookmarks)
+- [Doing it again](#doing-it-again)
 - [Language servers](#language-servers)
 - [Debugging](#debugging)
 - [Settings](#settings)
 - [Colours](#colours)
 - [Files that change underneath you](#files-that-change-underneath-you)
+- [Files that are not text](#files-that-are-not-text)
 - [Git](#git)
 - [Reading what a language server says](#reading-what-a-language-server-says)
 - [Plugins](#plugins)
@@ -61,6 +65,12 @@ anywhere.
 There is nothing else to install. Language servers are the one exception, and
 only for the languages you want intelligence in — see
 [Language servers](#language-servers).
+
+`cargo test` runs the suite — a few hundred tests, none of which need a
+terminal, a network or a language server to be installed. The ones that want a
+repository make one in a temporary directory, and skip themselves on a machine
+with no `git`. That, `cargo build` and `cargo clippy` are what CI runs on Linux
+and macOS.
 
 ---
 
@@ -139,6 +149,8 @@ many it kept.
 | Ctrl-G | go to a line by number |
 | Alt-B | to the matching bracket |
 | Alt-[ / Alt-] | back / forward through where you have been |
+| Alt-Shift-M | bookmark this line, or take the bookmark off it |
+| Alt-Shift-N / Alt-Shift-B | to the next bookmark / the one before |
 | Alt-M | put the cursor's line in the middle |
 
 ### Selecting
@@ -155,6 +167,7 @@ Shift with any movement extends the selection, as everywhere else.
 | Ctrl-Shift-↑ / ↓ | add a cursor on the line above / below |
 | Ctrl-Alt-↑ / ↓ | the same, where your desktop has not taken them |
 | Alt-Shift-I | a cursor at the end of every selected line |
+| Alt-drag | the same columns on every line — see [The mouse](#the-mouse) |
 | Alt-Shift-C | back to one cursor |
 | Esc | back to one cursor, and close whatever is open |
 
@@ -170,6 +183,22 @@ Shift with any movement extends the selection, as everywhere else.
 | Alt-J | join the next line onto this one |
 | Ctrl-Z / Ctrl-Y | undo / redo |
 | Ctrl-C / Ctrl-X / Ctrl-V | copy / cut / paste (the line, if nothing is selected) |
+| Alt-Shift-R | start recording what you do, or stop and keep it |
+| Alt-Shift-P | do it again |
+| — | `sort-lines`, `sort-lines-backwards`, `reverse-lines`, `unique-lines` |
+| — | `upper-case`, `lower-case`, `title-case` |
+| — | `revert-hunk`: put this stretch of the file back as it was committed |
+| — | `stage-hunk`: put this stretch of it into git's index |
+| — | `take-ours` / `take-theirs`: settle the conflict the cursor is in |
+
+The four that reorder lines work on what is selected, and on **the whole file
+when nothing is** — which is what somebody sorting a list of imports means, and
+what every other editor does with the same command. A block that ended without
+a newline still ends without one afterwards.
+
+**`sort-lines` sorts by what the line says rather than by what it starts
+with**, so an indented list comes out in the order it looks like it should be
+in rather than with every indented line at the top.
 
 ### Finding
 
@@ -181,7 +210,10 @@ Shift with any movement extends the selection, as everywhere else.
 | Alt-F | find the word under the cursor |
 | Ctrl-H | find and replace |
 | Alt-G | search every file in the project |
+| Alt-Shift-G | replace something in every file in the project |
 | F9 / Shift-F9 | next / previous change since the last commit |
+| — | `next-conflict` / `prev-conflict`: through what git could not merge |
+| — | `blame-line`: who last touched this line, and when, and why |
 
 Ctrl-F opens an empty box. The last search is not lost — F3 still finds it, and
 pressing Enter in an empty box brings it back — but starting a search is nearly
@@ -222,6 +254,13 @@ capital. Replacing with something selected replaces only inside the selection.
 | Alt-D | all the problems, as a list |
 | Alt-O | what this file defines |
 | Alt-P | what arguments this call takes |
+| — | `incoming-calls` / `outgoing-calls`: what calls this, and what it calls |
+| — | `run-code-lens`: do what the server is offering on this line |
+| — | `toggle-inlay-hints`: show or hide the types the code does not say |
+
+The cursor resting on a name lights up every other place in the file that is
+the same thing — the server's answer rather than a search, so `count` the
+variable is lit and `count` the method somewhere else is not.
 
 Ctrl-Enter needs a terminal that implements the extended keyboard protocol —
 without one, Ctrl-Enter and Enter are the same bytes down the wire and no
@@ -276,6 +315,10 @@ everywhere else.
 | Alt-T | pick colours |
 | Alt-N | line numbers on and off |
 | Alt-Z | fold long lines, or let them run off the side |
+| Alt-H | fold away what is under the cursor, or bring it back |
+| Alt-Shift-H | fold everything at the top level of the file |
+| Alt-Shift-U | bring the whole file back |
+| — | `bookmarks`: every bookmark in every open file, as a list |
 | — | `plugins` in the palette: what is on, and what to switch off |
 | — | `install-plugin`: fetch a plugin, or what one needs to work |
 | — | `uninstall-plugin`: take one off this machine again |
@@ -309,6 +352,37 @@ It keeps up on its own: edit either side and the comparison is worked out
 again, so fixing a difference makes it disappear rather than leaving a stale
 diff on the screen. Closing a pane, or showing another file in one, ends it.
 Alt-C again turns it off.
+
+### Folding
+
+**Alt-H folds away whatever the cursor is inside**: the function, the block,
+the string, the argument list — whichever of those is the innermost thing that
+covers more than one line. The line it starts on stays on the screen, because
+`fn draw_gutter(…)` is worth more to look at than a row saying *38 lines*, and
+what went is counted at the end of it:
+
+```
+    fn draw_gutter(buf: &mut Buffer, app: &App, view: &View) { ⋯ 38 lines
+```
+
+Alt-H again brings it back, and so does clicking that mark. **Alt-Shift-H**
+folds every top-level thing in the file at once, which turns a file into a list
+of what is in it; **Alt-Shift-U** brings all of it back.
+
+Folding is worked out from the parse tree, so it knows what a function is
+rather than counting indentation — which means it works the same in Python and
+in C, and a file textfold has no grammar for says so rather than folding
+somewhere arbitrary.
+
+**A fold belongs to the pane, not to the file.** The same file open twice is
+two views of it, and folding the imports away in one of them does not take them
+out of the other. It follows the text: type twenty lines above a folded
+function and the fold is still around that function.
+
+A cursor is never left inside a fold. Folding one that the cursor is in brings
+the cursor out onto the line the fold is folded onto, and pressing Down on a
+folded line goes to the next line you can see rather than into the middle of
+something that is not on the screen.
 
 ### Changing them
 
@@ -352,6 +426,7 @@ them wrong.
 | click a line number | select that line |
 | Shift-click | extend the selection |
 | Alt-click | another cursor there |
+| Alt-drag | the same columns on every line: a cursor on each |
 | Ctrl-click | go to the definition |
 | right click | a menu of what can be done here — the highlight follows the pointer |
 | right click a tab | a menu about that file |
@@ -364,6 +439,7 @@ them wrong.
 | drag a tab | move it along the row |
 | wheel over the tabs | walk along them, when there are more open than fit |
 | click a ‹ or › | the next tab that way |
+| click a `⋯ 38 lines` mark | bring back what is folded there |
 | drag the scroll bar | move through the file |
 | drag the line between two panes | make one wider and the other narrower |
 | drag a sidebar's edge | make it wider or narrower |
@@ -374,6 +450,19 @@ work — the clicks are coming here instead. **`toggle-mouse` hands it back.**
 Run it from the palette (or bind a key) and you can select and copy the way you
 normally would; run it again to take it back. `textfold --no-mouse` starts that
 way, and `"mouse": false` in the settings makes it permanent.
+
+### Selecting a rectangle
+
+Holding Alt and dragging selects **the same columns on every line it covers**,
+which is the other half of several cursors: Alt-*click* puts a cursor
+somewhere, and Alt-*drag* puts one on each of twenty lines without twenty
+clicks. Type, and you type on all of them.
+
+It is by column on the screen rather than by character, so a line with a tab in
+it and a line without still line up the way they look. A line too short to
+reach the column gets a bare cursor at its end rather than being left out —
+which is what makes "put a comma on the end of all of these" work on ragged
+text.
 
 ### The right button
 
@@ -500,6 +589,43 @@ one cursor.
 
 ---
 
+## Bookmarks
+
+**Alt-Shift-M** marks the line the cursor is on, and **Alt-Shift-N** and
+**Alt-Shift-B** walk between the marks — round the end of the file rather than
+stopping at it, because a bookmark is a place you are going back to and the
+file having ended is not a reason to be told there is nowhere to go. A marked
+line has a ◆ in the margin.
+
+A bookmark is put on a piece of code rather than on a line number: type twenty
+lines above one and it is still on the line it was put on. `bookmarks` in the
+palette lists every bookmark in **every open file**, with the file and the line
+beside each, because "where was that" is usually a question about the last hour
+rather than about the file in front of you. `clear-bookmarks` takes this
+file's away.
+
+---
+
+## Doing it again
+
+**Alt-Shift-R** starts recording; Alt-Shift-R again stops and keeps it;
+**Alt-Shift-P** does the whole thing again. The status bar says `recording`
+while it is, because it is the one mode textfold has and a mode you cannot see
+is a mode you are in by accident.
+
+What is recorded is **commands and typing**, not keystrokes. A key is a fact
+about your settings and a command is a fact about the editor, so a macro
+recorded today goes on meaning the same thing after you have rebound a key —
+and one recorded by way of the command palette remembers what was chosen rather
+than the eight letters typed to find it.
+
+One macro, not a keyboard full of them. Nearly everything anybody records is
+"this, and now the same thing forty more times", recorded and played within the
+minute, and a register to name is one more thing to remember about a macro that
+will not outlive the hour.
+
+---
+
 ## Language servers
 
 textfold speaks LSP over stdio, one process per server per project root, shared
@@ -525,8 +651,39 @@ was partial — which is what puts names your file has not imported yet in the
 list, with the import that comes with them), diagnostics (underlined in the text, marked in the
 margin, and the one under the cursor spelled out in the status bar), hover,
 go to definition / type definition / implementation, find all uses, document
-and workspace symbols, rename across files, code actions, signature help, and
-formatting.
+and workspace symbols, rename across files, code actions, signature help,
+formatting, call hierarchy, and the four that arrive without anybody asking:
+
+* **The types the code does not say.** `let x = compute()` is drawn as
+  `let x: usize = compute()`, with the part the server worked out in the faint
+  colour. They are counted in the width of the line as well as drawn in it —
+  a note drawn but not counted is a line whose characters are no longer where
+  the editor thinks they are, and a click that lands two words to the left of
+  where it was aimed. `"inlay_hints": false` turns them off.
+* **The other places this is the same thing.** Rest the cursor on a name and
+  every other mention of it in the file lights up. The server's answer rather
+  than a search: `count` the variable is lit, and `count` the method of
+  something else is not.
+* **Colours only a server can know.** The grammar knows the shape of the code
+  without knowing anything about it — whether `Foo(x)` is a call or a
+  constructor is a lookup rather than a parse. Where a server has an opinion it
+  is drawn over the grammar's, because it is the one that had to look something
+  up to have it.
+* **Problems from the servers that wait to be asked.** Half the protocol has a
+  server volunteer what is wrong and half has it answer when asked, and a
+  client that only listens hears nothing at all from the second kind.
+
+A server's notes about a line — *3 implementations*, *Run test* — are off by
+default and go on with `"code_lenses": true`. They are drawn after the end of
+the line rather than on a line of their own: a line of its own would mean row
+twelve is not line twelve, and every click, drag and scroll in the editor would
+have to know about it. `run-code-lens` does what the one on this line offers.
+
+**Renaming asks first.** Where a server will say, textfold asks whether the
+thing under the cursor can be renamed at all before putting the box up — being
+told that a keyword cannot be renamed is worth more before you have typed a new
+name for it than after — and the box opens with the server's own idea of what
+is being renamed in it.
 
 Documentation from a server is markdown, and what a docstring is mostly made of
 is an example. The fences come off, and the code inside them is coloured by the
@@ -1282,6 +1439,8 @@ than repeating forty things you did not.
   "show_whitespace": false,
   "auto_completion": true,
   "auto_pairs": true,
+  "inlay_hints": true,
+  "code_lenses": false,
   "format_on_save": false,
   "code_actions_on_save": [],
   "trim_trailing_whitespace": false,
@@ -1308,6 +1467,8 @@ than repeating forty things you did not.
 | `show_whitespace` | middle dots for spaces, arrows for tabs |
 | `auto_completion` | suggest as you type, rather than only when asked |
 | `auto_pairs` | close brackets and quotes |
+| `inlay_hints` | show the types and parameter names a server knows and the code does not say |
+| `code_lenses` | show the notes a server offers about a line — off by default, since in a terminal the room they take is room the code was using |
 | `format_on_save` | run the language server's formatter first |
 | `code_actions_on_save` | the servers' own fixes to apply on save — see [Reformatting, and fixing](#reformatting-and-fixing) |
 | `trim_trailing_whitespace` | drop trailing spaces on save |
@@ -1333,7 +1494,7 @@ writes it back for you.
 ## Colours
 
 A theme is a small JSON file in three parts, and the parts are the three things
-textfold puts on a screen. The eighteen it ships are built into the binary; any
+textfold puts on a screen. The twenty-four it ships are built into the binary; any
 file dropped in `~/.config/textfold/themes/` is loaded beside them, and one
 taking a name textfold already uses replaces it — which is how you rewrite one
 of ours without forking anything.
@@ -1417,9 +1578,15 @@ file listing nor a terminal. The names above win where a file uses both.
 
 `textfold --list-themes` lists them. `Alt-T` tries them on.
 
-Shipped: `terminal`, `catppuccin`, `dracula`, `nord`, `tokyonight`, `gruvbox`,
-`everforest`, `solarized`, `onedark`, `monokai`, `kanagawa`, `rosepine`,
-`mariana`, `afterglow`, `darcula`, `ayu`, `solarized-light`, `latte`.
+Shipped, dark first because most terminals are: `terminal`, `catppuccin`,
+`dracula`, `nord`, `tokyonight`, `gruvbox`, `everforest`, `solarized`,
+`onedark`, `monokai`, `kanagawa`, `rosepine`, `mariana`, `afterglow`,
+`darcula`, `ayu`, `github`, `material`, `zenburn`, `contrast`, and then the
+light ones: `solarized-light`, `latte`, `github-light`, `gruvbox-light`.
+
+**`contrast`** is the one to reach for when the others are too quiet: black,
+bright, and picked for how far apart the colours are rather than for how they
+sit together — a screen in daylight, or eyes that would rather not squint.
 
 
 ---
@@ -1493,13 +1660,53 @@ looking at is still on the screen.
 
 ---
 
+## Files that are not text
+
+A file textfold cannot read as text **opens read-only and says why**.
+
+Text goes into the editor as UTF-8 and comes back out of it as UTF-8. A file
+that was not UTF-8 to begin with — Latin-1, or a file with one stray byte in it
+— is therefore not what is on the screen: an approximation of it is, with a `�`
+everywhere a byte could not be read. Saving that back does not put the file
+back. It replaces somebody's file with a worse copy of it, and nothing says so,
+because a replacement character looks like a character.
+
+So the reading says what it cost. A file that is not UTF-8, or one with NULs in
+it, is shown as best it can be, the status bar says `not UTF-8` or `binary`
+beside `read-only`, and saving it is refused with the reason rather than done
+quietly. You can still look at it, search it, and copy out of it.
+
+### Writing a file
+
+Saving writes to a temporary file beside the original and renames it over the
+top, so a save interrupted half way leaves the file that was there rather than
+half of the one that was arriving. The permissions and — where textfold is
+running as root — the owner are carried across first, so that a file edited
+under `sudo` is still yours afterwards. The bytes are synced before textfold
+says `saved`, because otherwise "saved" means the kernel has been told, and a
+machine that loses power in the next half minute comes back to a file of zeros.
+
+Two ordinary things make the rename the wrong answer, and both are handled:
+
+* **A path that is a symlink** is a name for a file somewhere else, and most of
+  a home directory is exactly that. Renaming over the name would replace the
+  link with an ordinary file, the dotfiles repository would stop receiving
+  anything you wrote, and the editor would say `saved` each time. textfold
+  follows the link and writes where it points.
+* **A file with more than one name.** A rename gives the file a new inode, so
+  every other hard link goes on pointing at the old contents. A file with more
+  than one name is written in place instead.
+
+---
+
 ## Git
 
-textfold reads git; it does not write it. There is no committing, staging or
-stashing here, and there never will be — that is what `git` is for, and it is
-one window away.
+textfold does not commit, and it does not branch, merge, rebase or stash. That
+is what `git` is for and it is one window away. What it does is the handful of
+things that are about *the file in front of you*, where going to another window
+means finding your place again afterwards.
 
-What it does show is the two things you cannot get from the text alone:
+What it shows is the two things you cannot get from the text alone:
 
 * **Which branch you are on**, in the status bar, with a count of how many
   lines of this file differ from the last commit. Clicking it steps to the next
@@ -1517,6 +1724,33 @@ everything is worked out again from the new head.
 
 A file git has never seen gets no marks and no column, rather than every line
 of it drawn as new.
+
+### Putting a change back, and putting one in
+
+**`revert-hunk`** puts the stretch of the file the cursor is standing in back
+as it was committed. It is an ordinary edit — one thing to undo, the margin and
+the language servers told about it the way they are told about typing — and it
+writes nothing to the disk and nothing to the repository. It is a change to
+your buffer that happens to be shaped like the last commit.
+
+**`stage-hunk`** is the one thing in textfold that changes a repository, and it
+does it by handing `git apply --cached` the patch for that hunk. So what lands
+in the index is git's own doing, and `git diff --cached` afterwards says
+exactly what you were looking at. Where the index already holds part of that
+file the patch will not apply, and git's own words come back rather than a
+paraphrase — that message is the one worth being able to look up.
+
+**`blame-line`** says who last touched the line the cursor is on, when, and
+what the commit was called. On a thread, so a slow blame in a large repository
+is a slow answer rather than an editor that has stopped.
+
+### Merges
+
+A file git could not merge on its own has `<<<<<<<`, `=======` and `>>>>>>>`
+left in it. **`next-conflict`** and **`prev-conflict`** step between them,
+saying how many lines each side has, and **`take-ours`** and **`take-theirs`**
+settle the one the cursor is in: the side you kept stays, the markers go, and
+the whole thing is one edit to undo if you meant the other one.
 
 ---
 
@@ -2906,6 +3140,21 @@ text, and the whole thing can be undone.
 messages and the results of walking the project all arrive on one channel, in
 one loop. There are no locks anywhere near the text.
 
+**A folded line is worth no rows.** That one sentence is the whole of how
+folding works. Every piece of the screen arithmetic already counts in *rows*
+rather than lines, because a wrapped line has always been several rows — so a
+line worth nothing is a line that scrolling, cursor movement, clicking and
+drawing all step over without any of them being told that folding exists.
+Pressing Down on a folded function lands after it because the rows in between
+are not there, not because anything about Down knows what a fold is.
+
+**A note drawn into a line is counted in the width of it.** An inlay hint is
+text on the screen that is not in the file, which is the same problem as a tab
+and is solved in the same place: the one piece of code that maps between the
+screen and the text knows about both. Anything else means everything after the
+note on that line is drawn somewhere the editor does not think it is, and a
+click lands two words away from where it was aimed.
+
 **Bounded by what is on screen.** Colours are worked out for the visible lines;
 scrolling to a cursor costs the height of the pane, not the size of the file.
 Ctrl-End on a two-hundred-thousand-line file is the same amount of work as
@@ -2977,6 +3226,12 @@ Every row of every context menu is a `Cmd` the editor already has, shown beside
 the key that also runs it. There is nothing a menu can do that a keystroke
 cannot, which is what keeps the two from drifting.
 
+**A buffer is not always exactly its file.** Reading is where that is decided
+and the only place it can be: after the bytes have been turned into text there
+are no bytes left to ask. A file that did not survive being read as text — see
+[Files that are not text](#files-that-are-not-text) — is marked as such and the
+buffer is read-only, so that the one door writing goes through can refuse it.
+
 The modules: `text` (positions and selections), `doc` (the rope, undo, files),
 `edit` (every operation), `view` (panes, scrolling, folding, the screen↔text
 map), `syntax` (tree-sitter), `lang` (the language table), `rpc` (framed JSON on a
@@ -2986,6 +3241,15 @@ servers, plugins, debug adapters), `git` (branch and diff),
 vocabulary), `plugin` (the manifests) and `pack` (getting one onto the machine
 and off it again), `app` (state and dispatch), `ui` (drawing), `theme`,
 `config`, `term` (the clipboard, and what else the terminal is asked for).
+
+`app` is a directory rather than a file: `mod` holds the state, the event loop
+and everything that does not belong to one of the others, and beside it are
+`overlays` (the lists, prompts and questions), `find` (searching, replacing,
+and the questions put to a language server), `answers` (what a server sends
+back), `mouse`, `debug` and `commands` (the table). They are children of `app`
+rather than neighbours of it, so what was private to `app` when it was one file
+is private to `app` still — the only thing that changed is that a piece which
+reaches into another now says so.
 
 ---
 

@@ -97,6 +97,15 @@ impl Grammar {
 /// `@function.method.static` falls back along the dots until it finds
 /// something known — here, `function`. Grammars invent names constantly and
 /// none of them should cost a file its colours.
+/// Whether a stretch of bytes covers more than one line, which is the whole of
+/// what makes something worth folding.
+fn spans_lines(rope: &Rope, range: &ByteRange<usize>) -> bool {
+    let len = rope.len_bytes();
+    let from = crate::text::line_of(rope, rope.byte_to_char(range.start.min(len)));
+    let to = crate::text::line_of(rope, rope.byte_to_char(range.end.min(len)));
+    to > from
+}
+
 pub fn role_for(name: &str) -> Option<Role> {
     let mut candidate = name;
     loop {
@@ -302,6 +311,47 @@ impl Syntax {
             }
             node = node.parent()?;
         }
+    }
+
+    /// The innermost thing around this byte that is worth folding, as a byte
+    /// range.
+    ///
+    /// Worth folding means it covers more than one line: a fold that hides
+    /// nothing is a keystroke that appears to do nothing, so the search walks
+    /// outwards from the smallest node until it finds one that spans a line
+    /// break — the string, then the argument list, then the body, then the
+    /// function.
+    ///
+    /// The range is the whole node. Turning that into "the first line stays
+    /// and the rest goes" is the caller's business, because that is a fact
+    /// about the screen rather than about the syntax.
+    pub fn foldable_at(&self, byte: usize, rope: &Rope) -> Option<(usize, usize)> {
+        let mut node = self.tree.root_node().descendant_for_byte_range(byte, byte)?;
+        loop {
+            let range = node.byte_range();
+            if spans_lines(rope, &range) {
+                return Some((range.start, range.end));
+            }
+            node = node.parent()?;
+        }
+    }
+
+    /// Everything at the top of the file worth folding: one range per item,
+    /// none of them inside another.
+    ///
+    /// The children of the root rather than every node anywhere, because
+    /// "fold everything" means the file as a list of what is in it — every
+    /// function shut, each one still one line you can read and open. Folding
+    /// every node at every depth would fold the file into its first line,
+    /// which is a thing nobody has ever wanted.
+    pub fn foldable_top_level(&self, rope: &Rope) -> Vec<(usize, usize)> {
+        let root = self.tree.root_node();
+        let mut cursor = root.walk();
+        root.children(&mut cursor)
+            .map(|node| node.byte_range())
+            .filter(|range| spans_lines(rope, range))
+            .map(|range| (range.start, range.end))
+            .collect()
     }
 
     /// The bracket matching the one at `byte`, found through the tree rather

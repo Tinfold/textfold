@@ -825,6 +825,7 @@ pub fn log_path() -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+
     /// Whether a process is still there, by asking the kernel rather than by
     /// running `ps`.
     #[cfg(unix)]
@@ -1049,9 +1050,13 @@ mod tests {
 
     #[test]
     fn a_socket_nobody_is_listening_on_says_so_rather_than_hanging() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a port");
-        let port = listener.local_addr().expect("an address").port();
-        drop(listener);
+        // A port nothing can be listening on rather than one that was free a
+        // moment ago. Asking the kernel for a free port, handing it back, and
+        // trusting that nobody has taken it since is a test that passes on a
+        // quiet machine and fails on a busy one — the number is only yours
+        // while you hold the socket. Port 1 needs root to listen on and is not
+        // in the ephemeral range, so the connection is refused every time.
+        let port = 1;
         let (tx, _rx) = std::sync::mpsc::channel();
         let peer: Result<Peer<()>, _> = Peer::connect(
             Connect {

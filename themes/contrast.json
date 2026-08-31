@@ -1,0 +1,65 @@
+{
+  "name": "contrast",
+  "about": "Black and bright, after Modus Vivendi \u2014 for a screen in daylight, or eyes that would rather not squint at a low-contrast palette. Everything it draws clears 7:1 against the background, which is the strictest readability bar anybody sets.",
+
+  "ui": {
+    "background": "#000000",
+    "foreground": "#ffffff",
+    "muted":      "#a8a8a8",
+    "faint":      "#989898",
+    "accent":     "#79a8ff",
+    "on_accent":  "#000000",
+    "success":    "#44bc44",
+    "warning":    "#d0bc00",
+    "error":      "#ff5f59",
+    "info":       "#00d3d0"
+  },
+
+  "editor": {
+    "selection":      "#3a3a3a",
+    "current_line":   "#1a1a1a",
+    "gutter":         "#a8a8a8",
+    "gutter_current": "#ffffff",
+    "cursor":         "#ffffff",
+    "bracket_match":  "#feacd0",
+    "whitespace":     "#545454",
+    "ruler":          "#303030",
+    "added":          "#44bc44",
+    "changed":        "#d0bc00",
+    "removed":        "#ff5f59"
+  },
+
+  "syntax": {
+    "keyword":          "#b6a0ff",
+    "keyword_control":  "#b6a0ff",
+    "function":         "#feacd0",
+    "function_builtin": "#feacd0",
+    "method":           "#feacd0",
+    "macro":            "#f78fe7",
+    "type":             "#6ae4b9",
+    "type_builtin":     "#6ae4b9",
+    "constructor":      "#6ae4b9",
+    "string":           "#79a8ff",
+    "string_escape":    "#00d3d0",
+    "string_special":   "#00d3d0",
+    "character":        "#79a8ff",
+    "number":           "#00bcff",
+    "boolean":          "#b6a0ff",
+    "comment":          "#989898",
+    "comment_doc":      "#b6b6b6",
+    "constant":         "#00d3d0",
+    "variable":         "#ffffff",
+    "variable_builtin": "#b6a0ff",
+    "parameter":        "#d0bc00",
+    "property":         "#ffffff",
+    "operator":         "#b6a0ff",
+    "punctuation":      "#ffffff",
+    "bracket":          "#ffffff",
+    "delimiter":        "#ffffff",
+    "attribute":        "#6ae4b9",
+    "namespace":        "#6ae4b9",
+    "tag":              "#b6a0ff",
+    "label":            "#feacd0",
+    "error":            "#ff5f59"
+  }
+}

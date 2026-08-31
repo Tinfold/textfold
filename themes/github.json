@@ -1,0 +1,65 @@
+{
+  "name": "github",
+  "about": "GitHub Dark, from the colours GitHub publishes as its primer palette.",
+
+  "ui": {
+    "background": "#0d1117",
+    "foreground": "#e6edf3",
+    "muted":      "#8b949e",
+    "faint":      "#6e7681",
+    "accent":     "#58a6ff",
+    "on_accent":  "#0d1117",
+    "success":    "#3fb950",
+    "warning":    "#d29922",
+    "error":      "#f85149",
+    "info":       "#79c0ff"
+  },
+
+  "editor": {
+    "selection":      "#193b61",
+    "current_line":   "#161b22",
+    "gutter":         "#6e7681",
+    "gutter_current": "#e6edf3",
+    "cursor":         "#58a6ff",
+    "bracket_match":  "#ffa657",
+    "whitespace":     "#30363d",
+    "ruler":          "#21262d",
+    "added":          "#3fb950",
+    "changed":        "#d29922",
+    "removed":        "#f85149"
+  },
+
+  "syntax": {
+    "keyword":          "#ff7b72",
+    "keyword_control":  "#ff7b72",
+    "function":         "#d2a8ff",
+    "function_builtin": "#d2a8ff",
+    "method":           "#d2a8ff",
+    "macro":            "#d2a8ff",
+    "type":             "#ffa657",
+    "type_builtin":     "#ffa657",
+    "constructor":      "#ffa657",
+    "string":           "#a5d6ff",
+    "string_escape":    "#79c0ff",
+    "string_special":   "#79c0ff",
+    "character":        "#a5d6ff",
+    "number":           "#79c0ff",
+    "boolean":          "#79c0ff",
+    "comment":          "#8b949e",
+    "comment_doc":      "#a5aeb8",
+    "constant":         "#79c0ff",
+    "variable":         "#e6edf3",
+    "variable_builtin": "#ff7b72",
+    "parameter":        "#ffa657",
+    "property":         "#e6edf3",
+    "operator":         "#ff7b72",
+    "punctuation":      "#c9d1d9",
+    "bracket":          "#c9d1d9",
+    "delimiter":        "#c9d1d9",
+    "attribute":        "#d2a8ff",
+    "namespace":        "#ffa657",
+    "tag":              "#7ee787",
+    "label":            "#ff7b72",
+    "error":            "#f85149"
+  }
+}

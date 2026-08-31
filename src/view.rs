@@ -163,6 +163,21 @@ pub struct View {
     /// pane is made, and changed per pane after that.
     pub wrap: bool,
 
+    /// Stretches of the file this pane has folded away, as pairs of character
+    /// positions: the first line of each stays on screen and everything after
+    /// it, up to and including the line the second position is on, is not
+    /// drawn at all.
+    ///
+    /// Positions rather than line numbers, so that a fold stays around the
+    /// thing it was put around while the text above it is edited — the same
+    /// bargain a breakpoint and a bookmark make.
+    ///
+    /// On the pane rather than on the document, because folding is a way of
+    /// looking at a file and not a fact about one: the same file open twice
+    /// is two views, and folding away the imports in one of them should not
+    /// take them out of the other.
+    pub folds: Vec<(usize, usize)>,
+
     /// Where you have been, and how far back through it you are. Jumping
     /// somewhere new from the middle throws away the part you had gone back
     /// past, which is what every browser does and what everyone expects.
@@ -192,6 +207,7 @@ impl View {
             frame: Rect::new(0, 0, 80, 24),
             gutter: 0,
             wrap,
+            folds: Vec::new(),
             jumps: Vec::new(),
             jump_at: 0,
             spots: HashMap::new(),
@@ -293,6 +309,39 @@ impl View {
             Range::new(anchor, head)
         });
         self.sel.clamp(len);
+        // And the folds. A fold whose two ends have arrived on the same line —
+        // because everything it was hiding has been deleted — is not a fold
+        // any more, and goes rather than sitting there hiding nothing.
+        for (from, to) in &mut self.folds {
+            for edit in edits {
+                *from = edit.map(*from);
+                *to = edit.map(*to);
+            }
+            *from = (*from).min(len);
+            *to = (*to).min(len);
+        }
+    }
+
+    /// The stretches of lines this pane has hidden, as `(first, last)` pairs.
+    ///
+    /// The first line of each is still drawn — it is the line with the `{` on
+    /// it, and the one you click to bring the rest back. Everything after it
+    /// up to and including the last is gone.
+    ///
+    /// Worked out from the positions rather than stored, for the reason every
+    /// other mark in this editor is: the positions are what the text carries
+    /// along, and a line number written down is a line number that is wrong as
+    /// soon as anybody types above it.
+    pub fn folded(&self, rope: &Rope) -> Vec<(usize, usize)> {
+        self.folds
+            .iter()
+            .filter_map(|(from, to)| {
+                let len = rope.len_chars();
+                let first = text::line_of(rope, (*from).min(len));
+                let last = text::line_of(rope, (*to).min(len));
+                (last > first).then_some((first, last))
+            })
+            .collect()
     }
 
     /// Remember where you are, before going somewhere else.
@@ -353,6 +402,26 @@ pub struct Layout<'a> {
     pub width: usize,
     pub tab_width: usize,
     pub wrap: bool,
+    /// The notes drawn into the text that are not in it, as `(position,
+    /// width)` pairs — [`crate::doc::Document::inlay_columns`].
+    ///
+    /// They are here rather than only in the drawing because a note takes room
+    /// on a line, and every question this module answers — which row is that
+    /// position on, what is under the pointer, where does this line wrap — is
+    /// about room. A note drawn but not counted is a line whose characters are
+    /// no longer where the editor thinks they are, and a click that lands two
+    /// words to the left of where it was aimed.
+    pub hints: &'a [(usize, usize)],
+    /// The stretches of lines the pane has folded away, as `(first, last)`
+    /// line pairs — [`View::folded`].
+    ///
+    /// A hidden line is one that takes **no rows on the screen**, and that one
+    /// sentence is the whole of how folding works here. Every piece of
+    /// arithmetic in this module already counts in rows rather than lines,
+    /// because a wrapped line has always been several rows; a line worth
+    /// nothing is a line that scrolling, cursor movement and drawing all step
+    /// over without any of them being told about folding.
+    pub folds: &'a [(usize, usize)],
 }
 
 impl<'a> Layout<'a> {
@@ -363,6 +432,9 @@ impl<'a> Layout<'a> {
     /// too long to fit anywhere is broken at the edge, because the alternative
     /// is a row with nothing on it and a word still not fitting.
     pub fn rows_of(&self, line: usize) -> Vec<usize> {
+        if self.hidden(line) {
+            return Vec::new();
+        }
         let start = text::line_start(self.rope, line);
         if !self.wrap {
             return vec![start];
@@ -375,6 +447,12 @@ impl<'a> Layout<'a> {
 
         while at < end {
             let c = self.rope.char(at);
+            col += self
+                .hints
+                .iter()
+                .filter(|(where_, _)| *where_ == at)
+                .map(|(_, w)| w)
+                .sum::<usize>();
             let w = text::char_width(c, col, self.tab_width);
             if col + w > self.width && at > *rows.last().expect("seeded") {
                 let cut = match last_break {
@@ -398,8 +476,34 @@ impl<'a> Layout<'a> {
         rows
     }
 
-    /// How many rows a line takes on screen.
+    /// How many columns the notes between two positions take up, counting one
+    /// that sits at either end.
+    ///
+    /// Both ends, because a note is drawn immediately before the character it
+    /// is attached to: one at the start of a row is drawn at the start of that
+    /// row, and one at the position being measured to has already been passed
+    /// by the time you are standing there.
+    fn hints_between(&self, from: usize, to: usize) -> usize {
+        self.hints
+            .iter()
+            .filter(|(at, _)| *at >= from && *at <= to)
+            .map(|(_, width)| width)
+            .sum()
+    }
+
+    /// Whether this line has been folded away behind the one above it.
+    pub fn hidden(&self, line: usize) -> bool {
+        self.folds
+            .iter()
+            .any(|(first, last)| line > *first && line <= *last)
+    }
+
+    /// How many rows a line takes on screen. None at all, for one inside a
+    /// fold.
     pub fn rows_in(&self, line: usize) -> usize {
+        if self.hidden(line) {
+            return 0;
+        }
         if !self.wrap {
             return 1;
         }
@@ -408,36 +512,75 @@ impl<'a> Layout<'a> {
 
     /// Which folded row of its line a position sits on, and how far across.
     pub fn place(&self, at: usize) -> (usize, usize) {
+        // Clamped, because this is the drawing's question and a position past
+        // the end of the rope is a panic rather than an answer. Whoever asked
+        // may be holding a position from a longer version of the text — a
+        // panel refilled while the pointer was in it, an edit made to a
+        // document rather than through a pane.
+        let at = at.min(self.rope.len_chars());
         let line = text::line_of(self.rope, at);
+        let plain = |from: usize| {
+            let mut col = 0;
+            for c in self.rope.slice(from..at).chars() {
+                col += text::char_width(c, col, self.tab_width);
+            }
+            col + self.hints_between(from, at)
+        };
         if !self.wrap {
-            return (0, text::visual_column(self.rope, at, self.tab_width));
+            return (0, plain(text::line_start(self.rope, line)));
         }
         let rows = self.rows_of(line);
-        let row = rows.iter().rposition(|&start| start <= at).unwrap_or(0);
-        let mut col = 0;
-        for c in self.rope.slice(rows[row]..at).chars() {
-            col += text::char_width(c, col, self.tab_width);
+        if rows.is_empty() {
+            // A position inside a fold. It is nowhere on the screen, and the
+            // column is still the honest answer to half the question.
+            return (0, plain(text::line_start(self.rope, line)));
         }
-        (row, col)
+        let row = rows.iter().rposition(|&start| start <= at).unwrap_or(0);
+        (row, plain(rows[row]))
     }
 
     /// The character at a folded row and column of a line — the way back from
     /// a mouse click.
     pub fn position(&self, line: usize, row: usize, col: usize) -> usize {
         let line = line.min(self.rope.len_lines().saturating_sub(1));
-        if !self.wrap {
-            return text::char_at_column(self.rope, line, col, self.tab_width);
-        }
-        let rows = self.rows_of(line);
-        let row = row.min(rows.len() - 1);
-        let start = rows[row];
-        let end = rows
-            .get(row + 1)
-            .copied()
-            .unwrap_or_else(|| text::line_end(self.rope, line));
+        // Which stretch of the line this row is. A pane that is not folding
+        // long lines has one row per line, and the walk below is the same walk
+        // either way — it has to be, because the notes drawn into the text
+        // take room on the screen and `text::char_at_column` counts only what
+        // is in the file.
+        let (start, end) = if self.wrap {
+            let rows = self.rows_of(line);
+            if rows.is_empty() {
+                return text::line_start(self.rope, line);
+            }
+            let row = row.min(rows.len() - 1);
+            (
+                rows[row],
+                rows.get(row + 1)
+                    .copied()
+                    .unwrap_or_else(|| text::line_end(self.rope, line)),
+            )
+        } else {
+            (
+                text::line_start(self.rope, line),
+                text::line_end(self.rope, line),
+            )
+        };
         let mut at = start;
         let mut width = 0;
         while at < end {
+            // A note sits before the character it belongs to, and it is not
+            // text: a click anywhere in one means the character behind it.
+            let note: usize = self
+                .hints
+                .iter()
+                .filter(|(where_, _)| *where_ == at)
+                .map(|(_, w)| w)
+                .sum();
+            if width + note > col {
+                return at;
+            }
+            width += note;
             let step = text::char_width(self.rope.char(at), width, self.tab_width);
             if width + step > col {
                 return if col >= width + step.div_ceil(2) {
@@ -457,7 +600,7 @@ impl<'a> Layout<'a> {
 /// a position scrolled out of sight.
 pub fn screen_row(view: &View, layout: &Layout, at: usize) -> Option<usize> {
     let line = text::line_of(layout.rope, at);
-    if line < view.top {
+    if line < view.top || layout.hidden(line) {
         return None;
     }
     let (row, _) = layout.place(at);
@@ -489,11 +632,15 @@ pub fn screen_row(view: &View, layout: &Layout, at: usize) -> Option<usize> {
 /// the file. Jumping from the first line of a ten-thousand-line file to the
 /// last is the same amount of work as pressing Down.
 pub fn scroll_to_cursor(view: &mut View, doc: &Document, tab_width: usize, pad: usize) {
+    let folds = view.folded(&doc.rope);
+    let hints = doc.inlay_columns();
     let layout = Layout {
         rope: &doc.rope,
+        hints: &hints,
         width: view.width(),
         tab_width,
         wrap: view.wrap,
+        folds: &folds,
     };
     let at = view.cursor();
     let line = text::line_of(&doc.rope, at);
@@ -537,7 +684,12 @@ fn rows_above(layout: &Layout, mut line: usize, mut row: usize, mut rows: usize)
             row -= 1;
         } else if line > 0 {
             line -= 1;
-            row = layout.rows_in(line) - 1;
+            match layout.rows_in(line) {
+                // A folded-away line is not a row to step over: it is not
+                // there. Keep going up without spending anything on it.
+                0 => continue,
+                rows => row = rows - 1,
+            }
         } else {
             return (0, 0);
         }
@@ -552,24 +704,33 @@ fn step_down(view: &mut View, layout: &Layout, doc: &Document) -> bool {
     let rows = layout.rows_in(view.top);
     if view.top_row + 1 < rows {
         view.top_row += 1;
-        true
-    } else if view.top + 1 < doc.len_lines() {
-        view.top += 1;
-        view.top_row = 0;
-        true
-    } else {
-        false
+        return true;
     }
+    // The next line that is drawn at all, stepping over anything folded away.
+    let mut line = view.top + 1;
+    while line < doc.len_lines() && layout.rows_in(line) == 0 {
+        line += 1;
+    }
+    if line >= doc.len_lines() {
+        return false;
+    }
+    view.top = line;
+    view.top_row = 0;
+    true
 }
 
 /// Move the view by `rows`, without touching the cursors. The mouse wheel, and
 /// the commands that scroll.
 pub fn scroll_by(view: &mut View, doc: &Document, tab_width: usize, rows: isize) {
+    let folds = view.folded(&doc.rope);
+    let hints = doc.inlay_columns();
     let layout = Layout {
         rope: &doc.rope,
+        hints: &hints,
         width: view.width(),
         tab_width,
         wrap: view.wrap,
+        folds: &folds,
     };
     let mut left = rows.unsigned_abs();
     if rows > 0 {
@@ -607,11 +768,15 @@ pub fn position_at_screen(
     row: usize,
     col: usize,
 ) -> usize {
+    let folds = view.folded(&doc.rope);
+    let hints = doc.inlay_columns();
     let layout = Layout {
         rope: &doc.rope,
+        hints: &hints,
         width: view.width(),
         tab_width,
         wrap: view.wrap,
+        folds: &folds,
     };
     let mut line = view.top;
     let mut sub = view.top_row;
@@ -623,6 +788,16 @@ pub fn position_at_screen(
         } else if line + 1 < doc.len_lines() {
             line += 1;
             sub = 0;
+            // A folded-away line is not under the pointer, because it is not
+            // on the screen: step past it without counting a row for it.
+            while line < doc.len_lines() && layout.rows_in(line) == 0 {
+                line += 1;
+            }
+            if line >= doc.len_lines() {
+                line = doc.len_lines() - 1;
+                sub = layout.rows_in(line).saturating_sub(1);
+                break;
+            }
         } else {
             // Clicking below the end of the file means the end of the file.
             break;
@@ -636,11 +811,15 @@ pub fn position_at_screen(
 /// The visible stretch of the file, as lines. What the drawing walks, and what
 /// the highlighter is asked about.
 pub fn visible_lines(view: &View, doc: &Document, tab_width: usize) -> (usize, usize) {
+    let folds = view.folded(&doc.rope);
+    let hints = doc.inlay_columns();
     let layout = Layout {
         rope: &doc.rope,
+        hints: &hints,
         width: view.width(),
         tab_width,
         wrap: view.wrap,
+        folds: &folds,
     };
     let mut line = view.top;
     let mut rows = layout.rows_in(line).saturating_sub(view.top_row);
@@ -669,13 +848,75 @@ mod tests {
     }
 
     #[test]
+    fn a_folded_line_takes_no_rows_at_all() {
+        // The whole of how folding works: a hidden line is worth no rows, and
+        // every piece of arithmetic in this module already counts rows.
+        let doc = doc_of("one\ntwo\nthree\nfour\n");
+        let layout = Layout {
+            rope: &doc.rope,
+            hints: &[],
+            width: 40,
+            tab_width: 4,
+            wrap: false,
+            // Lines 1 and 2 are folded onto line 0.
+            folds: &[(0, 2)],
+        };
+        assert_eq!(layout.rows_in(0), 1, "the line it is folded onto stays");
+        assert_eq!(layout.rows_in(1), 0);
+        assert_eq!(layout.rows_in(2), 0);
+        assert_eq!(layout.rows_in(3), 1, "and the file goes on after it");
+        assert!(layout.rows_of(1).is_empty());
+    }
+
+    #[test]
+    fn a_click_below_a_fold_lands_after_it_rather_than_in_it() {
+        let doc = doc_of("one\ntwo\nthree\nfour\n");
+        let mut view = view_of(&doc, 40, 10, false);
+        view.folds = vec![(3, 13)];
+        assert_eq!(view.folded(&doc.rope), vec![(0, 2)]);
+        // The second row on the screen is line three, the first one that is
+        // not folded away.
+        let at = position_at_screen(&view, &doc, 4, 1, 0);
+        assert_eq!(text::line_of(&doc.rope, at), 3);
+    }
+
+    #[test]
+    fn a_fold_stays_around_what_it_was_put_around_when_the_text_above_moves() {
+        let mut doc = doc_of("one\ntwo\nthree\nfour\n");
+        let mut view = view_of(&doc, 40, 10, false);
+        view.folds = vec![(3, 13)];
+        // Four characters go in above it, the way typing a word would.
+        let sel = Selections::single(Range::point(0));
+        let edits = doc.apply_atomic(vec![crate::doc::Change::insert(0, "abcd".to_string())], &sel);
+        let len = doc.rope.len_chars();
+        view.absorb(&edits, len);
+        assert_eq!(
+            view.folds,
+            vec![(7, 17)],
+            "both ends moved with the text they were on"
+        );
+    }
+
+    #[test]
+    fn scrolling_steps_over_what_is_folded_away() {
+        let doc = doc_of("one\ntwo\nthree\nfour\nfive\n");
+        let mut view = view_of(&doc, 40, 10, false);
+        // Lines 1 and 2 folded onto line 0.
+        view.folds = vec![(3, 13)];
+        scroll_by(&mut view, &doc, 4, 1);
+        assert_eq!(view.top, 3, "one row down is the next line that is drawn");
+    }
+
+    #[test]
     fn a_line_that_fits_is_one_row() {
         let doc = doc_of("short\n");
         let layout = Layout {
             rope: &doc.rope,
+            hints: &[],
             width: 40,
             tab_width: 4,
             wrap: true,
+            folds: &[],
         };
         assert_eq!(layout.rows_of(0), vec![0]);
     }
@@ -685,9 +926,11 @@ mod tests {
         let doc = doc_of("the quick brown fox jumps\n");
         let layout = Layout {
             rope: &doc.rope,
+            hints: &[],
             width: 10,
             tab_width: 4,
             wrap: true,
+            folds: &[],
         };
         let rows = layout.rows_of(0);
         let text = doc.rope.to_string();
@@ -707,9 +950,11 @@ mod tests {
         let doc = doc_of("supercalifragilistic\n");
         let layout = Layout {
             rope: &doc.rope,
+            hints: &[],
             width: 8,
             tab_width: 4,
             wrap: true,
+            folds: &[],
         };
         let rows = layout.rows_of(0);
         assert!(rows.len() >= 3, "{rows:?}");
@@ -745,9 +990,11 @@ mod tests {
         scroll_to_cursor(&mut view, &doc, 4, 3);
         let layout = Layout {
             rope: &doc.rope,
+            hints: &[],
             width: 40,
             tab_width: 4,
             wrap: false,
+            folds: &[],
         };
         let row = screen_row(&view, &layout, view.cursor()).expect("on screen");
         assert!((3..10 - 3).contains(&row), "row {row}");

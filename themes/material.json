@@ -1,0 +1,65 @@
+{
+  "name": "material",
+  "about": "Material Palenight, the one most people mean by the purple one.",
+
+  "ui": {
+    "background": "#292d3e",
+    "foreground": "#a6accd",
+    "muted":      "#8c92b3",
+    "faint":      "#676e95",
+    "accent":     "#82aaff",
+    "on_accent":  "#292d3e",
+    "success":    "#c3e88d",
+    "warning":    "#ffcb6b",
+    "error":      "#ff5370",
+    "info":       "#89ddff"
+  },
+
+  "editor": {
+    "selection":      "#444267",
+    "current_line":   "#32374d",
+    "gutter":         "#7982b8",
+    "gutter_current": "#a6accd",
+    "cursor":         "#82aaff",
+    "bracket_match":  "#ffcb6b",
+    "whitespace":     "#3f4661",
+    "ruler":          "#383e56",
+    "added":          "#c3e88d",
+    "changed":        "#ffcb6b",
+    "removed":        "#ff5370"
+  },
+
+  "syntax": {
+    "keyword":          "#c792ea",
+    "keyword_control":  "#c792ea",
+    "function":         "#82aaff",
+    "function_builtin": "#82aaff",
+    "method":           "#82aaff",
+    "macro":            "#82aaff",
+    "type":             "#ffcb6b",
+    "type_builtin":     "#ffcb6b",
+    "constructor":      "#ffcb6b",
+    "string":           "#c3e88d",
+    "string_escape":    "#89ddff",
+    "string_special":   "#89ddff",
+    "character":        "#c3e88d",
+    "number":           "#f78c6c",
+    "boolean":          "#ff5370",
+    "comment":          "#676e95",
+    "comment_doc":      "#8d94b8",
+    "constant":         "#f78c6c",
+    "variable":         "#a6accd",
+    "variable_builtin": "#ff5370",
+    "parameter":        "#f78c6c",
+    "property":         "#f07178",
+    "operator":         "#89ddff",
+    "punctuation":      "#a6accd",
+    "bracket":          "#a6accd",
+    "delimiter":        "#89ddff",
+    "attribute":        "#c792ea",
+    "namespace":        "#ffcb6b",
+    "tag":              "#f07178",
+    "label":            "#c792ea",
+    "error":            "#ff5370"
+  }
+}

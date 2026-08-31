@@ -2339,9 +2339,8 @@ mod tests {
         // paste.
         let Some(dir) = settings_dir() else { return };
         for id in ["../../etc/passwd", "a/b", "..", "."] {
-            match settings_path(id) {
-                Some(path) => assert_eq!(path.parent(), Some(dir.as_path()), "{id}"),
-                None => {}
+            if let Some(path) = settings_path(id) {
+                assert_eq!(path.parent(), Some(dir.as_path()), "{id}");
             }
         }
         assert_eq!(settings_path("pyright"), Some(dir.join("pyright.json")));

@@ -1,0 +1,46 @@
+# What a pull request has to survive: it builds, the tests pass, and clippy has
+# nothing to say. Formatting is deliberately not checked — the source is
+# hand-set in places rustfmt would undo, and a robot rewriting a comment block
+# it does not understand is not an improvement.
+
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # A build that warns is a build that is on its way to breaking.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: The toolchain the crate asks for
+        run: rustup toolchain install stable --profile minimal --component clippy
+
+      # The grammars are C and are compiled in, so a cold build is minutes.
+      # Keyed on the lockfile: the dependencies are what takes the time, and
+      # they only change when it does.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ matrix.os }}-cargo-
+
+      - run: cargo build --locked --all-targets
+      - run: cargo test --locked
+      - run: cargo clippy --locked --all-targets

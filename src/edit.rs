@@ -48,11 +48,15 @@ pub enum Motion {
 /// rather than one character to the left of where the cursor happened to be.
 pub fn move_cursors(doc: &Document, view: &mut View, motion: Motion, extend: bool, tab_width: usize) {
     let rope = &doc.rope;
+    let folds = view.folded(rope);
+    let hints = doc.inlay_columns();
     let layout = Layout {
         rope,
+        hints: &hints,
         width: view.width(),
         tab_width,
         wrap: view.wrap,
+        folds: &folds,
     };
     let height = view.height();
 
@@ -944,8 +948,131 @@ pub fn toggle_comment(doc: &mut Document, view: &mut View, tab_width: usize) -> 
     Some(edits)
 }
 
+/// What to do to a block of lines, for the three commands that are the same
+/// command with a different verb in the middle.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Shuffle {
+    /// Alphabetically, by what the line says.
+    Sort,
+    /// Alphabetically, the other way up.
+    SortBackwards,
+    /// The order they are in now, backwards.
+    Reverse,
+    /// Every line that has been seen before goes; the first of each stays.
+    Unique,
+}
+
+/// Reorder the lines the selection covers — or the whole file, if nothing is
+/// selected.
+///
+/// The whole file is the right answer for a bare cursor. Sorting one line is
+/// not a thing anybody means, and a file of names or a list of imports with
+/// nothing selected in it is exactly what somebody sorting means, which is
+/// also what every other editor does with the same keystroke.
+///
+/// A block keeps whether it ended with a newline: sorting the last few lines
+/// of a file must not put a newline on the end of one that never had one, and
+/// must not take it off one that did.
+pub fn shuffle_lines(doc: &mut Document, view: &mut View, how: Shuffle) -> Vec<AppliedEdit> {
+    let before = view.sel.clone();
+    let everything = before.ranges().iter().all(|r| r.is_empty());
+    let spans: Vec<(usize, usize)> = if everything {
+        vec![(0, doc.len_lines().saturating_sub(1))]
+    } else {
+        touched_lines(&doc.rope, &before)
+    };
+
+    let mut changes = Vec::new();
+    for (first, last) in &spans {
+        if last == first {
+            continue;
+        }
+        let from = text::line_start(&doc.rope, *first);
+        let to = if last + 1 < doc.len_lines() {
+            text::line_start(&doc.rope, last + 1)
+        } else {
+            doc.len_chars()
+        };
+        let block = doc.rope.slice(from..to).to_string();
+        let ended = block.ends_with('\n');
+        let mut lines: Vec<&str> = block.split('\n').collect();
+        if ended {
+            // `split` leaves an empty piece after the last newline, which is
+            // not a line and must not be sorted to the top of the file.
+            lines.pop();
+        }
+        let mut lines: Vec<String> = lines.into_iter().map(str::to_string).collect();
+        match how {
+            // By what is on the line rather than by its leading whitespace,
+            // which is how a list of indented things sorts the way it looks.
+            Shuffle::Sort => lines.sort_by(|a, b| a.trim_start().cmp(b.trim_start())),
+            Shuffle::SortBackwards => lines.sort_by(|a, b| b.trim_start().cmp(a.trim_start())),
+            Shuffle::Reverse => lines.reverse(),
+            Shuffle::Unique => {
+                let mut seen = std::collections::HashSet::new();
+                lines.retain(|line| seen.insert(line.clone()));
+            }
+        }
+        let mut text = lines.join("\n");
+        if ended {
+            text.push('\n');
+        }
+        if text != block {
+            changes.push(Change::replace(from, to, text));
+        }
+    }
+
+    let changes = plan(changes);
+    if changes.is_empty() {
+        return Vec::new();
+    }
+    let edits = doc.apply_atomic(changes, &before);
+    view.absorb(&edits, doc.len_chars());
+    doc.record_selections(&view.sel);
+    edits
+}
+
+/// Which way to change the case of some text.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Case {
+    Upper,
+    Lower,
+    /// The first letter of every word up and the rest down.
+    Title,
+}
+
+impl Case {
+    /// This text, in this case.
+    fn of(&self, text: &str) -> String {
+        match self {
+            Case::Upper => text.to_uppercase(),
+            Case::Lower => text.to_lowercase(),
+            Case::Title => title_case(text),
+        }
+    }
+}
+
+/// The first letter of every word up, the rest of it down.
+///
+/// A word starts after anything that is not a letter or a digit, so
+/// `it's a well-known fact` becomes `It's A Well-Known Fact` — which is what
+/// a hyphen means and what an apostrophe does not.
+fn title_case(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut starting = true;
+    for c in text.chars() {
+        if starting {
+            out.extend(c.to_uppercase());
+        } else {
+            out.extend(c.to_lowercase());
+        }
+        starting = !c.is_alphanumeric() && c != '\'';
+    }
+    out
+}
+
 /// Change the case of what is selected, leaving it selected.
-pub fn change_case(doc: &mut Document, view: &mut View, upper: bool) -> Vec<AppliedEdit> {
+pub fn change_case(doc: &mut Document, view: &mut View, case: Case) -> Vec<AppliedEdit> {
     let before = view.sel.clone();
     let mut changes = Vec::new();
     for range in before.ranges() {
@@ -953,11 +1080,7 @@ pub fn change_case(doc: &mut Document, view: &mut View, upper: bool) -> Vec<Appl
             continue;
         }
         let text = doc.slice(*range);
-        let changed = if upper {
-            text.to_uppercase()
-        } else {
-            text.to_lowercase()
-        };
+        let changed = case.of(&text);
         if changed != text {
             changes.push(Change::replace(range.start(), range.end(), changed));
         }
@@ -1018,11 +1141,15 @@ pub fn select_word(doc: &Document, view: &mut View) {
 
 /// Another cursor a line above or below the primary, in the same column.
 pub fn add_cursor_vertically(doc: &Document, view: &mut View, tab_width: usize, down: bool) {
+    let folds = view.folded(&doc.rope);
+    let hints = doc.inlay_columns();
     let layout = Layout {
         rope: &doc.rope,
+        hints: &hints,
         width: view.width(),
         tab_width,
         wrap: false,
+        folds: &folds,
     };
     // Grow from the edge of the block of cursors, so holding the key keeps
     // adding rather than fighting over one line.
@@ -1186,6 +1313,83 @@ mod tests {
         let (doc, mut view) = setup(text, at[0]);
         view.sel = Selections::many(at.iter().map(|&a| Range::point(a)).collect(), 0);
         (doc, view)
+    }
+
+    #[test]
+    fn sorting_with_nothing_selected_sorts_the_whole_file() {
+        let (mut doc, mut view) = setup("pear\napple\ncherry\n", 0);
+        shuffle_lines(&mut doc, &mut view, Shuffle::Sort);
+        assert_eq!(doc.rope.to_string(), "apple\ncherry\npear\n");
+    }
+
+    #[test]
+    fn sorting_a_selection_leaves_the_rest_of_the_file_where_it_was() {
+        let (mut doc, mut view) = setup("head\npear\napple\ntail\n", 0);
+        // The two middle lines.
+        view.sel = Selections::single(Range::new(5, 15));
+        shuffle_lines(&mut doc, &mut view, Shuffle::Sort);
+        assert_eq!(doc.rope.to_string(), "head\napple\npear\ntail\n");
+    }
+
+    #[test]
+    fn sorting_the_end_of_a_file_does_not_invent_a_last_newline() {
+        // The block being sorted is the end of the file, and the file does not
+        // end in a newline. Sorting must not give it one, and must not sort the
+        // nothing after the last line to the top.
+        let (mut doc, mut view) = setup("pear\napple", 0);
+        shuffle_lines(&mut doc, &mut view, Shuffle::Sort);
+        assert_eq!(doc.rope.to_string(), "apple\npear");
+    }
+
+    #[test]
+    fn sorting_is_by_what_the_line_says_not_by_its_indentation() {
+        let (mut doc, mut view) = setup("    pear\napple\n", 0);
+        shuffle_lines(&mut doc, &mut view, Shuffle::Sort);
+        assert_eq!(doc.rope.to_string(), "apple\n    pear\n");
+    }
+
+    #[test]
+    fn the_other_way_up_is_the_other_way_up() {
+        let (mut doc, mut view) = setup("apple\npear\ncherry\n", 0);
+        shuffle_lines(&mut doc, &mut view, Shuffle::SortBackwards);
+        assert_eq!(doc.rope.to_string(), "pear\ncherry\napple\n");
+    }
+
+    #[test]
+    fn reversing_turns_the_lines_back_to_front() {
+        let (mut doc, mut view) = setup("one\ntwo\nthree\n", 0);
+        shuffle_lines(&mut doc, &mut view, Shuffle::Reverse);
+        assert_eq!(doc.rope.to_string(), "three\ntwo\none\n");
+    }
+
+    #[test]
+    fn unique_keeps_the_first_of_each_and_the_order_they_were_in() {
+        let (mut doc, mut view) = setup("b\na\nb\nc\na\n", 0);
+        shuffle_lines(&mut doc, &mut view, Shuffle::Unique);
+        assert_eq!(doc.rope.to_string(), "b\na\nc\n");
+    }
+
+    #[test]
+    fn a_file_already_in_order_is_not_an_edit() {
+        let (mut doc, mut view) = setup("a\nb\nc\n", 0);
+        assert!(
+            shuffle_lines(&mut doc, &mut view, Shuffle::Sort).is_empty(),
+            "nothing to do is nothing to undo"
+        );
+    }
+
+    #[test]
+    fn one_line_is_never_reordered() {
+        let (mut doc, mut view) = setup("only\n", 0);
+        assert!(shuffle_lines(&mut doc, &mut view, Shuffle::Sort).is_empty());
+    }
+
+    #[test]
+    fn title_case_capitalises_words_and_not_apostrophes() {
+        let (mut doc, mut view) = setup("it's a WELL-known fact\n", 0);
+        view.sel = Selections::single(Range::new(0, 21));
+        change_case(&mut doc, &mut view, Case::Title);
+        assert_eq!(doc.rope.to_string(), "It's A Well-Known Fact\n");
     }
 
     #[test]

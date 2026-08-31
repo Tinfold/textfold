@@ -132,10 +132,14 @@ pub enum Kind {
     /// query rather than us narrowing a list it sent once.
     WorkspaceSymbols,
     Diagnostics,
+    /// The places you marked to come back to, across every open buffer.
+    Bookmarks,
     Themes,
     Languages,
     Actions,
     References,
+    /// What calls the thing under the cursor, or what it calls.
+    Calls,
     /// Lines matching a search across the project, also worked out afresh.
     Grep,
     Settings,
@@ -164,10 +168,12 @@ impl Kind {
             Kind::Symbols => "Symbols in this file",
             Kind::WorkspaceSymbols => "Symbols in the project",
             Kind::Diagnostics => "Problems",
+            Kind::Bookmarks => "Bookmarks",
             Kind::Themes => "Colours",
             Kind::Languages => "Language",
             Kind::Actions => "What can be done here",
             Kind::References => "Used here",
+            Kind::Calls => "Calls",
             Kind::Grep => "Search the project",
             Kind::Settings => "Settings",
             Kind::Environments => "Python environment",

@@ -148,7 +148,7 @@ impl Host {
             return false;
         }
         let language = lang::get(doc.language).name.to_lowercase();
-        self.wants.iter().any(|l| *l == language)
+        self.wants.contains(&language)
     }
 }
 

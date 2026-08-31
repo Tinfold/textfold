@@ -353,6 +353,66 @@ fn syntax_spans(
     from_char: usize,
     to_char: usize,
 ) -> Vec<(Range, crate::theme::Role)> {
+    let from_grammar = grammar_spans(doc, from_char, to_char);
+    // What the server worked out, over the top of what the grammar guessed.
+    //
+    // The grammar knows the shape of the code without knowing anything about
+    // it: `Foo(x)` is a call, and whether it is a function or a constructor is
+    // a lookup rather than a parse. Where the server has an opinion it is the
+    // better one, because it had to look something up to have it — so the
+    // server's spans are laid down whole and the grammar's are cut around
+    // them, which also keeps the list in order and free of overlaps, the two
+    // things [`colour_of`] is built on.
+    let from_server: Vec<(Range, crate::theme::Role)> = doc
+        .semantic
+        .iter()
+        .filter(|(range, _)| range.end() > from_char && range.start() < to_char)
+        .cloned()
+        .collect();
+    if from_server.is_empty() {
+        return from_grammar;
+    }
+    let mut spans: Vec<(Range, crate::theme::Role)> = from_server.clone();
+    for (range, role) in from_grammar {
+        for piece in outside_of(range, &from_server) {
+            spans.push((piece, role));
+        }
+    }
+    spans.sort_by_key(|(range, _)| range.start());
+    spans
+}
+
+/// The parts of a range that no span in `covered` covers.
+///
+/// `covered` is in order and its ranges do not overlap, which is what lets
+/// this be one walk.
+fn outside_of(range: Range, covered: &[(Range, crate::theme::Role)]) -> Vec<Range> {
+    let mut pieces = Vec::new();
+    let mut at = range.start();
+    for (taken, _) in covered {
+        if taken.end() <= at {
+            continue;
+        }
+        if taken.start() >= range.end() {
+            break;
+        }
+        if taken.start() > at {
+            pieces.push(Range::new(at, taken.start()));
+        }
+        at = at.max(taken.end());
+    }
+    if at < range.end() {
+        pieces.push(Range::new(at, range.end()));
+    }
+    pieces
+}
+
+/// What the grammar makes of this stretch of the file.
+fn grammar_spans(
+    doc: &crate::doc::Document,
+    from_char: usize,
+    to_char: usize,
+) -> Vec<(Range, crate::theme::Role)> {
     doc.syntax
         .as_ref()
         .map(|syntax| {
@@ -421,11 +481,15 @@ fn draw_pane(frame: &mut Frame, app: &App, index: usize, ground: Color) -> Optio
         return None;
     }
 
+    let folds = view.folded(&doc.rope);
+    let hints = doc.inlay_columns();
     let layout = Layout {
         rope: &doc.rope,
+        hints: &hints,
         width: area.width as usize,
         tab_width,
         wrap: view.wrap,
+        folds: &folds,
     };
     let (first, last) = view::visible_lines(view, doc, tab_width);
 
@@ -487,6 +551,7 @@ fn draw_pane(frame: &mut Frame, app: &App, index: usize, ground: Color) -> Optio
                     screen,
                     cursor_lines: &cursor_lines,
                     pane: index,
+                    ground,
                 },
             );
             let placed = draw_row(
@@ -611,6 +676,30 @@ fn draw_row(
         .add_modifier(Modifier::BOLD);
 
     while at <= end {
+        // What the server says is here that the code does not say: the type of
+        // a variable, the name of an argument. Drawn before the character it
+        // belongs to, and counted in the width of the line by
+        // [`Layout::hints_between`], so that everything from a click to a
+        // selection still lands where it looks like it should.
+        for hint in doc.inlays.iter().filter(|hint| hint.at == at) {
+            let style = Style::new()
+                .bg(line_bg)
+                .fg(theme.faint)
+                .add_modifier(Modifier::ITALIC);
+            for c in hint.text.chars() {
+                let width = text::char_width(c, column, tab_width);
+                if column >= skip {
+                    let x = area.x as usize + column - skip;
+                    if x >= (area.x + area.width) as usize {
+                        break;
+                    }
+                    if let Some(cell) = buf.cell_mut(Position::new(x as u16, it.screen)) {
+                        cell.set_style(style).set_char(c);
+                    }
+                }
+                column += width;
+            }
+        }
         let is_cursor = it.cursors.contains(&at);
         let extra = is_cursor && it.focused && at != view.sel.primary().head;
         if is_cursor && column >= skip {
@@ -640,6 +729,12 @@ fn draw_row(
             .ranges()
             .iter()
             .any(|range| range.contains(at) && !range.is_empty());
+        // The other places in this file that are the same thing as the one
+        // under the cursor, in the colour that means "these go together" — the
+        // same one a selection is drawn in, because it is the same statement.
+        // A selection you made has edges you watched appear; this does not
+        // need a colour of its own to be told apart from it.
+        let same = doc.highlights.iter().any(|range| range.contains(at));
 
         // Lit under the pointer, in the colour every other list in textfold
         // uses for the row you are pointing at. The span keeps its own
@@ -647,7 +742,7 @@ fn draw_row(
         // file or a heading, and a highlight that repainted the text would
         // throw that away to say something the background already says.
         let hovered = it.hover.is_some_and(|range| range.contains(at));
-        let mut style = Style::new().bg(if selected || hovered {
+        let mut style = Style::new().bg(if selected || hovered || same {
             theme.selection
         } else {
             line_bg
@@ -726,7 +821,63 @@ fn draw_row(
             break;
         }
     }
-    let _ = layout;
+
+    // What a server has to say about this line, after the end of it: "3
+    // implementations", "Run test". After the text rather than on a line of
+    // its own, because a line of its own would mean row twelve is not line
+    // twelve, and every click, drag and scroll in the editor would have to
+    // know about it.
+    if it.row + 1 == it.rows.len() {
+        let note: Vec<&str> = doc
+            .lenses
+            .iter()
+            .filter(|lens| text::line_of(&doc.rope, lens.at) == it.line)
+            .map(|lens| lens.label.as_str())
+            .collect();
+        if !note.is_empty() {
+            let text = format!("  {}", note.join(" · "));
+            let style = Style::new()
+                .bg(line_bg)
+                .fg(theme.faint)
+                .add_modifier(Modifier::ITALIC);
+            let mut x = area.x as usize + column.saturating_sub(skip);
+            for c in text.chars() {
+                if x >= (area.x + area.width) as usize {
+                    break;
+                }
+                if let Some(cell) = buf.cell_mut(Position::new(x as u16, it.screen)) {
+                    cell.set_style(style).set_char(c);
+                }
+                x += 1;
+            }
+            column += text.chars().count();
+        }
+    }
+
+    // A line with something folded onto it says so, and says how much, right
+    // after its text. Not in the margin: the one column there is already the
+    // breakpoint's, and the end of the line is where the eye is anyway when it
+    // wonders where the rest of the function went.
+    if it.row + 1 == it.rows.len()
+        && let Some((_, last)) = layout.folds.iter().find(|(first, _)| *first == it.line)
+    {
+        let hidden = last - it.line;
+        let note = fold_mark(hidden);
+        let style = Style::new()
+            .bg(theme.selection)
+            .fg(theme.faint)
+            .add_modifier(Modifier::ITALIC);
+        let mut x = area.x as usize + column.saturating_sub(skip);
+        for c in note.chars() {
+            if x >= (area.x + area.width) as usize {
+                break;
+            }
+            if let Some(cell) = buf.cell_mut(Position::new(x as u16, it.screen)) {
+                cell.set_style(style).set_char(c);
+            }
+            x += 1;
+        }
+    }
 
     // What a plugin is offering, drawn where it would go and in the colour of
     // something that is not there yet. Only the primary cursor's row, only
@@ -818,6 +969,11 @@ struct Gutter<'a> {
     /// Which pane this is, so a comparison of two panes knows which side of it
     /// this gutter is drawing.
     pane: usize,
+    /// What the screen behind everything is: the theme's background, or the
+    /// terminal's own where the settings say to leave it showing. The same
+    /// colour the text beside it is drawn on — the margin is part of the page
+    /// rather than a strip of terminal beside it.
+    ground: Color,
 }
 
 fn draw_gutter(buf: &mut Buffer, app: &App, view: &View, doc: &Document, it: Gutter) {
@@ -827,6 +983,7 @@ fn draw_gutter(buf: &mut Buffer, app: &App, view: &View, doc: &Document, it: Gut
         screen,
         cursor_lines,
         pane,
+        ground,
     } = it;
     let theme = &app.theme;
     let frame = view.frame;
@@ -869,9 +1026,15 @@ fn draw_gutter(buf: &mut Buffer, app: &App, view: &View, doc: &Document, it: Gut
         (true, true) => Some((BREAKPOINT_MARK, theme.error)),
         (true, false) => Some((UNSET_BREAKPOINT_MARK, theme.muted)),
     };
+    // A place you marked to come back to. Last of the three, because the
+    // margin has one column for all of them and a bookmark is the only one of
+    // the three that is not about a program that is running.
+    let bookmark = doc
+        .has_bookmark(line)
+        .then_some((BOOKMARK_MARK, theme.info));
     let mark = match stopped {
         true => Some((STOPPED_MARK, theme.warning)),
-        false => breakpoint,
+        false => breakpoint.or(bookmark),
     };
 
     let numbers = app.config.line_numbers();
@@ -888,7 +1051,7 @@ fn draw_gutter(buf: &mut Buffer, app: &App, view: &View, doc: &Document, it: Gut
         .bg(if here && theme.current_line != theme.background {
             theme.current_line
         } else {
-            Color::Reset
+            ground
         })
         .fg(if here {
             theme.gutter_current
@@ -908,6 +1071,15 @@ fn draw_gutter(buf: &mut Buffer, app: &App, view: &View, doc: &Document, it: Gut
         .map(|d| d.mark(pane, line));
     let tracked = comparing.is_some() || app.git.tracking(doc.id);
     let reserved = 1 + usize::from(tracked);
+    // The whole margin first, in the one style, so that the stripe on the
+    // cursor's line reaches all of it — the columns the marks live in are part
+    // of the line too, and a highlight with two gaps in it at the right-hand
+    // end reads as a drawing bug rather than as a margin.
+    for column in 0..width as u16 {
+        if let Some(cell) = buf.cell_mut(Position::new(x + column, screen)) {
+            cell.set_char(' ').set_style(style);
+        }
+    }
     let text = if width > reserved {
         format!("{label:>room$} ", room = width - reserved - 1)
     } else {
@@ -947,6 +1119,23 @@ fn draw_gutter(buf: &mut Buffer, app: &App, view: &View, doc: &Document, it: Gut
     }
 }
 
+/// What a line with something folded onto it says at the end of it.
+///
+/// Written here and read by the click that lands on it, so that the two cannot
+/// disagree about how wide it is — a button and the thing that answers it
+/// being two different opinions is how a mark becomes unclickable.
+pub fn fold_mark(hidden: usize) -> String {
+    format!(" \u{22ef} {hidden} {} ", plural_lines(hidden))
+}
+
+/// `line` or `lines`, for the note on a folded row.
+pub fn plural_lines(n: usize) -> &'static str {
+    match n {
+        1 => "line",
+        _ => "lines",
+    }
+}
+
 /// Where you asked the debugger to stop. A filled dot, because that is what
 /// one is in every debugger anybody has used.
 const BREAKPOINT_MARK: char = '\u{25cf}';
@@ -956,6 +1145,9 @@ const BREAKPOINT_MARK: char = '\u{25cf}';
 const UNSET_BREAKPOINT_MARK: char = '\u{25cb}';
 /// Where the program actually is.
 const STOPPED_MARK: char = '\u{25b6}';
+/// Somewhere you said you were coming back to. A diamond, so that it is not
+/// mistaken for a breakpoint at a glance — the two share the column.
+const BOOKMARK_MARK: char = '\u{25c6}';
 
 /// What colour a line's history is drawn in. Green for new, blue for changed,
 /// red for gone — the three every diff has used since diffs were in colour.
@@ -1334,7 +1526,19 @@ fn draw_status(frame: &mut Frame, app: &mut App, area: Rect, ground: Color) {
     } else if selected > 0 {
         chips.push((format!("{selected} selected"), theme.info, Cmd::SELECT_LINE));
     }
-    if doc.read_only {
+    // That the recorder is running. Near the front, because it is a mode —
+    // the one thing textfold has that is — and a mode you cannot see is a
+    // mode you are in by accident.
+    if app.is_recording() {
+        chips.push(("recording".into(), theme.error, Cmd::RECORD_MACRO));
+    }
+    // Why it cannot be written, where there is a reason worth giving. A file
+    // that is not text is read-only for a different reason than a file whose
+    // permissions say so, and "read-only" on its own would send somebody to
+    // `chmod` to fix something `chmod` has nothing to do with.
+    if let Some(why) = doc.bytes.label() {
+        chips.push((format!("{why}, read-only"), theme.warning, Cmd::ABOUT));
+    } else if doc.read_only {
         chips.push(("read-only".into(), theme.warning, Cmd::ABOUT));
     }
     // What the debugger is doing, and a click that shows the panel where the
@@ -1510,11 +1714,15 @@ pub fn cursor_cell(app: &App) -> Option<(u16, u16)> {
 fn screen_position_of(app: &App, at: usize) -> Option<Position> {
     let view = app.view();
     let doc = app.doc(view.doc)?;
+    let folds = view.folded(&doc.rope);
+    let hints = doc.inlay_columns();
     let layout = Layout {
         rope: &doc.rope,
+        hints: &hints,
         width: view.area.width.max(1) as usize,
         tab_width: app.config.tab_width(),
         wrap: view.wrap,
+        folds: &folds,
     };
     let at = at.min(doc.len_chars());
     let row = view::screen_row(view, &layout, at)?;
@@ -2704,6 +2912,61 @@ mod tests {
         (0..buffer.area.width)
             .map(|x| buffer[(x, y)].symbol())
             .collect()
+    }
+
+    #[test]
+    fn the_margin_is_drawn_on_the_same_background_as_the_text() {
+        // The bug: the line numbers were painted with the *terminal's* default
+        // background rather than the theme's, so the left of every pane was a
+        // strip of whatever colour the terminal happened to be — visible in
+        // any theme whose background is not the terminal's own, which is
+        // all but one of the ones textfold ships.
+        // A theme with a background of its own. The default is `terminal`,
+        // whose whole point is that it names no background — testing against
+        // that one would be testing that `Reset` is `Reset`.
+        let (buffer, app) = screen("one\ntwo\nthree\n", |app| {
+            app.theme = app.themes.by_name("dracula").expect("a shipped theme");
+        });
+        let ground = app.theme.background;
+        assert_ne!(ground, Color::Reset, "this theme paints a background");
+        let view = &app.panes[0];
+        let gutter = view.gutter;
+        assert!(gutter > 0, "there are line numbers to test");
+
+        // Past the cursor's own line, which is striped on purpose — that one
+        // is what the test below is about.
+        for y in view.area.y + 1..view.area.y + 3 {
+            for x in view.frame.x..view.frame.x + gutter {
+                assert_eq!(
+                    buffer[(x, y)].style().bg,
+                    Some(ground),
+                    "column {x} of row {y} is not the theme's background"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_stripe_on_the_cursor_line_reaches_across_the_margin_too() {
+        // Half a highlight reads as a drawing bug rather than as a margin:
+        // the columns the git bar and the problem marks live in are part of
+        // the line the cursor is on, whether or not there is a mark in them.
+        let (buffer, app) = screen("one\ntwo\nthree\n", |app| {
+            app.theme = app.themes.by_name("dracula").expect("a shipped theme");
+            app.view_mut().sel = Selections::single(Range::point(0));
+        });
+        let theme = &app.theme;
+        if theme.current_line == theme.background {
+            return; // A theme that does not stripe the cursor's line.
+        }
+        let view = &app.panes[0];
+        for x in view.frame.x + rule_width(1)..view.frame.x + view.gutter {
+            assert_eq!(
+                buffer[(x, view.area.y)].style().bg,
+                Some(theme.current_line),
+                "column {x} of the cursor's line is not part of the stripe"
+            );
+        }
     }
 
     #[test]

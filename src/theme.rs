@@ -205,6 +205,34 @@ pub enum Role {
     Error,
 }
 
+/// What a language server's token type means in textfold's colours.
+///
+/// The names are the protocol's own — a server may add its own beyond these,
+/// and one nobody here knows the name of is left to the grammar rather than
+/// guessed at.
+pub fn semantic_role(name: &str) -> Option<Role> {
+    Some(match name {
+        "namespace" => Role::Namespace,
+        "type" | "interface" | "typeParameter" => Role::Type,
+        "class" | "struct" | "enum" => Role::Type,
+        "parameter" => Role::Parameter,
+        "variable" => Role::Variable,
+        "property" | "event" => Role::Property,
+        "enumMember" => Role::Constant,
+        "function" => Role::Function,
+        "method" => Role::Method,
+        "macro" => Role::Macro,
+        "keyword" | "modifier" => Role::Keyword,
+        "comment" => Role::Comment,
+        "string" => Role::String,
+        "number" => Role::Number,
+        "regexp" => Role::StringSpecial,
+        "operator" => Role::Operator,
+        "decorator" => Role::Attribute,
+        _ => return None,
+    })
+}
+
 /// Every capture name textfold knows. A grammar's query names a capture like
 /// `@keyword.control.repeat`; the longest of these that is a prefix of it
 /// along the dots wins, so a grammar can be as specific as it likes and still
@@ -507,6 +535,10 @@ const BUILT_IN: &[(&str, &str)] = &[
     ("afterglow.json", include_str!("../themes/afterglow.json")),
     ("darcula.json", include_str!("../themes/darcula.json")),
     ("ayu.json", include_str!("../themes/ayu.json")),
+    ("github.json", include_str!("../themes/github.json")),
+    ("material.json", include_str!("../themes/material.json")),
+    ("zenburn.json", include_str!("../themes/zenburn.json")),
+    ("contrast.json", include_str!("../themes/contrast.json")),
     // The light ones last, since most terminals have a dark background and a
     // list you step through should start where you probably want to be.
     (
@@ -514,6 +546,14 @@ const BUILT_IN: &[(&str, &str)] = &[
         include_str!("../themes/solarized-light.json"),
     ),
     ("latte.json", include_str!("../themes/latte.json")),
+    (
+        "github-light.json",
+        include_str!("../themes/github-light.json"),
+    ),
+    (
+        "gruvbox-light.json",
+        include_str!("../themes/gruvbox-light.json"),
+    ),
 ];
 
 impl Themes {
@@ -1120,7 +1160,7 @@ mod tests {
     #[test]
     fn every_shipped_theme_spells_out_every_kind_of_code() {
         // The point of the derived colours is that a ten-colour theme still
-        // works. The point of shipping eighteen is that they are better than
+        // works. The point of shipping two dozen is that they are better than
         // that — so none of them may be leaning on the derivation.
         for (file, text) in BUILT_IN {
             let parsed: FileTheme = serde_json::from_str(text).expect("reads");
@@ -1187,6 +1227,106 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn nothing_a_shipped_theme_draws_is_the_colour_it_draws_it_on() {
+        // One transposed digit in a palette and a whole kind of code is
+        // invisible — not wrong-looking, *gone* — and it is the sort of thing
+        // nobody notices until they open a file that happens to be full of it.
+        let themes = Themes::built_in();
+        for named in &themes.entries {
+            let theme = &named.theme;
+            let ground = theme.background;
+            if !matches!(ground, Color::Rgb(..)) {
+                // The terminal theme paints no background of its own, so
+                // there is nothing here to be the same as.
+                continue;
+            }
+            for role in ALL_ROLES {
+                assert_ne!(
+                    theme.role(*role),
+                    ground,
+                    "{}: {role:?} is the background colour",
+                    named.name
+                );
+            }
+            for (what, colour) in [
+                ("foreground", theme.foreground),
+                ("muted", theme.muted),
+                ("faint", theme.faint),
+                ("accent", theme.accent),
+                ("success", theme.success),
+                ("warning", theme.warning),
+                ("error", theme.error),
+                ("info", theme.info),
+                ("selection", theme.selection),
+                ("gutter", theme.gutter),
+                ("cursor", theme.cursor),
+                ("added", theme.added),
+                ("changed", theme.changed),
+                ("removed", theme.removed),
+            ] {
+                assert_ne!(colour, ground, "{}: {what} is the background colour", named.name);
+            }
+        }
+    }
+
+    #[test]
+    fn the_contrast_theme_is_as_readable_as_it_says_it_is() {
+        // `contrast` makes a promise in its own `about` — 7:1, the strictest
+        // readability bar anybody sets — and a promise nothing checks is a
+        // promise that lasts until the next time somebody adjusts a colour.
+        let themes = Themes::built_in();
+        let theme = themes.by_name("contrast").expect("shipped");
+        let ground = theme.background;
+        let mut worst = f64::MAX;
+        let mut worst_role = None;
+        for role in ALL_ROLES {
+            let ratio = contrast(theme.role(*role), ground);
+            if ratio < worst {
+                worst = ratio;
+                worst_role = Some(role);
+            }
+        }
+        for colour in [
+            theme.foreground,
+            theme.muted,
+            theme.faint,
+            theme.accent,
+            theme.success,
+            theme.warning,
+            theme.error,
+            theme.info,
+            theme.gutter,
+        ] {
+            worst = worst.min(contrast(colour, ground));
+        }
+        assert!(
+            worst >= 7.0,
+            "contrast promises 7:1 and its worst is {worst:.2}:1 ({worst_role:?})"
+        );
+    }
+
+    /// How far apart two colours are, the way the accessibility guidelines
+    /// count it. Only meaningful for two real colours, which is all this is
+    /// asked about.
+    fn contrast(a: Color, b: Color) -> f64 {
+        fn light(colour: Color) -> f64 {
+            let Color::Rgb(r, g, b) = colour else {
+                return 0.0;
+            };
+            let channel = |v: u8| {
+                let v = v as f64 / 255.0;
+                match v <= 0.03928 {
+                    true => v / 12.92,
+                    false => ((v + 0.055) / 1.055).powf(2.4),
+                }
+            };
+            0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b)
+        }
+        let (one, two) = (light(a), light(b));
+        (one.max(two) + 0.05) / (one.min(two) + 0.05)
     }
 
     #[test]

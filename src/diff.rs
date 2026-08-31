@@ -20,6 +20,10 @@
 use crate::doc::{DocId, Document};
 use crate::git::Mark;
 
+/// One column of a pair of matched line numbers — which of the two a lookup
+/// reads, and which it answers with, depending on the side asking.
+type Column = fn(&(usize, usize)) -> usize;
+
 /// Which of the two panes.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Side {
@@ -163,7 +167,7 @@ impl Diff {
     /// view crosses into a change.
     pub fn beside(&self, pane: usize, line: usize) -> Option<usize> {
         let side = self.side_of(pane)?;
-        let (from, to): (fn(&(usize, usize)) -> usize, fn(&(usize, usize)) -> usize) = match side {
+        let (from, to): (Column, Column) = match side {
             Side::Left => (|p| p.0, |p| p.1),
             Side::Right => (|p| p.1, |p| p.0),
         };

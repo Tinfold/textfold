@@ -158,6 +158,38 @@ struct Revision {
     open: bool,
 }
 
+/// A note a language server would write into the text but the text does not
+/// say: a type it worked out, the name of the parameter an argument is going
+/// to.
+///
+/// Drawn where it belongs in the line and counted in the width of that line,
+/// because a note that is drawn but not counted is a line whose characters are
+/// no longer where the editor thinks they are — and everything from clicking
+/// to selecting is built on knowing that.
+#[derive(Clone, Debug)]
+pub struct Inlay {
+    /// Where it goes, as a character index. A position, so that typing before
+    /// it carries it along until the server has been asked again.
+    pub at: usize,
+    pub text: String,
+}
+
+/// A note a server offers about a line: `3 implementations`, `Run test`.
+///
+/// Drawn after the end of the line rather than on a line of its own. A line of
+/// its own is what a graphical editor does, and it means the file on the
+/// screen is no longer the file — row twelve is not line twelve, and every
+/// click, every drag and every scroll has to know about it. After the text is
+/// where a note can be read without any of that being true.
+#[derive(Clone, Debug)]
+pub struct Lens {
+    /// The start of the line it is about.
+    pub at: usize,
+    pub label: String,
+    /// What running it means, for the ones that do something.
+    pub command: Option<serde_json::Value>,
+}
+
 /// The text, where it came from, and what has been done to it.
 pub struct Document {
     pub id: DocId,
@@ -184,8 +216,14 @@ pub struct Document {
     /// Counted up on every edit and handed to language servers, which insist
     /// on knowing which version of a file they are talking about.
     pub version: i32,
-    /// Whether the file was read-only on disk.
+    /// Whether the file was read-only on disk — or whether reading it cost
+    /// something, which is the other way a buffer becomes one you cannot
+    /// write. See [`Bytes`].
     pub read_only: bool,
+    /// What reading the file as text cost. A buffer that is not exactly its
+    /// file refuses to be written over it, because saving would be writing the
+    /// difference.
+    pub bytes: Bytes,
     /// Where the text came from, where that is not a file: the URI a language
     /// server handed it over under. Kept so that going to the same class in a
     /// jar twice comes back to the tab that is already open rather than making
@@ -198,6 +236,21 @@ pub struct Document {
     /// What the language servers have said about this file: one list, with
     /// each server's own findings replaced whole when it sends new ones.
     pub diagnostics: Vec<Diagnostic>,
+    /// What the server says the names in this file *are*, as colours.
+    ///
+    /// Beside the tree-sitter colours rather than instead of them: the grammar
+    /// knows the shape of the code without knowing anything about it, and the
+    /// server knows that this name is a constant and that one is a type. Where
+    /// both have an opinion the server's wins, because it is the one that had
+    /// to look something up to have it.
+    pub semantic: Vec<(Range, crate::theme::Role)>,
+    /// The types and names the code does not say. See [`Inlay`].
+    pub inlays: Vec<Inlay>,
+    /// The notes a server offers about the lines. See [`Lens`].
+    pub lenses: Vec<Lens>,
+    /// Everywhere in this file the thing under the cursor is mentioned, so
+    /// that all of them can be lit while the cursor is on one.
+    pub highlights: Vec<Range>,
     /// What makes this a plugin's buffer rather than a file's.
     pub panel: Option<Panel>,
     /// Where the debugger should stop, as character positions.
@@ -213,6 +266,14 @@ pub struct Document {
     /// reason a cursor does: a breakpoint is a fact about a file, and it is
     /// there before any adapter starts and after it has gone.
     pub breakpoints: Vec<usize>,
+    /// Places worth coming back to, as character positions.
+    ///
+    /// Positions rather than line numbers, and for the same reason the
+    /// breakpoints are: a bookmark is put on a piece of code, not on a line
+    /// number, and editing above it must carry it down with the thing it was
+    /// marking rather than leaving it pointing at whatever moved into its
+    /// place.
+    pub bookmarks: Vec<usize>,
     /// Text a plugin is offering to put in, shown but not there.
     pub hint: Option<Hint>,
     /// Why this file has no colours, where the reason is worth showing — so
@@ -474,6 +535,65 @@ pub fn read_whole(path: &Path) -> Result<Option<(Vec<u8>, Stamp)>> {
     Ok(None)
 }
 
+/// How many bytes of a file are looked at before deciding it is not text.
+/// The window git uses. A file that is text for its first eight thousand bytes
+/// and binary after that exists; reading a gigabyte to find one does not pay
+/// for itself.
+const SNIFF: usize = 8000;
+
+/// What reading a file as text cost.
+///
+/// The difference between a buffer that can be written back and one that
+/// cannot. Text goes into the rope as UTF-8 and comes out of it as UTF-8, so a
+/// file that was not UTF-8 to begin with is not in the rope — an approximation
+/// of it is, with a replacement character everywhere a byte could not be read.
+/// Writing that back does not put the file back; it replaces somebody's file
+/// with a worse copy of it, and nothing on the screen says so, because a
+/// replacement character looks like a character.
+///
+/// So the reading says what it cost, and a buffer that cost anything is
+/// read-only.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Bytes {
+    /// Valid UTF-8. The rope is the file, and saving puts back what was there.
+    Utf8,
+    /// Not valid UTF-8 — Latin-1, or a file with one stray byte in it. What is
+    /// in the rope is not what is on the disk.
+    Lossy,
+    /// Not text at all: there are NULs in it.
+    Binary,
+}
+
+impl Bytes {
+    /// How these bytes read.
+    ///
+    /// NULs first, because a file with those in it is not text however the
+    /// rest of it decodes, and because it is the test every other tool makes.
+    pub fn of(bytes: &[u8]) -> Bytes {
+        if bytes.iter().take(SNIFF).any(|b| *b == 0) {
+            Bytes::Binary
+        } else if std::str::from_utf8(bytes).is_err() {
+            Bytes::Lossy
+        } else {
+            Bytes::Utf8
+        }
+    }
+
+    /// Whether what is in the buffer is exactly what is in the file.
+    pub fn exact(&self) -> bool {
+        matches!(self, Bytes::Utf8)
+    }
+
+    /// What to call this on the status bar, for a file that is not text.
+    pub fn label(&self) -> Option<&'static str> {
+        match self {
+            Bytes::Utf8 => None,
+            Bytes::Lossy => Some("not UTF-8"),
+            Bytes::Binary => Some("binary"),
+        }
+    }
+}
+
 /// What has happened to the file behind a buffer since we last read or wrote
 /// it.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -528,6 +648,7 @@ impl Document {
             indent,
             version: 0,
             read_only: false,
+            bytes: Bytes::Utf8,
             origin: None,
             done: Vec::new(),
             undone: Vec::new(),
@@ -537,8 +658,13 @@ impl Document {
             recolour_tries: 0,
             syntax: None,
             diagnostics: Vec::new(),
+            semantic: Vec::new(),
+            inlays: Vec::new(),
+            lenses: Vec::new(),
+            highlights: Vec::new(),
             panel: None,
             breakpoints: Vec::new(),
+            bookmarks: Vec::new(),
             hint: None,
             colours_off: None,
             stamp: None,
@@ -562,23 +688,25 @@ impl Document {
         // A file that would not sit still still opens — you asked for it —
         // but with no stamp, so the first disk check reads it again properly
         // rather than believing a snapshot taken mid-write.
-        let (text, existed, stamp) = match read_whole(&path) {
-            Ok(Some((bytes, stamp))) => (
-                String::from_utf8_lossy(&bytes).into_owned(),
-                true,
-                Some(stamp),
-            ),
+        let (raw, existed, stamp) = match read_whole(&path) {
+            Ok(Some((bytes, stamp))) => (bytes, true, Some(stamp)),
             Ok(None) => match std::fs::read(&path) {
-                Ok(bytes) => (String::from_utf8_lossy(&bytes).into_owned(), true, None),
+                Ok(bytes) => (bytes, true, None),
                 Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
             },
             Err(e) => match e.downcast_ref::<std::io::Error>() {
                 Some(io) if io.kind() == std::io::ErrorKind::NotFound => {
-                    (String::new(), false, None)
+                    (Vec::new(), false, None)
                 }
                 _ => return Err(e),
             },
         };
+
+        // What the bytes were is decided here, on the bytes, because after the
+        // next line there are no bytes left to ask — only text with the damage
+        // already done to it.
+        let bytes = Bytes::of(&raw);
+        let text = String::from_utf8_lossy(&raw).into_owned();
 
         // `\r\n` is a fact about the file, not about the text in it. It is
         // taken out here and put back on save, so nothing between the two ever
@@ -587,10 +715,14 @@ impl Document {
         let text = if crlf { text.replace("\r\n", "\n") } else { text };
         let had_final_newline = text.is_empty() || text.ends_with('\n');
 
-        let read_only = existed
-            && std::fs::metadata(&path)
-                .map(|m| m.permissions().readonly())
-                .unwrap_or(false);
+        // Two reasons a buffer cannot be written: the file says so, or reading
+        // it cost something and writing it back would cost somebody their
+        // file. The second is the one nothing else would notice.
+        let read_only = !bytes.exact()
+            || (existed
+                && std::fs::metadata(&path)
+                    .map(|m| m.permissions().readonly())
+                    .unwrap_or(false));
 
         let rope = Rope::from_str(&text);
         let indent = detect_indent(&rope).unwrap_or(fallback_indent);
@@ -609,6 +741,7 @@ impl Document {
             indent,
             version: 0,
             read_only,
+            bytes,
             origin: None,
             done: Vec::new(),
             undone: Vec::new(),
@@ -618,8 +751,13 @@ impl Document {
             recolour_tries: 0,
             syntax: None,
             diagnostics: Vec::new(),
+            semantic: Vec::new(),
+            inlays: Vec::new(),
+            lenses: Vec::new(),
+            highlights: Vec::new(),
             panel: None,
             breakpoints: Vec::new(),
+            bookmarks: Vec::new(),
             hint: None,
             colours_off: None,
             seen: stamp,
@@ -652,15 +790,14 @@ impl Document {
 
     // ---- Breakpoints ----
 
-    /// Which lines have a breakpoint on them, in order and without repeats.
+    /// Which lines these positions are on, in order and without repeats.
     ///
     /// Worked out from the positions rather than stored, because the positions
-    /// are what moves with the text: two breakpoints on lines that an edit has
-    /// joined are one breakpoint, and the answer to "which lines" has to say
-    /// so rather than saying the same line twice.
-    pub fn breakpoint_lines(&self) -> Vec<usize> {
-        let mut lines: Vec<usize> = self
-            .breakpoints
+    /// are what moves with the text: two marks on lines that an edit has
+    /// joined are one mark, and the answer to "which lines" has to say so
+    /// rather than saying the same line twice.
+    fn lines_of(&self, marks: &[usize]) -> Vec<usize> {
+        let mut lines: Vec<usize> = marks
             .iter()
             .map(|at| crate::text::line_of(&self.rope, (*at).min(self.len_chars())))
             .collect();
@@ -669,10 +806,60 @@ impl Document {
         lines
     }
 
-    pub fn has_breakpoint(&self, line: usize) -> bool {
-        self.breakpoints
+    fn marked(&self, marks: &[usize], line: usize) -> bool {
+        marks
             .iter()
             .any(|at| crate::text::line_of(&self.rope, (*at).min(self.len_chars())) == line)
+    }
+
+    /// Put a mark on this line, or take away the one that is there. Answers
+    /// whether there is one there now.
+    ///
+    /// Written once because a breakpoint and a bookmark are the same idea —
+    /// a position that follows the text — differing only in who reads it.
+    fn toggle_mark(rope: &Rope, marks: &mut Vec<usize>, line: usize) -> bool {
+        let len = rope.len_chars();
+        let was = marks.len();
+        marks.retain(|at| crate::text::line_of(rope, (*at).min(len)) != line);
+        if marks.len() != was {
+            return false;
+        }
+        // The start of the line, which is a position that survives the line
+        // being edited: typing at the end of it leaves the mark where it was,
+        // and typing a newline before it carries the mark down with the code
+        // it was put on.
+        marks.push(crate::text::line_start(rope, line));
+        marks.sort_unstable();
+        true
+    }
+
+    /// The notes to be drawn into this file, as `(position, width)` pairs in
+    /// order — what the screen arithmetic needs to know about them.
+    ///
+    /// Width in columns rather than characters, because a note is text like
+    /// any other and a wide character in one takes two columns.
+    pub fn inlay_columns(&self) -> Vec<(usize, usize)> {
+        let mut notes: Vec<(usize, usize)> = self
+            .inlays
+            .iter()
+            .map(|hint| {
+                (
+                    hint.at.min(self.len_chars()),
+                    unicode_width::UnicodeWidthStr::width(hint.text.as_str()),
+                )
+            })
+            .collect();
+        notes.sort_by_key(|(at, _)| *at);
+        notes
+    }
+
+    /// Which lines have a breakpoint on them, in order and without repeats.
+    pub fn breakpoint_lines(&self) -> Vec<usize> {
+        self.lines_of(&self.breakpoints)
+    }
+
+    pub fn has_breakpoint(&self, line: usize) -> bool {
+        self.marked(&self.breakpoints, line)
     }
 
     /// Put one on this line, or take away the one that is there.
@@ -683,21 +870,46 @@ impl Document {
         if line >= self.len_lines() {
             return false;
         }
-        let was = self.breakpoints.len();
-        let rope = &self.rope;
-        let len = rope.len_chars();
-        self.breakpoints
-            .retain(|at| crate::text::line_of(rope, (*at).min(len)) != line);
-        if self.breakpoints.len() != was {
+        Self::toggle_mark(&self.rope, &mut self.breakpoints, line)
+    }
+
+    /// Which lines are bookmarked, in order and without repeats.
+    pub fn bookmark_lines(&self) -> Vec<usize> {
+        self.lines_of(&self.bookmarks)
+    }
+
+    pub fn has_bookmark(&self, line: usize) -> bool {
+        self.marked(&self.bookmarks, line)
+    }
+
+    /// Mark this line, or take the mark off it. Answers whether it is marked
+    /// now.
+    pub fn toggle_bookmark(&mut self, line: usize) -> bool {
+        if line >= self.len_lines() {
             return false;
         }
-        // The start of the line, which is a position that survives the line
-        // being edited: typing at the end of it leaves the breakpoint where
-        // it was, and typing a newline before it carries the breakpoint down
-        // with the code it was put on.
-        self.breakpoints.push(crate::text::line_start(rope, line));
-        self.breakpoints.sort_unstable();
-        true
+        Self::toggle_mark(&self.rope, &mut self.bookmarks, line)
+    }
+
+    /// The next bookmarked line after `line`, or the one before it, coming
+    /// round the end of the file rather than stopping at it.
+    ///
+    /// Round, because a bookmark is a place you are going back to and the file
+    /// having ended is not a reason to be told there is nowhere to go.
+    pub fn bookmark_from(&self, line: usize, forwards: bool) -> Option<usize> {
+        let lines = self.bookmark_lines();
+        if lines.is_empty() {
+            return None;
+        }
+        let found = match forwards {
+            true => lines.iter().find(|at| **at > line).copied(),
+            false => lines.iter().rev().find(|at| **at < line).copied(),
+        };
+        // Nothing that way: round to the other end.
+        Some(found.unwrap_or(match forwards {
+            true => lines[0],
+            false => lines[lines.len() - 1],
+        }))
     }
 
     /// Say that what is in the rope is what is on disk, without writing
@@ -1102,6 +1314,19 @@ impl Document {
     /// so that a full disk or a crash halfway through leaves the old file
     /// rather than half of a new one.
     pub fn save_to(&mut self, path: &Path, final_newline: bool) -> Result<()> {
+        // A buffer that is not exactly its file is not a buffer to write
+        // anywhere. What is in the rope is an approximation of the file with a
+        // replacement character wherever a byte could not be read, and writing
+        // it is how somebody's file quietly becomes a worse copy of itself.
+        // See [`Bytes`].
+        if !self.bytes.exact() {
+            anyhow::bail!(
+                "{} is {} — what is in the buffer is not what is in the file, \
+                 and saving would write the difference",
+                self.name,
+                self.bytes.label().unwrap_or("not text"),
+            );
+        }
         let mut text = self.rope.to_string();
         // A file that ends without a newline is a file somebody may have meant
         // to end that way; the setting decides, and the setting's default is
@@ -1113,27 +1338,16 @@ impl Document {
             text = text.replace('\n', "\r\n");
         }
 
-        let dir = path.parent().unwrap_or(Path::new("."));
-        std::fs::create_dir_all(dir).ok();
-        let temp = dir.join(format!(
-            ".{}.textfold-{}",
-            path.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "buffer".into()),
-            std::process::id()
-        ));
-        // A rename cannot preserve permissions it does not know about, so the
-        // original's are copied across before it takes the original's place.
-        let existing = std::fs::metadata(path).ok().map(|m| m.permissions());
-        std::fs::write(&temp, text.as_bytes())
-            .with_context(|| format!("writing {}", temp.display()))?;
-        if let Some(perms) = existing {
-            std::fs::set_permissions(&temp, perms).ok();
+        // Where the bytes actually have to land. A path that is a symlink is
+        // a name for a file somewhere else — most of a dotfiles repository is
+        // exactly that — and a rename over the name replaces the link with an
+        // ordinary file. The repository stops receiving anything you write,
+        // the editor says "saved", and both are true.
+        let target = through_links(path);
+        if let Some(dir) = target.parent() {
+            std::fs::create_dir_all(dir).ok();
         }
-        if let Err(e) = std::fs::rename(&temp, path) {
-            std::fs::remove_file(&temp).ok();
-            return Err(e).with_context(|| format!("saving {}", path.display()));
-        }
+        write_file(&target, text.as_bytes())?;
 
         self.had_final_newline = text.is_empty() || text.ends_with('\n');
         self.saved_at = Some(self.done.len());
@@ -1265,7 +1479,19 @@ impl Document {
     /// stamping content from one moment with metadata from another is the way
     /// a buffer ends up quietly wrong forever: the stamp says it is up to date
     /// and nothing ever looks again.
-    pub fn took_from_disk(&mut self, stamp: Stamp) {
+    pub fn took_from_disk(&mut self, stamp: Stamp, bytes: Bytes) {
+        // What the file is made of can change under a buffer like anything
+        // else about it — a text file replaced by a binary one, or the other
+        // way round — so whether this can be written is decided again here
+        // rather than left as it was decided when the buffer opened.
+        self.bytes = bytes;
+        self.read_only = !bytes.exact()
+            || self
+                .path
+                .as_deref()
+                .and_then(|p| std::fs::metadata(p).ok())
+                .map(|m| m.permissions().readonly())
+                .unwrap_or(false);
         self.close_revision();
         self.saved_at = Some(self.done.len());
         self.stamp = Some(stamp);
@@ -1287,6 +1513,126 @@ impl Document {
             .slice(range.start().min(len)..range.end().min(len))
             .to_string()
     }
+}
+
+/// How many links to follow before deciding a path is a loop. The kernel's own
+/// answer to the same question, and a link pointing at itself is the only way
+/// to reach it.
+const LINK_DEPTH: usize = 40;
+
+/// The file a path actually names, following symlinks the whole way.
+///
+/// `canonicalize` is not used, because it insists every part of the path
+/// exists: a link pointing at a file that has not been written yet is still a
+/// link that a save should go through, and the first save is exactly when that
+/// is true.
+fn through_links(path: &Path) -> PathBuf {
+    let mut at = path.to_path_buf();
+    for _ in 0..LINK_DEPTH {
+        let Ok(to) = std::fs::read_link(&at) else { break };
+        // A relative link is relative to the directory the link is in, not to
+        // where the editor happens to have been started.
+        at = match to.is_absolute() {
+            true => to,
+            false => at.parent().unwrap_or(Path::new(".")).join(to),
+        };
+    }
+    at
+}
+
+/// How many names this file has. More than one means writing it by any other
+/// route than in place would take the others away.
+#[cfg(unix)]
+fn names(meta: &std::fs::Metadata) -> u64 {
+    std::os::unix::fs::MetadataExt::nlink(meta)
+}
+
+#[cfg(not(unix))]
+fn names(_: &std::fs::Metadata) -> u64 {
+    1
+}
+
+/// Give the new file the old one's owner, where we are allowed to.
+///
+/// An editor run under `sudo` writes as root, and a file that belonged to
+/// somebody a moment ago belonging to root now is a file they cannot save
+/// again. The call fails for anybody who is not root, which is the answer
+/// there too: it was already theirs.
+#[cfg(unix)]
+fn keep_owner(path: &Path, meta: &std::fs::Metadata) {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::MetadataExt;
+    let Ok(name) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return;
+    };
+    // Safe: a C string that lives across the call, and two numbers.
+    unsafe { libc::chown(name.as_ptr(), meta.uid(), meta.gid()) };
+}
+
+#[cfg(not(unix))]
+fn keep_owner(_: &Path, _: &std::fs::Metadata) {}
+
+/// Put these bytes in this file, atomically where that is the right answer.
+///
+/// The write goes to a temporary file beside the original and is renamed over
+/// it, so that a save interrupted half way leaves the file that was there
+/// rather than half of the one that is arriving. Two ordinary situations make
+/// that the wrong answer:
+///
+///   * **A file with more than one name.** A rename gives the file a new
+///     inode, and every other hard link goes on pointing at the old one — so
+///     the file you saved and the file under its other name are two different
+///     files from that moment, and nothing said so.
+///   * **A directory we may not write in.** A file can be writable when the
+///     directory holding it is not, and a temporary file cannot be made
+///     beside it.
+///
+/// In both the bytes go into the file itself. That is not atomic, and it is
+/// what every editor does about it.
+fn write_file(target: &Path, bytes: &[u8]) -> Result<()> {
+    let existing = std::fs::metadata(target).ok();
+    let shared = existing.as_ref().map(names).unwrap_or(1) > 1;
+    if !shared {
+        let dir = target.parent().unwrap_or(Path::new("."));
+        let temp = dir.join(format!(
+            ".{}.textfold-{}",
+            target
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "buffer".into()),
+            std::process::id()
+        ));
+        // A rename cannot preserve what it does not know about, so the
+        // original's permissions and owner are put on the replacement before
+        // it takes the original's place.
+        if write_whole(&temp, bytes).is_ok() {
+            if let Some(meta) = &existing {
+                std::fs::set_permissions(&temp, meta.permissions()).ok();
+                keep_owner(&temp, meta);
+            }
+            if std::fs::rename(&temp, target).is_ok() {
+                return Ok(());
+            }
+        }
+        std::fs::remove_file(&temp).ok();
+    }
+    write_whole(target, bytes)
+}
+
+/// Write a whole file, and know it is on the disk before saying so.
+///
+/// Without the sync, "saved" means the kernel has been told, and a machine
+/// that loses power in the next half minute comes back to a file of zeros
+/// where the work was.
+fn write_whole(path: &Path, bytes: &[u8]) -> Result<()> {
+    use std::io::Write;
+    let mut file =
+        std::fs::File::create(path).with_context(|| format!("writing {}", path.display()))?;
+    file.write_all(bytes)
+        .with_context(|| format!("writing {}", path.display()))?;
+    file.sync_all()
+        .with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 /// A path from the root, so that two ways of naming one file are one file.
@@ -1461,6 +1807,141 @@ mod tests {
     }
 
     #[test]
+    fn a_file_that_is_not_utf8_opens_read_only_rather_than_lossily_savable() {
+        // The bug this is here for: a Latin-1 file — or any file with one
+        // stray byte in it — reads as text with a replacement character where
+        // that byte was. It looks like a character. Ctrl-S then writes the
+        // replacement character over somebody's file, and the byte that was
+        // there is gone with no message anywhere saying so.
+        let dir = scratch_dir("latin1");
+        let path = dir.join("resume.txt");
+        // "café" as Latin-1: the é is one byte, and not a UTF-8 one.
+        std::fs::write(&path, b"caf\xe9\n").expect("written");
+
+        let mut d = Document::open(DocId(0), &path, Indent::Spaces(4)).expect("opened");
+        assert_eq!(d.bytes, Bytes::Lossy);
+        assert!(d.read_only, "a buffer that is not its file cannot be written");
+
+        let refused = d.save_to(&path, true).expect_err("it must refuse");
+        assert!(
+            refused.to_string().contains("not UTF-8"),
+            "and say why: {refused}"
+        );
+        assert_eq!(
+            std::fs::read(&path).expect("still there"),
+            b"caf\xe9\n",
+            "the file is untouched"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_file_with_nuls_in_it_is_not_text() {
+        let dir = scratch_dir("binary");
+        let path = dir.join("a.bin");
+        std::fs::write(&path, b"\x7fELF\x02\x00\x00\x00rest").expect("written");
+        let d = Document::open(DocId(0), &path, Indent::Spaces(4)).expect("opened");
+        assert_eq!(d.bytes, Bytes::Binary);
+        assert!(d.read_only);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn ordinary_text_is_exactly_itself_and_saves() {
+        let dir = scratch_dir("utf8");
+        let path = dir.join("a.txt");
+        write(&path, "café\n");
+        let mut d = Document::open(DocId(0), &path, Indent::Spaces(4)).expect("opened");
+        assert_eq!(d.bytes, Bytes::Utf8);
+        assert!(!d.read_only);
+        d.save_to(&path, true).expect("saved");
+        assert_eq!(std::fs::read_to_string(&path).expect("read"), "café\n");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn saving_a_symlink_writes_through_it_rather_than_over_it() {
+        // The bug: the write goes to a temporary file and is renamed over the
+        // path, and a rename over a symlink replaces the link with a regular
+        // file. Half of everybody's home directory is links into a dotfiles
+        // repository, and after one save the repository stops receiving
+        // anything they write — with the editor saying "saved" each time.
+        let dir = scratch_dir("symlink");
+        let real = dir.join("real.txt");
+        let link = dir.join("link.txt");
+        write(&real, "first\n");
+        std::os::unix::fs::symlink(&real, &link).expect("linked");
+
+        let mut d = Document::open(DocId(0), &link, Indent::Spaces(4)).expect("opened");
+        let len = d.len_chars();
+        d.apply_atomic(vec![Change::replace(0, len, "second\n".to_string())], &sel(0));
+        d.save_to(&link, true).expect("saved");
+
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .expect("still there")
+                .file_type()
+                .is_symlink(),
+            "the link is still a link"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&real).expect("read"),
+            "second\n",
+            "and what it points at is what was written"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_relative_symlink_is_followed_from_where_the_link_is() {
+        let dir = scratch_dir("relative-symlink");
+        let real = dir.join("real.txt");
+        let link = dir.join("link.txt");
+        write(&real, "first\n");
+        std::os::unix::fs::symlink("real.txt", &link).expect("linked");
+        assert_eq!(through_links(&link), real);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_link_that_points_at_nothing_yet_is_still_followed() {
+        // `canonicalize` would refuse this one, and the first save of a file
+        // a link is waiting for is exactly when it matters.
+        let dir = scratch_dir("dangling");
+        let link = dir.join("link.txt");
+        std::os::unix::fs::symlink(dir.join("not-yet.txt"), &link).expect("linked");
+        assert_eq!(through_links(&link), dir.join("not-yet.txt"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_file_with_two_names_keeps_both_when_it_is_saved() {
+        // A rename gives the file a new inode, so the other name would go on
+        // pointing at the old contents for ever.
+        let dir = scratch_dir("hardlink");
+        let one = dir.join("one.txt");
+        let two = dir.join("two.txt");
+        write(&one, "first\n");
+        std::fs::hard_link(&one, &two).expect("linked");
+
+        let mut d = Document::open(DocId(0), &one, Indent::Spaces(4)).expect("opened");
+        let len = d.len_chars();
+        d.apply_atomic(vec![Change::replace(0, len, "second\n".to_string())], &sel(0));
+        d.save_to(&one, true).expect("saved");
+
+        assert_eq!(
+            std::fs::read_to_string(&two).expect("read"),
+            "second\n",
+            "the file's other name is the same file still"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn a_file_read_whole_comes_back_with_the_stamp_it_was_read_under() {
         // The pairing is the point. Content from one moment stamped with
         // metadata from another is a buffer that is quietly wrong forever,
@@ -1528,7 +2009,7 @@ mod tests {
             vec![Change::replace(0, len, String::from_utf8(bytes).unwrap())],
             &sel(0),
         );
-        d.took_from_disk(stamp);
+        d.took_from_disk(stamp, Bytes::Utf8);
 
         assert!(!d.is_modified());
         assert_eq!(d.check_disk(), OnDisk::Same, "it is up to date, and knows it");

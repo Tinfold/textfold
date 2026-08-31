@@ -1,9 +1,17 @@
 //! What git knows about the file you are looking at.
 //!
-//! Two things, which are the two an editor can show without getting in the
-//! way: which branch you are on, and which lines you have touched since the
-//! last commit. Both are read rather than written — textfold does not commit,
-//! stage, or stash, and a repository is not something it will ever change.
+//! Mostly two things, which are the two an editor can show without getting in
+//! the way: which branch you are on, and which lines you have touched since
+//! the last commit. Both are read rather than written — textfold does not
+//! commit, branch, merge or stash, and it never will.
+//!
+//! The exceptions are the two that are about the file in front of you rather
+//! than about the repository, where going to another window means finding your
+//! place again afterwards: putting one stretch of a file back as it was
+//! committed, which is an ordinary edit to a buffer and touches nothing on
+//! disk, and putting one stretch of it into the index, which is the one thing
+//! in here that changes a repository — and it does that by handing git the
+//! patch and letting git do it.
 //!
 //! There is no library here. The branch is read straight out of `.git`, which
 //! is a text file and cheaper than starting a process; the committed text of
@@ -107,15 +115,7 @@ impl Repo {
     /// something you have just written and is why every line of a new file is
     /// left unmarked rather than marked as added.
     pub fn committed(&self, file: &Path) -> Option<String> {
-        let relative = file.strip_prefix(&self.root).ok()?;
-        // Git wants forward slashes whatever the platform calls a separator.
-        let mut name = String::new();
-        for part in relative.components() {
-            if !name.is_empty() {
-                name.push('/');
-            }
-            name.push_str(&part.as_os_str().to_string_lossy());
-        }
+        let name = self.relative(file)?;
         let out = Command::new("git")
             // Read-only means read-only: without this, `git` will happily
             // refresh the index of a repository somebody else is committing in.
@@ -137,6 +137,266 @@ impl Repo {
             text
         })
     }
+
+    /// Put one stretch of a file into the index, without touching the rest.
+    ///
+    /// The one thing in here that writes to a repository. It is done by
+    /// building the patch for that hunk and handing it to `git apply
+    /// --cached`, which is what every other editor's "stage this hunk" does,
+    /// and it means the staging is git's own rather than an idea of staging
+    /// written here.
+    ///
+    /// The patch is built against `HEAD`, so a file that has been *partly*
+    /// staged already may not take it — git says so, and so do we, rather than
+    /// forcing something into the index that does not describe it.
+    pub fn stage(&self, file: &Path, patch: &str) -> Result<(), String> {
+        use std::io::Write;
+        let _ = file;
+        let mut child = Command::new("git")
+            .args(["--no-optional-locks", "-C"])
+            .arg(&self.root)
+            .args(["apply", "--cached", "--unidiff-zero", "-"])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("git would not start: {e}"))?;
+        child
+            .stdin
+            .take()
+            .ok_or("git took no input")?
+            .write_all(patch.as_bytes())
+            .map_err(|e| format!("git would not take the patch: {e}"))?;
+        let out = child
+            .wait_with_output()
+            .map_err(|e| format!("git did not finish: {e}"))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let why = String::from_utf8_lossy(&out.stderr)
+            .lines()
+            .next()
+            .unwrap_or("git would not apply it")
+            .to_string();
+        Err(why)
+    }
+
+    /// Who last touched a line, and when, and why.
+    ///
+    /// One line rather than the file: blaming a whole file is a second or two
+    /// on anything large, and the question people actually ask is about the
+    /// line in front of them.
+    pub fn blame(&self, file: &Path, line: usize) -> Option<String> {
+        let name = self.relative(file)?;
+        let out = Command::new("git")
+            .args(["--no-optional-locks", "-C"])
+            .arg(&self.root)
+            .args(["blame", "--porcelain", "-L"])
+            .arg(format!("{},{}", line + 1, line + 1))
+            .arg("--")
+            .arg(&name)
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        let text = String::from_utf8_lossy(&out.stdout).into_owned();
+        let mut commit = String::new();
+        let mut who = String::new();
+        let mut when = String::new();
+        let mut what = String::new();
+        for row in text.lines() {
+            if commit.is_empty() && row.len() >= 40 {
+                commit = row.chars().take(8).collect();
+            }
+            if let Some(rest) = row.strip_prefix("author ") {
+                who = rest.to_string();
+            }
+            if let Some(rest) = row.strip_prefix("author-time ") {
+                when = rest.to_string();
+            }
+            if let Some(rest) = row.strip_prefix("summary ") {
+                what = rest.to_string();
+            }
+        }
+        // A line nobody has committed yet blames as all zeroes, which is git
+        // saying "you, just now" in the least readable way it could.
+        if commit.chars().all(|c| c == '0') {
+            return Some("not committed yet".into());
+        }
+        let when = when
+            .parse::<i64>()
+            .ok()
+            .map(day_of)
+            .unwrap_or_else(|| "at some point".into());
+        Some(format!("{commit} · {who} · {when} · {what}"))
+    }
+
+    /// A file's name as git spells it: from the root, with forward slashes
+    /// whatever this platform calls a separator.
+    pub fn relative(&self, file: &Path) -> Option<String> {
+        let relative = file.strip_prefix(&self.root).ok()?;
+        let mut name = String::new();
+        for part in relative.components() {
+            if !name.is_empty() {
+                name.push('/');
+            }
+            name.push_str(&part.as_os_str().to_string_lossy());
+        }
+        Some(name)
+    }
+}
+
+/// How many unchanged lines to put either side of a hunk in a patch.
+///
+/// Three, which is what every diff has used since the eighties and what `git
+/// apply` expects when it is looking for where a patch belongs.
+const CONTEXT: usize = 3;
+
+/// One hunk, written as a patch git will take.
+///
+/// Against `HEAD`, because that is the text we have: the base a hunk was
+/// worked out from is the committed file. Where the index has already been
+/// given part of this file, git will say the patch does not apply — which is
+/// true, and better said by git than guessed at here.
+pub fn patch_for(name: &str, old: &str, new: &str, hunk: &Hunk) -> String {
+    let olds: Vec<&str> = old.lines().collect();
+    let news: Vec<&str> = new.lines().collect();
+
+    // The context has to be the same lines on both sides, which it is: it is
+    // taken from outside the hunk, and outside the hunk the two agree.
+    let before = CONTEXT.min(hunk.was.start).min(hunk.lines.start);
+    let after = CONTEXT
+        .min(olds.len().saturating_sub(hunk.was.end))
+        .min(news.len().saturating_sub(hunk.lines.end));
+
+    let mut body = String::new();
+    for row in &olds[hunk.was.start - before..hunk.was.start] {
+        body.push_str(&format!(" {row}\n"));
+    }
+    for row in &olds[hunk.was.clone()] {
+        body.push_str(&format!("-{row}\n"));
+    }
+    for row in &news[hunk.lines.clone()] {
+        body.push_str(&format!("+{row}\n"));
+    }
+    for row in &olds[hunk.was.end..hunk.was.end + after] {
+        body.push_str(&format!(" {row}\n"));
+    }
+
+    let old_count = hunk.was.len() + before + after;
+    let new_count = hunk.lines.len() + before + after;
+    // A range that covers no lines is written as the line *before* the gap,
+    // which is how a diff says "nothing here, and it goes after that one".
+    let old_start = match old_count {
+        0 => hunk.was.start,
+        _ => hunk.was.start - before + 1,
+    };
+    let new_start = match new_count {
+        0 => hunk.lines.start,
+        _ => hunk.lines.start - before + 1,
+    };
+    format!(
+        "diff --git a/{name} b/{name}\n--- a/{name}\n+++ b/{name}\n\
+         @@ -{old_start},{old_count} +{new_start},{new_count} @@\n{body}"
+    )
+}
+
+/// Where the conflict markers are in a file being merged.
+///
+/// The three lines git writes into a file it could not merge on its own:
+/// `<<<<<<<` above what you have, `=======` between, and `>>>>>>>` below what
+/// they have. Finding them is a search for three strings — which is all any
+/// tool that helps with a merge does, because that is the whole of what git
+/// leaves behind.
+pub fn conflicts(text: &str) -> Vec<Conflict> {
+    let mut out = Vec::new();
+    let mut start: Option<usize> = None;
+    let mut middle: Option<usize> = None;
+    for (line, row) in text.lines().enumerate() {
+        if row.starts_with("<<<<<<<") {
+            start = Some(line);
+            middle = None;
+        } else if row.starts_with("=======") && start.is_some() {
+            middle = Some(line);
+        } else if row.starts_with(">>>>>>>")
+            && let (Some(from), Some(divider)) = (start, middle)
+        {
+            out.push(Conflict {
+                start: from,
+                divider,
+                end: line,
+            });
+            start = None;
+            middle = None;
+        }
+    }
+    out
+}
+
+/// One thing git could not merge, as the three lines it left in the file.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Conflict {
+    /// The `<<<<<<<` line.
+    pub start: usize,
+    /// The `=======` line.
+    pub divider: usize,
+    /// The `>>>>>>>` line.
+    pub end: usize,
+}
+
+impl Conflict {
+    /// The lines of what is yours: between the first marker and the divider.
+    pub fn ours(&self) -> std::ops::Range<usize> {
+        self.start + 1..self.divider
+    }
+
+    /// The lines of what is theirs: between the divider and the last marker.
+    pub fn theirs(&self) -> std::ops::Range<usize> {
+        self.divider + 1..self.end
+    }
+}
+
+/// A unix timestamp as a date, without pulling in a calendar library.
+///
+/// Days since the epoch, walked forward a year at a time. Nobody is blaming a
+/// line from the year 40,000, and the loop is a few dozen turns for the years
+/// anybody's repository covers.
+fn day_of(seconds: i64) -> String {
+    let mut days = seconds.div_euclid(86_400);
+    let mut year = 1970;
+    loop {
+        let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+        let length = if leap { 366 } else { 365 };
+        if days < length {
+            break;
+        }
+        days -= length;
+        year += 1;
+    }
+    let leap = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+    let months = [
+        31,
+        if leap { 29 } else { 28 },
+        31,
+        30,
+        31,
+        30,
+        31,
+        31,
+        30,
+        31,
+        30,
+        31,
+    ];
+    let mut month = 0;
+    while month < 12 && days >= months[month] {
+        days -= months[month];
+        month += 1;
+    }
+    format!("{year}-{:02}-{:02}", month + 1, days + 1)
 }
 
 /// What happened to a line since the last commit.
@@ -182,6 +442,61 @@ pub fn marks(old: &str, new: &str) -> Vec<(usize, Mark)> {
     }
     out.sort_by_key(|(line, _)| *line);
     out.dedup_by_key(|(line, _)| *line);
+    out
+}
+
+/// One stretch of a file that differs from what was committed.
+///
+/// Both halves, because undoing a change means putting back what was there:
+/// the lines as they are now, and the lines they replaced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Hunk {
+    /// The lines in the file as it is now. Empty for a stretch that was
+    /// deleted — there is nothing there any more, which is the point.
+    pub lines: std::ops::Range<usize>,
+    /// The lines it replaced, in the file as it was committed. Empty for
+    /// lines that are new.
+    pub was: std::ops::Range<usize>,
+}
+
+impl Hunk {
+    /// Whether this is the hunk a cursor on this line is standing in.
+    ///
+    /// A deletion has no lines of its own to stand in, so it is claimed by the
+    /// line that took its place — which is the line its mark is drawn against.
+    pub fn holds(&self, line: usize) -> bool {
+        match self.lines.is_empty() {
+            true => self.lines.start == line,
+            false => self.lines.contains(&line),
+        }
+    }
+}
+
+/// The stretches in which two texts differ.
+///
+/// Worked out from what they have in common rather than from what they do not:
+/// [`aligned`] gives every pair of lines that are the same, and everything
+/// between two of those pairs is one hunk. Which means there is one diff in
+/// this module and not two — `marks` colours the margin with it, `aligned`
+/// lines two panes up with it, and this puts a change back with it.
+pub fn hunks(old: &str, new: &str) -> Vec<Hunk> {
+    let olds = old.lines().count();
+    let news = new.lines().count();
+    let mut pairs = aligned(old, new);
+    pairs.push((olds, news));
+
+    let mut out = Vec::new();
+    // Where the last pair of matching lines was, as the line *after* it.
+    let (mut o, mut n) = (0usize, 0usize);
+    for (om, nm) in pairs {
+        if om > o || nm > n {
+            out.push(Hunk {
+                lines: n..nm,
+                was: o..om,
+            });
+        }
+        (o, n) = (om + 1, nm + 1);
+    }
     out
 }
 
@@ -407,6 +722,119 @@ mod tests {
         run(&["add", "file.txt"])?;
         run(&["commit", "-qm", "first"])?;
         Some(dir)
+    }
+
+    #[test]
+    fn a_hunk_knows_both_what_is_there_now_and_what_was() {
+        // Three shapes, which are all the shapes there are: something
+        // changed, something added, something taken away.
+        let changed = hunks("a\nb\nc\n", "a\nB\nc\n");
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].lines, 1..2);
+        assert_eq!(changed[0].was, 1..2);
+
+        let added = hunks("a\nc\n", "a\nb\nc\n");
+        assert_eq!(added.len(), 1);
+        assert_eq!(added[0].lines, 1..2);
+        assert!(added[0].was.is_empty(), "nothing was there before");
+
+        let removed = hunks("a\nb\nc\n", "a\nc\n");
+        assert_eq!(removed.len(), 1);
+        assert!(removed[0].lines.is_empty(), "nothing is there now");
+        assert_eq!(removed[0].was, 1..2);
+        // And a deletion is claimed by the line that took its place, which is
+        // the line its mark is drawn against.
+        assert!(removed[0].holds(1));
+    }
+
+    #[test]
+    fn a_file_that_has_not_changed_has_no_hunks() {
+        assert!(hunks("a\nb\n", "a\nb\n").is_empty());
+    }
+
+    #[test]
+    fn two_changes_far_apart_are_two_hunks() {
+        let found = hunks("a\nb\nc\nd\ne\n", "A\nb\nc\nd\nE\n");
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].lines, 0..1);
+        assert_eq!(found[1].lines, 4..5);
+    }
+
+    #[test]
+    fn a_patch_says_what_git_needs_to_hear() {
+        let old = "one\ntwo\nthree\nfour\nfive\n";
+        let new = "one\ntwo\nTHREE\nfour\nfive\n";
+        let hunk = hunks(old, new).into_iter().next().expect("one hunk");
+        let patch = patch_for("file.txt", old, new, &hunk);
+        assert!(patch.starts_with("diff --git a/file.txt b/file.txt\n"), "{patch}");
+        assert!(patch.contains("@@ -1,5 +1,5 @@\n"), "{patch}");
+        assert!(patch.contains("-three\n+THREE\n"), "{patch}");
+        // The context is the lines either side, and they are the same on both
+        // sides of the patch because outside the hunk the two files agree.
+        assert!(patch.contains(" two\n-three"), "{patch}");
+        assert!(patch.contains("+THREE\n four\n"), "{patch}");
+    }
+
+    #[test]
+    fn staging_a_hunk_puts_that_much_of_the_file_in_the_index() {
+        let Some(dir) = a_repo("staging") else {
+            return; // No git on this machine, which is not a failing test.
+        };
+        let file = dir.join("file.txt");
+        let repo = Repo::find(&file).expect("a repository");
+        let old = repo.committed(&file).expect("committed");
+        // Two changes, and only the first one is staged.
+        let new = "ONE\ntwo\nTHREE\n";
+        std::fs::write(&file, new).expect("written");
+        let hunk = hunks(&old, new).into_iter().next().expect("a hunk");
+        let patch = patch_for("file.txt", &old, new, &hunk);
+        repo.stage(&file, &patch).expect("git took the patch");
+
+        let staged = std::process::Command::new("git")
+            .args(["-C"])
+            .arg(&dir)
+            .args(["show", ":file.txt"])
+            .output()
+            .expect("git ran");
+        assert_eq!(
+            String::from_utf8_lossy(&staged.stdout),
+            "ONE\ntwo\nthree\n",
+            "the first change is in the index and the second is not"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn conflict_markers_are_found_with_both_sides_of_each() {
+        let text = "before\n<<<<<<< HEAD\nmine\n=======\ntheirs\nalso theirs\n>>>>>>> other\nafter\n";
+        let found = conflicts(text);
+        assert_eq!(found.len(), 1);
+        let it = found[0];
+        assert_eq!(it.start, 1);
+        assert_eq!(it.divider, 3);
+        assert_eq!(it.end, 6);
+        assert_eq!(it.ours(), 2..3);
+        assert_eq!(it.theirs(), 4..6);
+    }
+
+    #[test]
+    fn half_a_conflict_is_not_a_conflict() {
+        // A file that talks about merge markers is not a file in a merge.
+        assert!(conflicts("<<<<<<< HEAD\nmine\n").is_empty());
+        assert!(conflicts("nothing here\n").is_empty());
+    }
+
+    #[test]
+    fn a_line_nobody_has_committed_blames_as_itself() {
+        let Some(dir) = a_repo("blame") else {
+            return;
+        };
+        let file = dir.join("file.txt");
+        let repo = Repo::find(&file).expect("a repository");
+        let said = repo.blame(&file, 0).expect("git blamed it");
+        assert!(said.contains("Nobody"), "{said}");
+        assert!(said.contains("first"), "the summary of the commit: {said}");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -676,6 +1104,37 @@ impl Tracker {
     /// Read the committed text again, for a file that has just been saved or
     /// re-read: a save can be what makes git start knowing about it, and a
     /// checkout changes what it says.
+    /// Say what a buffer's committed text is, without asking git.
+    ///
+    /// For the tests: a revert and a stage are worth testing without a
+    /// repository behind them, and where the baseline came from is not the
+    /// part that can be wrong. The marks are worked out again from it, so what
+    /// the margin shows and what a revert puts back cannot disagree.
+    #[cfg(test)]
+    pub fn remember_baseline(&mut self, doc: DocId, base: String) {
+        let marks = marks(&base, "");
+        self.files.insert(
+            doc,
+            Tracked {
+                base: Some(base),
+                marks,
+                // No version this could have been worked out from, so the next
+                // refresh does the work properly.
+                at: -1,
+            },
+        );
+    }
+
+    /// The file as it was committed, for a buffer being tracked.
+    pub fn baseline(&self, doc: DocId) -> Option<&str> {
+        self.files.get(&doc)?.base.as_deref()
+    }
+
+    /// The repository the tracked files are in.
+    pub fn repo(&self) -> Option<&Repo> {
+        self.repo.as_ref()
+    }
+
     pub fn forget_baseline(&mut self, doc: DocId) {
         self.files.remove(&doc);
     }

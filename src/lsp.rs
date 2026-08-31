@@ -118,6 +118,63 @@ pub enum Ask {
         doc: DocId,
         at: usize,
     },
+    /// Whether the thing under the cursor can be renamed at all, asked before
+    /// the box is put up. See [`Servers::prepare_rename`].
+    PrepareRename {
+        doc: DocId,
+        at: usize,
+    },
+    /// Everywhere in *this* file the thing under the cursor is mentioned, so
+    /// that all of them can be lit up while the cursor sits on one.
+    Highlights {
+        doc: DocId,
+        /// Where it was asked about, so an answer that arrives after the
+        /// cursor has moved on is dropped rather than lighting up the wrong
+        /// word.
+        at: usize,
+        version: i32,
+    },
+    /// The little notes a server offers above a line — how many uses a
+    /// function has, "Run test". See [`crate::doc::Lens`].
+    Lenses {
+        doc: DocId,
+        version: i32,
+    },
+    /// Who calls the thing under the cursor. The first half: the server
+    /// answers with an item, which is then asked for its callers.
+    PrepareCalls {
+        doc: DocId,
+        /// Whether we are asking who calls it or what it calls.
+        incoming: bool,
+    },
+    /// The second half: the calls themselves, to be listed.
+    Calls {
+        incoming: bool,
+    },
+    /// The types a server has worked out for a file, to colour it with what
+    /// tree-sitter cannot know. See [`Servers::semantic_tokens`].
+    SemanticTokens {
+        doc: DocId,
+        /// Which version of the file they were worked out against. Tokens are
+        /// positions, and positions in a file that has been typed in since are
+        /// colours in the wrong places.
+        version: i32,
+        /// The server's own legend, carried along because the answer names
+        /// its token types by their number in it.
+        legend: Vec<String>,
+    },
+    /// The types and parameter names a server would write into a file that
+    /// does not say them. See [`Servers::inlay_hints`].
+    InlayHints {
+        doc: DocId,
+        version: i32,
+    },
+    /// What is wrong with a file, asked for rather than waited for. The newer
+    /// half of the protocol: some servers no longer volunteer diagnostics at
+    /// all. See [`Servers::pull_diagnostics`].
+    PulledDiagnostics {
+        doc: DocId,
+    },
     /// A code action we asked the server to work out the details of before
     /// applying it.
     ResolveAction,
@@ -237,6 +294,40 @@ impl Server {
             self.capabilities.get(capability),
             None | Some(Value::Null) | Some(Value::Bool(false))
         )
+    }
+
+    /// Whether it will answer `textDocument/prepareRename`.
+    ///
+    /// Nested rather than a capability of its own: `renameProvider` is `true`
+    /// for a server that renames and an object saying `prepareProvider` for
+    /// one that will also say in advance whether a thing can be renamed.
+    /// Asking a server that said only `true` gets an error back.
+    fn prepares_rename(&self) -> bool {
+        self.capabilities
+            .get("renameProvider")
+            .and_then(|it| it.get("prepareProvider"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// The token types this server names, in the order it names them.
+    ///
+    /// An answer of semantic tokens says which type each one is by its number
+    /// in this list, so without it the answer is a list of numbers meaning
+    /// nothing. Every server has its own.
+    fn semantic_legend(&self) -> Vec<String> {
+        self.capabilities
+            .get("semanticTokensProvider")
+            .and_then(|it| it.get("legend"))
+            .and_then(|it| it.get("tokenTypes"))
+            .and_then(Value::as_array)
+            .map(|types| {
+                types
+                    .iter()
+                    .map(|t| t.as_str().unwrap_or_default().to_string())
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     /// How this server wants to be told about an edit.
@@ -827,6 +918,170 @@ impl Servers {
         )
     }
 
+    /// Ask whether this can be renamed, and what the name is now.
+    ///
+    /// A server that supports it answers with the range of the name — or with
+    /// nothing at all, which is it saying "not that". Asking first is the
+    /// difference between being told you cannot rename a keyword and typing a
+    /// new name for it, pressing Enter, and being told then.
+    ///
+    /// `None` where no server does this, which is not an error: the rename box
+    /// opens anyway, exactly as it did before this existed.
+    pub fn prepare_rename(&mut self, doc: &Document, at: usize) -> Option<ServerId> {
+        let id = self
+            .for_doc(doc)
+            .into_iter()
+            .find(|id| self.get(*id).is_some_and(Server::prepares_rename))?;
+        let path = doc.path.clone()?;
+        let (line, character) = doc.lsp_point_at(at);
+        let server = self.get_mut(id)?;
+        server.request(
+            "textDocument/prepareRename",
+            json!({
+                "textDocument": { "uri": uri_of(&path) },
+                "position": { "line": line, "character": character },
+            }),
+            Ask::PrepareRename { doc: doc.id, at },
+        );
+        Some(id)
+    }
+
+    /// Ask where else in this file the thing under the cursor is mentioned.
+    pub fn highlights(&mut self, doc: &Document, at: usize) -> Option<ServerId> {
+        self.ask_at(
+            doc,
+            at,
+            "textDocument/documentHighlight",
+            "documentHighlightProvider",
+            Ask::Highlights {
+                doc: doc.id,
+                at,
+                version: doc.version,
+            },
+            json!({}),
+        )
+    }
+
+    /// Ask for the notes a server would put above the lines of this file.
+    pub fn lenses(&mut self, doc: &Document) -> Option<ServerId> {
+        let path = doc.path.clone()?;
+        let id = self.who_can(doc, "codeLensProvider")?;
+        let server = self.get_mut(id)?;
+        server.request(
+            "textDocument/codeLens",
+            json!({ "textDocument": { "uri": uri_of(&path) } }),
+            Ask::Lenses {
+                doc: doc.id,
+                version: doc.version,
+            },
+        );
+        Some(id)
+    }
+
+    /// Ask what the thing under the cursor is, as far as the call hierarchy is
+    /// concerned. The answer is fed back as [`Servers::calls`].
+    pub fn prepare_calls(&mut self, doc: &Document, at: usize, incoming: bool) -> Option<ServerId> {
+        self.ask_at(
+            doc,
+            at,
+            "textDocument/prepareCallHierarchy",
+            "callHierarchyProvider",
+            Ask::PrepareCalls {
+                doc: doc.id,
+                incoming,
+            },
+            json!({}),
+        )
+    }
+
+    /// The second half of a call hierarchy question: who calls this item, or
+    /// what it calls.
+    pub fn calls(&mut self, id: ServerId, item: Value, incoming: bool) -> Option<ServerId> {
+        let method = match incoming {
+            true => "callHierarchy/incomingCalls",
+            false => "callHierarchy/outgoingCalls",
+        };
+        let server = self.get_mut(id)?;
+        server.request(method, json!({ "item": item }), Ask::Calls { incoming });
+        Some(id)
+    }
+
+    /// Ask a server to colour the file the way it understands it.
+    ///
+    /// tree-sitter knows the shape of the code; only the server knows what the
+    /// names in it *are*. `Foo(x)` is a call or a constructor, `x` is a
+    /// variable or a constant, and the difference is a lookup rather than a
+    /// parse. The answer arrives beside the tree-sitter colours rather than
+    /// instead of them — see [`crate::doc::Document::semantic`].
+    pub fn semantic_tokens(&mut self, doc: &Document) -> Option<ServerId> {
+        let path = doc.path.clone()?;
+        let id = self.who_can(doc, "semanticTokensProvider")?;
+        let legend = self.get(id)?.semantic_legend();
+        if legend.is_empty() {
+            // A server that offered the capability and no legend has told us
+            // nothing we could read an answer with.
+            return None;
+        }
+        let server = self.get_mut(id)?;
+        server.request(
+            "textDocument/semanticTokens/full",
+            json!({ "textDocument": { "uri": uri_of(&path) } }),
+            Ask::SemanticTokens {
+                doc: doc.id,
+                version: doc.version,
+                legend,
+            },
+        );
+        Some(id)
+    }
+
+    /// Ask for the types and parameter names that are true of the code but not
+    /// written in it.
+    pub fn inlay_hints(&mut self, doc: &Document) -> Option<ServerId> {
+        let path = doc.path.clone()?;
+        let id = self.who_can(doc, "inlayHintProvider")?;
+        let last = doc.len_lines().saturating_sub(1);
+        let server = self.get_mut(id)?;
+        server.request(
+            "textDocument/inlayHint",
+            json!({
+                "textDocument": { "uri": uri_of(&path) },
+                // The whole file. A range would be less work for the server
+                // and more for us: the answer would have to be stitched into
+                // what is already held every time the view scrolled, and a
+                // file is not usually big enough for the difference to be
+                // worth a second kind of bug.
+                "range": {
+                    "start": { "line": 0, "character": 0 },
+                    "end": { "line": last, "character": 0 },
+                },
+            }),
+            Ask::InlayHints {
+                doc: doc.id,
+                version: doc.version,
+            },
+        );
+        Some(id)
+    }
+
+    /// Ask a server what is wrong with a file.
+    ///
+    /// The other way round from `publishDiagnostics`, where the server says so
+    /// when it feels like it. Both are in the protocol and a server does one
+    /// or the other; a client that only listens hears nothing at all from the
+    /// ones that wait to be asked.
+    pub fn pull_diagnostics(&mut self, doc: &Document) -> Option<ServerId> {
+        let path = doc.path.clone()?;
+        let id = self.who_can(doc, "diagnosticProvider")?;
+        let server = self.get_mut(id)?;
+        server.request(
+            "textDocument/diagnostic",
+            json!({ "textDocument": { "uri": uri_of(&path) } }),
+            Ask::PulledDiagnostics { doc: doc.id },
+        );
+        Some(id)
+    }
+
     pub fn rename(&mut self, doc: &Document, at: usize, to: &str) -> Option<ServerId> {
         self.ask_at(
             doc,
@@ -1306,6 +1561,39 @@ impl Servers {
     }
 }
 
+/// The token types textfold knows what to do with, which is what it tells a
+/// server it understands.
+///
+/// The standard list, less the ones that would only repeat what the grammar
+/// already colours. What comes back is numbered against the *server's* legend
+/// rather than this one — see [`Server::semantic_legend`] — so this is a
+/// statement of what we can read, not a promise about the numbering.
+const SEMANTIC_TOKEN_TYPES: &[&str] = &[
+    "namespace",
+    "type",
+    "class",
+    "enum",
+    "interface",
+    "struct",
+    "typeParameter",
+    "parameter",
+    "variable",
+    "property",
+    "enumMember",
+    "event",
+    "function",
+    "method",
+    "macro",
+    "keyword",
+    "modifier",
+    "comment",
+    "string",
+    "number",
+    "regexp",
+    "operator",
+    "decorator",
+];
+
 /// What textfold tells a server it can do.
 ///
 /// Claiming a capability we do not implement is worse than not claiming it: a
@@ -1365,7 +1653,32 @@ fn capabilities() -> Value {
             "references": {},
             "documentSymbol": { "hierarchicalDocumentSymbolSupport": true },
             "formatting": {},
-            "rename": { "prepareSupport": false },
+            "rename": { "prepareSupport": true },
+            "documentHighlight": { "dynamicRegistration": false },
+            "codeLens": { "dynamicRegistration": false },
+            "callHierarchy": { "dynamicRegistration": false },
+            "inlayHint": {
+                "dynamicRegistration": false,
+                "resolveSupport": { "properties": [] },
+            },
+            "semanticTokens": {
+                "dynamicRegistration": false,
+                // What we can actually make use of: a whole file at a time,
+                // as one flat list. Deltas and per-range requests are a
+                // promise to keep a token cache in step with every edit, and
+                // claiming them would have servers sending edits to a cache
+                // that is not there.
+                "requests": { "full": true, "range": false },
+                "formats": ["relative"],
+                "tokenTypes": SEMANTIC_TOKEN_TYPES,
+                "tokenModifiers": [],
+                "overlappingTokenSupport": false,
+                "multilineTokenSupport": false,
+            },
+            "diagnostic": {
+                "dynamicRegistration": false,
+                "relatedDocumentSupport": false,
+            },
             "publishDiagnostics": { "relatedInformation": true },
             "codeAction": {
                 "codeActionLiteralSupport": {
