@@ -969,6 +969,19 @@ impl Popup {
     }
 }
 
+/// A one-line label for a piece of chrome the pointer is sitting on.
+///
+/// Not a [`Popup`]: a hover is about a place in the text, folds, scrolls and
+/// can be read with the keyboard, and none of that applies to "this tab is
+/// `src/app/mod.rs`". This is a string and the box it belongs under, and it
+/// goes away the moment the pointer leaves that box.
+pub struct Tip {
+    pub text: String,
+    /// What it is about, so it can be drawn against it and dropped when the
+    /// pointer moves off it.
+    pub about: Rect,
+}
+
 /// Fixes the language server is holding ready for the problem under the
 /// cursor.
 pub struct Gathered {
@@ -1344,6 +1357,11 @@ pub struct App {
     pub overlay: Overlay,
     pub completion: Option<Completion>,
     pub hover: Option<Popup>,
+    /// A label for what the pointer has come to rest on, where the thing
+    /// itself has no room to say it: a tab is as wide as a file's name, and
+    /// the question you have when two of them say `mod.rs` is which directory
+    /// each one came from. See [`Tip`].
+    pub tip: Option<Tip>,
     pub signature: Option<Popup>,
     pub status: Status,
 
@@ -1515,6 +1533,7 @@ impl App {
             settings_pair: None,
             checked_for_updates: false,
             hover: None,
+            tip: None,
             signature: None,
             status: Status::quiet(),
             lsp,
@@ -1821,7 +1840,12 @@ impl App {
             && since.elapsed() >= HOVER_DELAY
         {
             self.resting = None;
-            self.hover_at_screen(column, row);
+            // Chrome first: a tab under the pointer is a question about the
+            // file rather than a question about the text, and the text is not
+            // there anyway.
+            if !self.tip_at_screen(column, row) {
+                self.hover_at_screen(column, row);
+            }
         }
         self.check_fixes();
         self.check_highlights();
@@ -2310,6 +2334,9 @@ impl App {
         // that moved to the keys ten minutes ago. Moving the mouse a single
         // cell brings it back.
         self.pointer = None;
+        // And a label about something the pointer was on is about something
+        // nobody is pointing at any more.
+        self.tip = None;
         let key = Key::from_event(event);
 
         // One key that means the same thing whatever is on top of the editor.
@@ -2717,6 +2744,21 @@ pub fn short(path: &Path, project: &Path) -> String {
     if let Ok(rest) = path.strip_prefix(project) {
         return rest.display().to_string();
     }
+    if let Some(home) = dirs::home_dir()
+        && let Ok(rest) = path.strip_prefix(&home)
+    {
+        return format!("~/{}", rest.display());
+    }
+    path.display().to_string()
+}
+
+/// A path in full, with `~` standing in for your home directory.
+///
+/// The whole path rather than [`short`]'s: this is for saying which of two
+/// files called `mod.rs` a tab is, and a path cut off at the project root
+/// answers that for files in the project and nothing else. Home is shortened
+/// because `~` is shorter, unambiguous, and how everyone writes it anyway.
+pub fn tilde(path: &Path) -> String {
     if let Some(home) = dirs::home_dir()
         && let Ok(rest) = path.strip_prefix(&home)
     {

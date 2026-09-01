@@ -32,7 +32,57 @@ fn screen(text: &str, then: impl FnOnce(&mut App)) -> (Buffer, App) {
     (terminal.backend().buffer().clone(), app)
 }
 
-/// Every cell drawn in the given background, as (x, y).
+/// The editor with a label up about the first tab, drawn at a given width.
+fn tab_tip_rows(width: u16, text: &str) -> Vec<String> {
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let mut app = App::new(Config::default(), tx);
+    app.tip = Some(crate::app::Tip {
+        text: text.to_string(),
+        about: Rect::new(0, 0, 10, 1),
+    });
+    let mut terminal = Terminal::new(TestBackend::new(width, 8)).expect("a terminal to draw on");
+    terminal
+        .draw(|frame| super::draw(frame, &mut app))
+        .expect("drawn");
+    let buffer = terminal.backend().buffer().clone();
+    (0..buffer.area.height)
+        .map(|y| row_text(&buffer, y))
+        .collect()
+}
+
+#[test]
+fn a_label_about_a_tab_is_drawn_under_that_tab() {
+    // The whole point of it: a tab is as wide as a file name, and two of them
+    // called `mod.rs` are the same tab until you point at one.
+    let rows = tab_tip_rows(60, "~/work/deep/inside/mod.rs");
+    assert!(
+        rows[2].contains("~/work/deep/inside/mod.rs"),
+        "{:?}",
+        &rows[..4]
+    );
+    // Under the row of tabs, against the tab it is about, rather than over
+    // the middle of the screen.
+    assert!(rows[1].starts_with('\u{256d}'), "{:?}", &rows[..4]);
+}
+
+#[test]
+fn a_path_too_wide_for_the_screen_loses_its_front() {
+    // The end of a path is the file, which is the part you are asking about.
+    // Cutting the tail off would leave a label saying `/home/somebody/very…`
+    // for every tab in the project.
+    let rows = tab_tip_rows(24, "/home/me/a/very/long/way/down/mod.rs");
+    let said = &rows[2];
+    assert!(said.contains("mod.rs"), "{said:?}");
+    assert!(said.contains('\u{2026}'), "nothing was elided: {said:?}");
+    assert!(
+        !said.contains("/home"),
+        "it cut the wrong end off: {said:?}"
+    );
+    // And it stays on the screen.
+    assert!(rows.iter().all(|row| row.chars().count() <= 24), "{rows:?}");
+}
+
+/// Every cell drawn in the given background, as (x, y)./// Every cell drawn in the given background, as (x, y).
 fn cells_on(buffer: &Buffer, bg: Color) -> Vec<(u16, u16)> {
     let area = buffer.area;
     let mut found = Vec::new();

@@ -456,3 +456,47 @@ fn a_block_over_a_short_line_puts_a_cursor_at_the_end_of_it() {
     );
     assert_eq!(middle.head, text::line_end(rope, 1), "at the end of it");
 }
+
+#[test]
+fn resting_on_a_tab_says_which_file_it_is() {
+    // The whole point of the thing: two tabs both called `mod.rs` and no way
+    // to tell them apart until you point at one.
+    let (mut app, _rx) = editor();
+    let path = scratch("tab-tip.txt");
+    std::fs::write(&path, "text\n").expect("written");
+    app.open_path(&path);
+    let id = app.view().doc;
+    app.hits.tabs = vec![
+        (Rect::new(0, 0, 10, 1), id, false),
+        (Rect::new(10, 0, 1, 1), id, true),
+    ];
+
+    assert!(app.tip_at_screen(3, 0), "nothing was said about the tab");
+    let tip = app.tip.as_ref().expect("a label");
+    assert!(
+        tip.text.ends_with("tab-tip.txt") && tip.text.contains('/'),
+        "the label says {} rather than where the file is",
+        tip.text
+    );
+    // The name and the close cross are one tab as far as the label goes, so
+    // crossing between them does not take it away and does not start again.
+    assert_eq!(tip.about, Rect::new(0, 0, 11, 1));
+    app.mouse_moved(10, 0);
+    assert!(app.tip.is_some(), "the label went as the pointer crossed it");
+    // And leaving the tab does.
+    app.mouse_moved(3, 8);
+    assert!(app.tip.is_none(), "the label outlived the tab it was about");
+
+    std::fs::remove_dir_all(path.parent().unwrap()).ok();
+}
+
+#[test]
+fn a_buffer_with_no_file_behind_it_has_nothing_to_say() {
+    // `untitled 1` came from nowhere, and a box repeating the tab's own name
+    // under the tab is a box for nothing.
+    let (mut app, _rx) = editor();
+    let id = app.view().doc;
+    app.hits.tabs = vec![(Rect::new(0, 0, 12, 1), id, false)];
+    assert!(!app.tip_at_screen(3, 0));
+    assert!(app.tip.is_none());
+}

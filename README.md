@@ -438,6 +438,7 @@ them wrong.
 | click a hover | put the keyboard in it; drag to select, double click for a word |
 | Ctrl-click a name in a hover | open where it is defined, in a tab |
 | click a tab | switch to it — the × closes it |
+| hover a tab | the full path of the file it is for |
 | drag a tab | move it along the row |
 | wheel over the tabs | walk along them, when there are more open than fit |
 | click a ‹ or › | the next tab that way |

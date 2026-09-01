@@ -9,6 +9,7 @@ use super::*;
 
 use ratatui::text::Line;
 use ratatui::widgets::{Block, BorderType, Clear};
+use unicode_segmentation::UnicodeSegmentation;
 
 pub(super) fn draw_floating(frame: &mut Frame, app: &mut App, ground: Color) -> Option<Position> {
     // Beside the cursor first, then over the middle: a suggestion belongs
@@ -19,6 +20,11 @@ pub(super) fn draw_floating(frame: &mut Frame, app: &mut App, ground: Color) -> 
         draw_completion(frame, app, at, ground);
         draw_hover(frame, app, at, ground);
     }
+
+    // Under everything else that floats, and above the text: a label about a
+    // tab is the smallest thing on the screen and the least entitled to be in
+    // the way of a list somebody opened.
+    draw_tip(frame, app, ground);
 
     match &app.overlay {
         Overlay::Picker(_) => draw_picker(frame, app, ground),
@@ -288,6 +294,61 @@ pub(super) fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, gr
     if let Some(completion) = &mut app.completion {
         completion.area = area;
     }
+}
+
+/// The one-line label for whatever chrome the pointer has come to rest on.
+///
+/// Drawn against the thing it is about rather than against the cursor, and
+/// kept on the screen: a tab near the right-hand edge would otherwise hang its
+/// label off the side, which is where the half of the path you wanted is.
+pub(super) fn draw_tip(frame: &mut Frame, app: &mut App, ground: Color) {
+    let Some(tip) = &app.tip else { return };
+    // One box at a time, and a suggestion or a documentation box is the one
+    // being read.
+    if app.completion.is_some() || app.hover.is_some() {
+        return;
+    }
+    let theme = app.theme;
+    let screen = app.screen;
+    let room = screen.width.saturating_sub(2) as usize;
+    let text = elide_start(&tip.text, room);
+    let width = (text::str_width(&text) + 2) as u16;
+    let at = Position::new(tip.about.x, tip.about.y + tip.about.height - 1);
+    let area = beside(screen, at, width, 3);
+
+    frame.render_widget(Clear, area);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(theme.faint))
+        .style(box_style(&theme, ground));
+    let inside = block.inner(area);
+    frame.render_widget(block, area);
+    frame.buffer_mut().set_stringn(
+        inside.x,
+        inside.y,
+        &text,
+        inside.width as usize,
+        Style::new().fg(theme.foreground),
+    );
+}
+
+/// Cut a string to fit by taking off the front, which is what a path wants:
+/// the end of it is the file, and the file is the part you are asking about.
+fn elide_start(text: &str, width: usize) -> String {
+    if text::str_width(text) <= width || width < 2 {
+        return text::truncate(text, width);
+    }
+    let mut out = String::new();
+    let mut used = 0;
+    for g in text.graphemes(true).rev() {
+        let w = text::str_width(g).max(1);
+        if used + w > width - 1 {
+            break;
+        }
+        out.insert_str(0, g);
+        used += w;
+    }
+    format!("…{out}")
 }
 
 pub(super) fn draw_hover(frame: &mut Frame, app: &mut App, at: Position, ground: Color) {

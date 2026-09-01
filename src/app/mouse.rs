@@ -55,6 +55,9 @@ impl App {
             _ => 1,
         };
         self.last_click = Some((now, column, row, count));
+        // Clicking a tab is having read the label and decided; clicking
+        // anything else is having left it.
+        self.tip = None;
         self.click_away_from_suggestions(column, row);
 
         // A divider, before anything else looks at where the click landed. It
@@ -353,6 +356,15 @@ impl App {
             self.resting = None;
             return;
         }
+        // A label already up for the thing under the pointer stays up, and
+        // wandering about inside that thing does not start the clock again:
+        // a tab is several cells wide and it is one tab all the way across.
+        if let Some(tip) = &self.tip {
+            if hits(tip.about, column, row) {
+                return;
+            }
+            self.tip = None;
+        }
         if let Some(hover) = &mut self.hover {
             hover.pointer = None;
         }
@@ -402,6 +414,7 @@ impl App {
         // part-way through, so the suggestions go — including where the menu
         // is about to be drawn over the top of them.
         self.completion = None;
+        self.tip = None;
 
         // A menu already open is closed by a second right click, the way a
         // second press of any key that opens something closes it.
@@ -843,6 +856,52 @@ impl App {
         }
         let left = self.view().left as isize + by;
         self.view_mut().left = left.max(0) as usize;
+    }
+
+    /// A label for the chrome under the pointer, if that chrome has anything
+    /// to say. Answers whether it put one up.
+    ///
+    /// Only the tabs, so far. A tab is as wide as a file's name and no wider,
+    /// which is the right thing to look at and the wrong thing to work from
+    /// the moment two of them say `mod.rs` — so resting on one says where it
+    /// came from.
+    pub(super) fn tip_at_screen(&mut self, column: u16, row: u16) -> bool {
+        let Some(id) = self
+            .hits.tabs
+            .iter()
+            .find(|(area, _, _)| hits(*area, column, row))
+            .map(|(_, id, _)| *id)
+        else {
+            return false;
+        };
+        // The whole tab, not the one column of it the pointer happens to be
+        // in: the name and the close cross are two hit boxes and one tab, and
+        // a label that flickered as you crossed between them would be a
+        // label about the wrong thing.
+        let about = self
+            .hits.tabs
+            .iter()
+            .filter(|(_, other, _)| *other == id)
+            .map(|(area, _, _)| *area)
+            .reduce(|one, other| one.union(other))
+            .unwrap_or_default();
+        let Some(doc) = self.docs.iter().find(|d| d.id == id) else {
+            return false;
+        };
+        let text = match (&doc.path, &doc.origin) {
+            (Some(path), _) => tilde(path),
+            // Not a file: a class out of a jar, or whatever else a language
+            // server handed over. Where it came from is still the answer.
+            (None, Some(origin)) => origin.clone(),
+            (None, None) => return false,
+        };
+        // A label that says what the tab already says is a box over the text
+        // for nothing.
+        if text == doc.name {
+            return false;
+        }
+        self.tip = Some(Tip { text, about });
+        true
     }
 
     /// Whether a point is on the row of tabs. The wheel there scrolls the tabs
