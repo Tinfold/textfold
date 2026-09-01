@@ -897,13 +897,23 @@ impl App {
         self.offer = Some(Gathered::new(id, range.start(), asked));
     }
 
+    /// Lay the file out: every formatter that has anything to do with it, in
+    /// the order you have said they go in.
+    ///
+    /// The same list a save runs, through the same queue — see
+    /// [`App::format_steps`]. It used to ask the language server and nobody
+    /// else, which meant that a project formatted by `prettier` came out one
+    /// way when you saved it and another way when you asked for it.
     pub(super) fn format(&mut self) {
-        let tab_width = self.config.tab_width();
-        let spaces = matches!(self.here().indent, Indent::Spaces(_));
-        let (doc, lsp) = self.doc_and_lsp();
-        if lsp.format(doc, tab_width, spaces).is_none() {
-            self.say("no language server that can format this");
+        if self.before_save.is_some() {
+            return;
         }
+        let id = self.view().doc;
+        let steps = self.format_steps(id, true);
+        if steps.is_empty() {
+            return self.say("nothing here knows how to format this file");
+        }
+        self.begin(id, steps, false, None);
     }
 
     pub(super) fn start_rename(&mut self) {

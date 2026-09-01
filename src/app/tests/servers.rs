@@ -617,3 +617,51 @@ fn inlay_labels_come_as_a_string_or_as_pieces() {
     assert_eq!(hints[0].text, "count:");
     assert_eq!(hints[1].text, ": i32", "the pieces are one label");
 }
+
+#[test]
+fn formatting_by_hand_and_formatting_on_a_save_are_the_same_list() {
+    // They were not. `format` asked the language server and nobody else,
+    // while a save also ran whatever formatter a plugin had brought — so a
+    // project laid out by `prettier` came out one way when you saved it and
+    // another way when you asked for it, which is the sort of difference you
+    // only ever notice as a diff you did not write. One list now, and both
+    // doors come through it.
+    let (mut app, _rx) = editor();
+    let id = app.view().doc;
+    // Nothing attached: no tools for a scratch buffer, and no server.
+    assert!(app.format_steps(id, true).is_empty());
+    // So the command says so rather than starting a queue that does nothing.
+    app.run(Cmd::FORMAT);
+    assert!(app.before_save.is_none(), "it started a save with no steps");
+    assert!(app.status.text.contains("format"), "{}", app.status.text);
+}
+
+#[test]
+fn the_formatter_order_is_what_you_said_and_the_rest_follows() {
+    let (mut app, _rx) = editor();
+    let prettier = Step::Rewrite(a_formatter("web/prettier"));
+    let black = Step::Rewrite(a_formatter("python/black"));
+
+    // Nothing said: the order they were built in, which is the tools first
+    // and the language server last — a tool rewrites the whole file, and the
+    // server tidies what is left.
+    let mut steps = vec![prettier.clone(), black.clone(), Step::Format];
+    app.in_formatter_order(&mut steps);
+    assert_eq!(steps, vec![prettier.clone(), black.clone(), Step::Format]);
+
+    // The server first, by name.
+    app.config.formatter_order = vec!["lsp".into()];
+    let mut steps = vec![prettier.clone(), black.clone(), Step::Format];
+    app.in_formatter_order(&mut steps);
+    assert_eq!(steps, vec![Step::Format, prettier.clone(), black.clone()]);
+
+    // A tool by the bare name it answers to, rather than its whole id.
+    app.config.formatter_order = vec!["black".into(), "lsp".into()];
+    let mut steps = vec![prettier.clone(), black.clone(), Step::Format];
+    app.in_formatter_order(&mut steps);
+    assert_eq!(
+        steps,
+        vec![black.clone(), Step::Format, prettier.clone()],
+        "and prettier, which was not named, still runs — last"
+    );
+}

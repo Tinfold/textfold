@@ -461,8 +461,11 @@ impl App {
                 row("Fold this", Cmd::TOGGLE_FOLD).enabled(self.here().syntax.is_some()),
                 row("Unfold everything", Cmd::UNFOLD_ALL).enabled(!self.view().folds.is_empty()),
                 row("Comment out", Cmd::TOGGLE_COMMENT).enabled(writable),
+                // Lit for a tool as readily as for a server: a project whose
+                // formatter is `prettier` has a formatter, and a menu row
+                // that says otherwise is a menu row that is wrong.
                 row("Reformat the file", Cmd::FORMAT)
-                    .enabled(can("documentFormattingProvider") && writable),
+                    .enabled(self.can_format(self.view().doc) && writable),
                 // Two rows rather than one, because they are two different
                 // things and a file usually wants both: the formatter lays
                 // the code out, and this is what takes the unused import

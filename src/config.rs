@@ -59,6 +59,27 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format_on_save: Option<bool>,
 
+    /// What order the things that lay a file out run in, by name: `"lsp"`
+    /// for the language server's own formatter, and a tool by its command
+    /// name — `"prettier"`, or `"local/prettier"` in full.
+    ///
+    /// ```json
+    /// "formatter_order": ["prettier", "lsp"]
+    /// ```
+    ///
+    /// This names an *order*, not a set. Anything that would format the file
+    /// and is not named here still runs, after everything that is — so naming
+    /// one thing moves it to the front rather than quietly switching the rest
+    /// off. To stop a tool formatting at all, turn the tool off; to stop the
+    /// language server, there is nothing to say, because a server that has a
+    /// formatter is a server you asked for.
+    ///
+    /// Absent means tools first and the language server last, which is the
+    /// order a save has always used: a tool rewrites the whole file and the
+    /// server tidies what is left.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub formatter_order: Vec<String>,
+
     /// Which of a language server's own fixes to apply when you save:
     /// `["source.fixAll", "source.organizeImports"]`.
     ///
@@ -320,6 +341,16 @@ impl Config {
         self.format_on_save.unwrap_or(false)
     }
 
+    /// Where a formatter comes in the order, by whichever name it answers to.
+    /// Anything unnamed sorts after everything named, keeping the order it
+    /// already had. See [`Config::formatter_order`].
+    pub fn formatter_rank(&self, names: [&str; 2]) -> usize {
+        self.formatter_order
+            .iter()
+            .position(|said| names.iter().any(|name| said.eq_ignore_ascii_case(name)))
+            .unwrap_or(usize::MAX)
+    }
+
     /// The server-side fixes to apply on save. Empty means none.
     pub fn code_actions_on_save(&self) -> &[String] {
         self.code_actions_on_save.as_deref().unwrap_or(&[])
@@ -433,6 +464,29 @@ pub fn config_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_formatter_order_names_an_order_rather_than_a_set() {
+        let config = Config {
+            formatter_order: vec!["prettier".into(), "lsp".into()],
+            ..Default::default()
+        };
+        // By either name a tool answers to: its command id in full, or the
+        // bare name at the end of it.
+        assert_eq!(config.formatter_rank(["web/prettier", "prettier"]), 0);
+        assert_eq!(config.formatter_rank(["lsp", "language-server"]), 1);
+        // Anything unnamed sorts after everything named rather than being
+        // dropped. Naming one formatter moves it to the front; it does not
+        // switch off the ones you did not think to write down.
+        assert_eq!(
+            config.formatter_rank(["python/black", "black"]),
+            usize::MAX
+        );
+        // And saying nothing at all leaves everything exactly where it was.
+        let quiet = Config::default();
+        assert_eq!(quiet.formatter_rank(["lsp", "language-server"]), usize::MAX);
+        assert_eq!(quiet.formatter_rank(["web/prettier", "prettier"]), usize::MAX);
+    }
 
     #[test]
     fn nothing_set_means_the_defaults() {

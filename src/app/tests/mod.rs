@@ -201,6 +201,26 @@ fn docked_panel(id: &str, edge: Option<&str>, size: Option<u16>) -> &'static cra
     }))
 }
 
+/// A formatter a plugin brought, as a `&'static Tool` the step queue holds.
+/// Leaked, the same way [`docked_panel`] is and for the same reason: that is
+/// what the command table hands out.
+fn a_formatter(id: &str) -> &'static crate::plugin::Tool {
+    Box::leak(Box::new(crate::plugin::Tool {
+        id: id.to_string(),
+        name: id.split('/').next_back().unwrap_or(id).to_string(),
+        about: "lays the file out".into(),
+        command: id.split('/').next_back().unwrap_or(id).to_string(),
+        args: Vec::new(),
+        languages: Vec::new(),
+        roots: Vec::new(),
+        stdin: true,
+        output: crate::plugin::Output::Replace,
+        pattern: None,
+        on_save: true,
+        builds: false,
+    }))
+}
+
 /// Plugin settings open on a plugin that certainly exists, with a real
 /// file made and then taken away again. `None` where there is nowhere to
 /// keep settings, or where a real one is already there and must not be

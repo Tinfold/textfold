@@ -321,13 +321,12 @@ impl App {
             return self.write_now(to);
         }
         let mut steps = self.fix_steps(id, self.config.code_actions_on_save());
-        // A tool that rewrites the file is a formatter, so it goes where the
-        // formatter goes: after the fixes, which put text in, and before the
-        // write, which is the point of all this.
-        steps.extend(self.rewriters_on_save(id).into_iter().map(Step::Rewrite));
-        if self.config.format_on_save() {
-            steps.push(Step::Format);
-        }
+        // Then everything that lays the file out, in whatever order you have
+        // said they go in — the same list Alt-Shift-F runs, so that saving a
+        // file and formatting it by hand cannot leave it looking different.
+        // After the fixes, which put text in, and before the write, which is
+        // the point of all this.
+        steps.extend(self.format_steps(id, self.config.format_on_save()));
         if steps.is_empty() {
             return self.write_now(to);
         }
@@ -370,7 +369,7 @@ impl App {
         if steps.is_empty() {
             return self.format();
         }
-        steps.push(Step::Format);
+        steps.extend(self.format_steps(id, true));
         self.begin(id, steps, false, None);
     }
 
@@ -393,8 +392,77 @@ impl App {
             .collect()
     }
 
-    /// The tools a plugin asked to be run on every save that rewrite the file.
-    pub(super) fn rewriters_on_save(&self, doc: DocId) -> Vec<&'static Tool> {
+    /// Everything that lays this file out, in the order it should happen.
+    ///
+    /// One list, and both doors into formatting come through it: `format`,
+    /// and the formatting half of a save. They used to be different — the
+    /// command asked the language server and nothing else, while the save
+    /// also ran whatever tools a plugin had brought — so a project whose
+    /// formatter was `prettier` got one answer from Ctrl-S and a different
+    /// one from Alt-Shift-F, which is the sort of difference you only notice
+    /// as a diff you did not write.
+    ///
+    /// `lsp` says whether the language server's own formatter is one of them.
+    /// It always is for the command, because asking to format a file is
+    /// asking everything that can; on a save it is what `format_on_save`
+    /// decides. A tool is not asked twice: it carries its own `on_save`, and
+    /// having said there when to run it does not need a second switch.
+    pub(super) fn format_steps(&self, doc: DocId, lsp: bool) -> Vec<Step> {
+        // A tool is a program run on a file, so a buffer that is not a file
+        // yet has none. It was already skipped at the far end — `start_tool`
+        // wants a path — and saying so here is what makes "nothing here
+        // knows how to format this file" true rather than nearly true.
+        let saved = self.doc(doc).is_some_and(|d| d.path.is_some());
+        let mut steps: Vec<Step> = match saved {
+            true => self.rewriters(doc).into_iter().map(Step::Rewrite).collect(),
+            false => Vec::new(),
+        };
+        // Only where there is a server that would answer. A dead step costs
+        // nothing at the far end — `advance` walks past one that will not
+        // start — but it is the difference between "nothing here formats this
+        // file" and silence, and that is worth saying.
+        if lsp
+            && let Some(open) = self.doc(doc)
+            && self.lsp.can(open, "documentFormattingProvider")
+        {
+            steps.push(Step::Format);
+        }
+        self.in_formatter_order(&mut steps);
+        steps
+    }
+
+    /// Put the formatters in whatever order the settings ask for.
+    ///
+    /// A stable sort, and that is the whole design: `formatter_order` names
+    /// an order rather than a set, so everything it says nothing about keeps
+    /// the order it already had and sorts after everything it does name.
+    /// Naming one formatter moves that one; it cannot quietly switch off a
+    /// formatter you forgot to write down.
+    pub(super) fn in_formatter_order(&self, steps: &mut [Step]) {
+        steps.sort_by_key(|step| match step {
+            Step::Rewrite(tool) => self.config.formatter_rank([&tool.id, &tool.name]),
+            Step::Format => self.config.formatter_rank(["lsp", "language-server"]),
+            // Not a formatter. Nothing sorts a fix, and nothing should: the
+            // fixes have already run by the time these are put in order.
+            Step::Fix(..) => usize::MAX,
+        });
+    }
+
+    /// Whether anything at all would reformat this file, for the menu row
+    /// that offers to.
+    pub(super) fn can_format(&self, doc: DocId) -> bool {
+        !self.format_steps(doc, true).is_empty()
+    }
+
+    /// The tools a plugin brought that rewrite the file: `black`, `gofmt`,
+    /// `prettier`.
+    ///
+    /// `on_save` is what picks them out, and it is doing double duty on
+    /// purpose: a tool that rewrites the whole file every time you save it is
+    /// the formatter for that language, whatever else it calls itself, and
+    /// one you have to ask for by name is not. So the same flag that puts it
+    /// in the save is what makes `format` know about it.
+    pub(super) fn rewriters(&self, doc: DocId) -> Vec<&'static Tool> {
         let Some(language) = self.doc(doc).map(|d| lang::get(d.language).name.clone()) else {
             return Vec::new();
         };

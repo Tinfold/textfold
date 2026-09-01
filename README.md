@@ -827,9 +827,13 @@ what one of them said.
 
 These are two different things, and a file usually wants both:
 
-- **`format`** (Alt-Shift-F) asks the formatter to lay the code out. One
-  server does this — two formatters disagreeing about a file is worse than
-  either of them alone — and it is the first one attached that offers it.
+- **`format`** (Alt-Shift-F) lays the code out. It runs *everything* that
+  formats this file: the language server that offers to, and any
+  [tool](#tools) a plugin brought that rewrites the file — `prettier`,
+  `black`, `gofmt`. This is the same list a save runs, through the same
+  queue, so saving a file and formatting it by hand cannot leave it looking
+  different. Which order they go in is
+  [`formatter_order`](#choosing-the-order-formatters-run-in).
 - **`fix-all`** asks *every* server what it would fix in this file without
   being asked about any one spot: `source.fixAll`. This is ruff's autofixes,
   and it is the half that formatting is not. A formatter will lay an unused
@@ -847,6 +851,33 @@ save, and pairs with `format_on_save`:
   "code_actions_on_save": ["source.fixAll", "source.organizeImports"]
 }
 ```
+
+`format_on_save` is about the language server's formatter. A tool carries its
+own `on_save` and does not need a second switch, so a `prettier` set up the
+way [Tools](#tools) shows runs on save whether or not this is on.
+
+#### Choosing the order formatters run in
+
+More than one formatter on a file is an ordinary thing to want — `prettier`
+lays TypeScript out and the server sorts the imports — and which goes first
+decides what the file ends up looking like. `formatter_order` says:
+
+```json
+{ "formatter_order": ["prettier", "lsp"] }
+```
+
+`"lsp"` is the language server's own formatter; everything else is a tool, by
+its command name (`prettier`) or its whole id (`web/prettier`).
+
+**It names an order, not a set.** Anything that would format the file and is
+not written here still runs, after everything that is — so naming one
+formatter moves it to the front rather than quietly switching off the ones you
+did not think of. Say nothing and the order is tools first, server last, which
+is what a save has always done.
+
+To stop a tool formatting at all, switch the tool off in `plugins` or take
+`on_save` off it; there is nothing to write here for that, because a list that
+could turn things off is a list you have to keep complete.
 
 Both are off by default, because a setting that lets something else rewrite
 your file is a setting you should have to ask for. With them on, saving is: ask
@@ -1472,7 +1503,8 @@ than repeating forty things you did not.
 | `auto_pairs` | close brackets and quotes |
 | `inlay_hints` | show the types and parameter names a server knows and the code does not say |
 | `code_lenses` | show the notes a server offers about a line — off by default, since in a terminal the room they take is room the code was using |
-| `format_on_save` | run the language server's formatter first |
+| `format_on_save` | run the language server's formatter when you save |
+| `formatter_order` | what order the formatters run in: `["prettier", "lsp"]` — see [Choosing the order formatters run in](#choosing-the-order-formatters-run-in) |
 | `code_actions_on_save` | the servers' own fixes to apply on save — see [Reformatting, and fixing](#reformatting-and-fixing) |
 | `trim_trailing_whitespace` | drop trailing spaces on save |
 | `final_newline` | give a file one if it has none |
@@ -2386,7 +2418,15 @@ in your own settings.
 **`on_save`** puts a tool in the right half of the save. One that rewrites the
 file runs *before* the write, with the formatter, so what lands on disk is what
 you end up looking at; anything else runs *after* it, because a linter's job is
-to look at what has just been saved. So this is a complete `black`-and-`ruff`
+to look at what has just been saved.
+
+On a tool whose output is `"replace"` it does one more thing: it says this is
+*the* formatter for that language, so `format` (Alt-Shift-F) runs it too. A
+program that rewrites the whole file every time you save is the formatter
+whatever else it calls itself, and asking to format a file should not mean
+something different from saving it. `formatter_order` says where it comes
+relative to the language server's own — see [Reformatting, and
+fixing](#reformatting-and-fixing). So this is a complete `black`-and-`ruff`
 setup with no language server involved at all:
 
 ```json
