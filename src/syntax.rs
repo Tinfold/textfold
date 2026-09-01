@@ -508,6 +508,52 @@ mod tests {
     }
 
     #[test]
+    fn a_yaml_key_is_not_the_same_colour_as_its_value() {
+        // The grammar's own query calls every plain scalar a string, and in
+        // YAML that is the whole document. A config file where the keys and
+        // the values are the same colour is a config file with no colours.
+        let found = roles_in(
+            "yaml",
+            "name: build\njobs:\n  - uses: actions/checkout\n    with: { n: 1 }\n",
+        );
+        let role = |want: &str| {
+            found
+                .iter()
+                .find(|(text, _)| text == want)
+                .map(|(_, role)| *role)
+        };
+        assert_eq!(role("name"), Some(Role::Property));
+        assert_eq!(role("build"), Some(Role::String));
+        assert_eq!(role("jobs"), Some(Role::Property));
+        assert_eq!(role("uses"), Some(Role::Property));
+        assert_eq!(role("actions/checkout"), Some(Role::String));
+        // Inside `{ }` as well as under a `-`.
+        assert_eq!(role("n"), Some(Role::Property));
+        assert_eq!(role("1"), Some(Role::Number));
+    }
+
+    #[test]
+    fn yaml_says_what_the_shipped_query_leaves_plain() {
+        let found = roles_in(
+            "yaml",
+            "base: &b\n  a: 1\nchild:\n  <<: *b\n  when: 2001-12-14\n  said: \"a\\nb\"\n",
+        );
+        let role = |want: &str| {
+            found
+                .iter()
+                .find(|(text, _)| text == want)
+                .map(|(_, role)| *role)
+        };
+        // A merge is an instruction, not a field.
+        assert_eq!(role("<<"), Some(Role::Keyword));
+        // A date is a value the grammar has a node for and never emits.
+        assert_eq!(role("when"), Some(Role::Property));
+        assert_eq!(role("2001-12-14"), Some(Role::Number));
+        // And an escape inside a string beats the string it is inside.
+        assert_eq!(role("\\n"), Some(Role::StringEscape));
+    }
+
+    #[test]
     fn capture_names_fall_back_along_their_dots() {
         assert_eq!(role_for("keyword"), Some(Role::Keyword));
         // `keyword.control` has a colour of its own, so a name below it lands

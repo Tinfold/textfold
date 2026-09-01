@@ -911,7 +911,12 @@ fn built_in_grammar(name: &str) -> Option<GrammarSource> {
             tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
             tree_sitter_typescript::HIGHLIGHTS_QUERY,
         ],
-        "yaml" => tree_sitter_yaml::LANGUAGE, [tree_sitter_yaml::HIGHLIGHTS_QUERY],
+        // The grammar's own query calls every plain scalar a string, keys
+        // included, and says so before it says anything else. Ours goes first.
+        "yaml" => tree_sitter_yaml::LANGUAGE, [
+            include_str!("queries/yaml.scm"),
+            tree_sitter_yaml::HIGHLIGHTS_QUERY,
+        ],
     }
 }
 
