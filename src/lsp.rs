@@ -448,7 +448,33 @@ pub struct Servers {
     /// so, by project root. Empty means "whichever one is found", which is
     /// right nearly always and wrong exactly when a project has two.
     pub environments: BTreeMap<PathBuf, PathBuf>,
+    /// The last thing each server said about each file, as it said it: by
+    /// path, then by server, holding the raw `diagnostics` array.
+    ///
+    /// A server checks the whole project and says what it found about every
+    /// file in it, which is nearly always more files than are open. Without
+    /// somewhere to put that, everything said about a file with no buffer
+    /// behind it is dropped — and since a server has now told us and will not
+    /// tell us again until something about that file changes, opening it
+    /// shows a clean file that is not clean. The way out was to save the file
+    /// to provoke a fresh answer, which is not a thing anybody should have to
+    /// know.
+    ///
+    /// Kept raw rather than resolved because resolving needs the text: a
+    /// diagnostic arrives as a line and a column, and turning that into a
+    /// place in a rope needs a rope. See [`Servers::published_for`].
+    published: BTreeMap<PathBuf, BTreeMap<usize, Vec<Value>>>,
 }
+
+/// How many files' problems to hold for buffers that are not open.
+///
+/// A number rather than no limit, because the store is fed by whatever the
+/// servers say and a project can be arbitrarily broken — a first build of
+/// somebody else's checkout can name thousands of files. Only files a server
+/// has something to say about are held at all, since an empty answer removes
+/// the entry rather than storing nothing, so this is reached by projects with
+/// four thousand broken files in them and by nothing else.
+const REMEMBERED_FILES: usize = 4096;
 
 impl Servers {
     pub fn new(tx: Sender<crate::app::Event>) -> Self {
@@ -458,7 +484,51 @@ impl Servers {
             failed: HashSet::new(),
             problems: Vec::new(),
             environments: BTreeMap::new(),
+            published: BTreeMap::new(),
         }
+    }
+
+    /// Keep what a server has just said about a file, whether or not anything
+    /// is open on it.
+    ///
+    /// An empty list is a server saying a file is clean, which is worth
+    /// acting on and not worth storing: it takes the entry away rather than
+    /// putting an empty one in, which is what keeps this bounded by the
+    /// number of files that actually have something wrong with them.
+    pub fn remember_published(&mut self, path: &Path, id: ServerId, list: &[Value]) {
+        if list.is_empty() {
+            if let Some(per_server) = self.published.get_mut(path) {
+                per_server.remove(&id.0);
+                if per_server.is_empty() {
+                    self.published.remove(path);
+                }
+            }
+            return;
+        }
+        // A file already held goes on being held however full the store is:
+        // refusing an *update* would leave stale problems on the screen,
+        // which is worse than holding nothing.
+        if !self.published.contains_key(path) && self.published.len() >= REMEMBERED_FILES {
+            return;
+        }
+        self.published
+            .entry(path.to_path_buf())
+            .or_default()
+            .insert(id.0, list.to_vec());
+    }
+
+    /// What every server has said about a file, for a buffer that has just
+    /// opened on it and has no problems in it yet.
+    pub fn published_for(&self, path: &Path) -> Vec<(ServerId, Vec<Value>)> {
+        self.published
+            .get(path)
+            .map(|per_server| {
+                per_server
+                    .iter()
+                    .map(|(id, list)| (ServerId(*id), list.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     pub fn all(&self) -> &[Server] {
@@ -1519,11 +1589,24 @@ impl Servers {
             return None;
         }
         let list = params.get("diagnostics").and_then(Value::as_array)?;
-        Some(
-            list.iter()
-                .filter_map(|d| diagnostic_from_lsp(d, doc, id))
-                .collect(),
-        )
+        Some(self.resolve_diagnostics(id, list, doc))
+    }
+
+    /// Turn what a server said into places in this buffer's text.
+    ///
+    /// Split out from [`Servers::diagnostics_for`] because it is also how
+    /// something said about a file *before* it was opened is put into the
+    /// buffer that has just opened on it — the same list, resolved against a
+    /// rope that exists now and did not then.
+    pub fn resolve_diagnostics(
+        &self,
+        id: ServerId,
+        list: &[Value],
+        doc: &Document,
+    ) -> Vec<Diagnostic> {
+        list.iter()
+            .filter_map(|d| diagnostic_from_lsp(d, doc, id))
+            .collect()
     }
 
     /// Stop everything, on the way out.
@@ -1541,6 +1624,9 @@ impl Servers {
         self.shutdown_all();
         self.servers.clear();
         self.failed.clear();
+        // Server ids are positions in that list, so the list going means
+        // every id held here now names somebody else.
+        self.published.clear();
     }
 
     /// Mark a server as gone.
@@ -1558,6 +1644,13 @@ impl Servers {
             let key = (server.name.clone(), server.root.clone());
             self.failed.insert(key);
         }
+        // Nothing it said is worth holding for a file opened later: the
+        // findings of a server that has fallen over are about a state of the
+        // project nobody can ask about any more.
+        for per_server in self.published.values_mut() {
+            per_server.remove(&id.0);
+        }
+        self.published.retain(|_, per_server| !per_server.is_empty());
     }
 }
 
@@ -1607,6 +1700,11 @@ fn capabilities() -> Value {
             "didChangeConfiguration": { "dynamicRegistration": false },
             "symbol": { "dynamicRegistration": false },
             "executeCommand": { "dynamicRegistration": false },
+            // A server may tell us that what it has said about every file is
+            // now stale, which is what it has instead of a way to volunteer
+            // the new answer. Claimed because it is handled: see the
+            // `workspace/diagnostic/refresh` arm in `App::on_lsp`.
+            "diagnostics": { "refreshSupport": true },
         },
         "textDocument": {
             "synchronization": {

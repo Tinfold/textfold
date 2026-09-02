@@ -26,6 +26,14 @@ impl App {
                         self.say_good(format!("changed {count} {}", places(count)));
                     }
                 }
+                // A server saying that everything it has told us is now out
+                // of date. This is what it sends when a change in one file
+                // has changed what is wrong with others, so it is answered by
+                // asking again about every open file rather than only the one
+                // in front of us.
+                if method == "workspace/diagnostic/refresh" {
+                    self.pull_diagnostics_everywhere();
+                }
             }
             Incoming::Response {
                 id: request,
@@ -1174,14 +1182,23 @@ impl App {
         let Some(path) = crate::lsp::path_of(uri) else {
             return;
         };
+        // Kept whether or not anything is open on it. A server checks the
+        // whole project and says so about every file in it — mostly files
+        // with no buffer behind them — and it will not say it again until
+        // something about that file changes. Throwing it away here is what
+        // made opening one of those files show a clean file that was not
+        // clean, until you saved it to provoke a fresh answer.
+        if let Some(list) = params.get("diagnostics").and_then(Value::as_array) {
+            self.lsp.remember_published(&path, id, list);
+        }
         let Some(doc_id) = self
             .docs
             .iter()
             .find(|d| d.path.as_deref() == Some(path.as_path()))
             .map(|d| d.id)
         else {
-            // About a file we do not have open. Perfectly normal — a server
-            // checks the whole crate.
+            // Nothing open on it, so there is nowhere to put it beyond the
+            // store above. Perfectly normal.
             return;
         };
         let App { docs, lsp, .. } = self;
@@ -1205,6 +1222,44 @@ impl App {
         // file at a compiler's line and column looks like.
         if self.fixes.is_about_doc(doc_id) {
             self.fixes.forget();
+        }
+    }
+
+    /// Put what the servers have already said about a file into the buffer
+    /// that has just opened on it.
+    ///
+    /// The other half of the store fed by [`App::take_diagnostics`]. Only
+    /// where the buffer has nothing from that server yet: a replay must never
+    /// overwrite a fresher answer, and by the time a file has been open long
+    /// enough to be told about directly, the store is the older of the two.
+    pub(super) fn take_stored_diagnostics(&mut self, doc_id: DocId) {
+        let Some(path) = self.doc(doc_id).and_then(|d| d.path.clone()) else {
+            return;
+        };
+        let stored = self.lsp.published_for(&path);
+        if stored.is_empty() {
+            return;
+        }
+        let App { docs, lsp, .. } = self;
+        let Some(doc) = docs.iter().find(|d| d.id == doc_id) else {
+            return;
+        };
+        let mut fresh: Vec<crate::doc::Diagnostic> = Vec::new();
+        for (id, list) in stored {
+            if doc
+                .diagnostics
+                .iter()
+                .any(|d| d.told == crate::doc::Told::Server(id.0))
+            {
+                continue;
+            }
+            fresh.extend(lsp.resolve_diagnostics(id, &list, doc));
+        }
+        if fresh.is_empty() {
+            return;
+        }
+        if let Some(doc) = self.docs.iter_mut().find(|d| d.id == doc_id) {
+            doc.diagnostics.extend(fresh);
         }
     }
 

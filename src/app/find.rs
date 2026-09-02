@@ -36,6 +36,12 @@ impl App {
         if let Some(doc) = docs.iter().find(|d| d.id == id) {
             lsp.open(doc);
         }
+        // Whatever the servers have already said about this file, now that
+        // there is a rope to say it against. A server that pushes its
+        // findings said them once, when it checked the project, and will not
+        // say them again for a file that has not changed — so a buffer that
+        // waited for the next answer would wait for ever.
+        self.take_stored_diagnostics(id);
         // A file nobody has asked about yet. The colours, the hints and the
         // notes are all questions about the whole of it, and this is the
         // moment there is a whole of it to ask about.
