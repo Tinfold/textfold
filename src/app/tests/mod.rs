@@ -218,6 +218,30 @@ fn a_formatter(id: &str) -> &'static crate::plugin::Tool {
         pattern: None,
         on_save: true,
         builds: false,
+        instead_of_lsp: false,
+    }))
+}
+
+/// The same, for a formatter that says it is the last word on the layout.
+/// Its command is one that really is on the `PATH`, since a tool that is not
+/// installed does not get to switch the language server's formatter off.
+fn a_sole_formatter(id: &str) -> &'static crate::plugin::Tool {
+    let tool = a_formatter(id);
+    Box::leak(Box::new(crate::plugin::Tool {
+        command: "sh".into(),
+        instead_of_lsp: true,
+        ..tool.clone()
+    }))
+}
+
+/// And one that says so and is not installed, which is the case that must not
+/// be honoured: it would take away the formatting the file already had.
+fn a_missing_sole_formatter(id: &str) -> &'static crate::plugin::Tool {
+    let tool = a_formatter(id);
+    Box::leak(Box::new(crate::plugin::Tool {
+        command: "a-formatter-nobody-wrote".into(),
+        instead_of_lsp: true,
+        ..tool.clone()
     }))
 }
 

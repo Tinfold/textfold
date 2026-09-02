@@ -665,3 +665,117 @@ fn the_formatter_order_is_what_you_said_and_the_rest_follows() {
         "and prettier, which was not named, still runs — last"
     );
 }
+
+#[test]
+fn a_formatter_that_says_it_is_the_last_word_takes_the_server_out() {
+    // Two formatters over one file is how a project ends up with a diff
+    // nobody wrote: prettier decides where the lines break, tsserver tidies
+    // the result into something that is neither, and the next person to run
+    // prettier alone puts it all back. A tool may say it is the house style,
+    // and then the server's formatter does not run at all.
+    let prettier = Step::Rewrite(a_sole_formatter("tsserver/prettier"));
+    let black = Step::Rewrite(a_formatter("python/black"));
+
+    assert!(App::lsp_is_superseded(std::slice::from_ref(&prettier)));
+    assert!(
+        App::lsp_is_superseded(&[black.clone(), prettier.clone()]),
+        "one of them saying so is enough"
+    );
+
+    // An ordinary formatter says nothing about the server, and the two go on
+    // sharing the file the way they always did.
+    assert!(!App::lsp_is_superseded(std::slice::from_ref(&black)));
+    assert!(!App::lsp_is_superseded(&[]));
+    assert!(!App::lsp_is_superseded(&[Step::Format]));
+
+    // And a tool nobody installed does not get a say: honouring it would take
+    // away the formatting the file already had and give nothing back, which
+    // is the worst way to find out an install failed.
+    let missing = Step::Rewrite(a_missing_sole_formatter("tsserver/prettier"));
+    assert!(!App::lsp_is_superseded(&[missing]));
+}
+
+#[test]
+fn what_a_server_says_about_a_file_survives_until_something_opens_it() {
+    // A server checks the whole project and says what it found about every
+    // file in it, nearly always more files than are open. Dropping what it
+    // said about the rest meant opening one of them later showed a clean file
+    // that was not clean — the server had already spoken and would not speak
+    // again until that file changed, so saving it was the only way to see the
+    // problems. Which is exactly what people were doing.
+    let (mut app, _rx) = editor();
+    let other = scratch("said-about-a-file-not-open.rs");
+    std::fs::write(&other, "fn main() { bad }\n").expect("written");
+    let server = crate::lsp::ServerId(0);
+
+    app.take_diagnostics(
+        server,
+        &json!({
+            "uri": crate::lsp::uri_of(&other),
+            "diagnostics": [{
+                "range": { "start": { "line": 0, "character": 12 },
+                           "end": { "line": 0, "character": 15 } },
+                "severity": 1,
+                "message": "cannot find value `bad`",
+            }],
+        }),
+    );
+    // Nothing was open on it, so nothing landed in a buffer — and nothing
+    // was thrown away either.
+    assert!(app.docs.iter().all(|d| d.path.as_deref() != Some(other.as_path())));
+
+    // Now it is opened, and it arrives with what was already known about it.
+    app.open_path(&other);
+    let found = &app.here().diagnostics;
+    assert_eq!(found.len(), 1, "the file opened clean");
+    assert_eq!(found[0].message, "cannot find value `bad`");
+    assert_eq!(found[0].told, crate::doc::Told::Server(0));
+
+    // A server saying a file is clean takes it back rather than leaving the
+    // old complaint to be replayed at the next buffer that opens on it.
+    app.take_diagnostics(
+        server,
+        &json!({ "uri": crate::lsp::uri_of(&other), "diagnostics": [] }),
+    );
+    assert!(app.here().diagnostics.is_empty());
+    app.close_doc(app.view().doc);
+    app.open_path(&other);
+    assert!(
+        app.here().diagnostics.is_empty(),
+        "a problem that was fixed came back"
+    );
+    std::fs::remove_file(&other).ok();
+}
+
+#[test]
+fn a_replay_never_overwrites_something_fresher() {
+    // The store is always the older of the two answers by the time a file has
+    // been open long enough to be told about directly, so a buffer that
+    // already has something from a server keeps it.
+    let (mut app, _rx) = editor();
+    let path = scratch("fresher-than-the-store.rs");
+    std::fs::write(&path, "fn main() { bad }\n").expect("written");
+    let server = crate::lsp::ServerId(0);
+    let about = |message: &str| {
+        json!({
+            "uri": crate::lsp::uri_of(&path),
+            "diagnostics": [{
+                "range": { "start": { "line": 0, "character": 12 },
+                           "end": { "line": 0, "character": 15 } },
+                "severity": 1,
+                "message": message,
+            }],
+        })
+    };
+
+    app.take_diagnostics(server, &about("the old complaint"));
+    app.open_path(&path);
+    app.take_diagnostics(server, &about("the new complaint"));
+
+    // Switching away and back goes through the same door a first open does.
+    app.lsp_open_here();
+    let found = &app.here().diagnostics;
+    assert_eq!(found.len(), 1, "the replay put the old one back beside it");
+    assert_eq!(found[0].message, "the new complaint");
+    std::fs::remove_file(&path).ok();
+}

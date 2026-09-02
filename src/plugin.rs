@@ -213,6 +213,20 @@ pub struct Tool {
     /// One per language, first found. A second is a manifest saying two
     /// different things are *the* build, and there is no answer to which.
     pub builds: bool,
+    /// Whether this is the formatter for its languages, in place of the
+    /// language server's own.
+    ///
+    /// The default is that both run and the server goes last, which is right
+    /// when a tool and a server disagree about a corner of the layout and the
+    /// server is the one that knows the language. It is wrong when the tool
+    /// *is* the project's house style: a TypeScript file laid out by
+    /// `prettier` and then tidied by tsserver comes out as neither, and the
+    /// diff you did not write shows up in somebody's review.
+    ///
+    /// So a tool may say it is the last word. Only a tool that is actually
+    /// installed gets to — see [`Tool::supersedes_lsp`] — because a formatter
+    /// that is not there must not switch off the one that is.
+    pub instead_of_lsp: bool,
 }
 
 /// What to do with what a tool printed.
@@ -243,6 +257,18 @@ impl Tool {
     /// Whether it is for this language.
     pub fn wants(&self, language: &str) -> bool {
         self.languages.is_empty() || self.languages.iter().any(|l| l == language)
+    }
+
+    /// Whether this tool really does replace the language server's formatter.
+    ///
+    /// The `PATH` lookup is the whole of the difference between the claim and
+    /// the fact. A manifest saying `instead_of_lsp` is saying what should
+    /// happen once its program is installed; on a machine where it never was,
+    /// honouring that would take away the formatting the file already had and
+    /// give nothing back — a save that quietly stopped laying the file out,
+    /// which is the worst way to find out an install failed.
+    pub fn supersedes_lsp(&self) -> bool {
+        self.instead_of_lsp && crate::pack::on_path(&self.command)
     }
 }
 
@@ -960,6 +986,13 @@ pub struct FileToolOverride {
     pattern: Option<String>,
     #[serde(default)]
     on_save: Option<bool>,
+    /// Whether it formats in place of the language server. Worth having here
+    /// above all: a plugin shipping `prettier` as the last word is a
+    /// reasonable default and a matter of taste, and the person whose taste
+    /// runs the other way should be able to say so without editing a manifest
+    /// that the next update replaces.
+    #[serde(default)]
+    instead_of_lsp: Option<bool>,
 }
 
 impl FileToolOverride {
@@ -977,6 +1010,9 @@ impl FileToolOverride {
     }
     pub fn on_save(&self) -> Option<bool> {
         self.on_save
+    }
+    pub fn instead_of_lsp(&self) -> Option<bool> {
+        self.instead_of_lsp
     }
 }
 
@@ -1045,8 +1081,10 @@ pub fn settings_stub(plugin: &Plugin) -> String {
     if !plugin.tools.is_empty() {
         about.push(String::new());
         about.push("`tools` is by tool name. Each may say `command`, `args`,".into());
-        about.push("`roots`, `pattern` or `on_save` — this is where a project with".into());
-        about.push("a build of its own says so.".into());
+        about.push("`roots`, `pattern`, `on_save` or `instead_of_lsp` — this is".into());
+        about.push("where a project with a build of its own says so, and where a".into());
+        about.push("formatter is told whether it replaces the language server's".into());
+        about.push("own or merely runs before it.".into());
         let mut tools = serde_json::Map::new();
         for tool in &plugin.tools {
             tools.insert(tool.name.clone(), serde_json::json!({ "args": tool.args }));
@@ -1375,6 +1413,10 @@ struct FileTool {
     /// debugs. See [`Tool::builds`].
     #[serde(default)]
     builds: Option<bool>,
+    /// Whether it formats in place of the language server rather than
+    /// alongside it. See [`Tool::instead_of_lsp`].
+    #[serde(default)]
+    instead_of_lsp: Option<bool>,
 }
 
 impl FileTool {
@@ -1396,6 +1438,9 @@ impl FileTool {
         }
         if let Some(on_save) = said.on_save() {
             self.on_save = Some(on_save);
+        }
+        if let Some(instead) = said.instead_of_lsp() {
+            self.instead_of_lsp = Some(instead);
         }
     }
 }
@@ -1468,6 +1513,10 @@ impl FilePlugin {
                     stdin: t.stdin.unwrap_or(output == Output::Replace),
                     on_save: t.on_save.unwrap_or(false),
                     builds: t.builds.unwrap_or(false),
+                    // Only a formatter can be the last word on the layout;
+                    // a linter saying so is a manifest saying nothing.
+                    instead_of_lsp: t.instead_of_lsp.unwrap_or(false)
+                        && output == Output::Replace,
                     pattern: t.pattern,
                     output,
                     name,
@@ -2126,6 +2175,61 @@ mod tests {
         let read: FileOverride = serde_json::from_str(&stub).expect("{stub}");
         assert_eq!(read.tools.len(), 1, "{stub}");
         assert!(stub.contains("\"cc\""), "{stub}");
+    }
+
+    #[test]
+    fn a_formatter_can_say_it_is_the_last_word_and_be_told_otherwise() {
+        // What the tsserver plugin ships: prettier, on every save, laying the
+        // file out instead of the language server rather than before it.
+        let file: FilePlugin = serde_json::from_str(
+            r#"{"id":"tsserver","tools":[
+                 {"name":"prettier","command":"prettier",
+                  "args":["--stdin-filepath","${file}"],
+                  "languages":["javascript","typescript","tsx"],
+                  "stdin":true,"output":"replace",
+                  "on_save":true,"instead_of_lsp":true}]}"#,
+        )
+        .unwrap();
+        let (plugin, problems) = file.into_plugin("tsserver", Source::BuiltIn);
+        assert!(problems.is_empty(), "{problems:?}");
+        let tool = &plugin.tools[0];
+        assert_eq!(tool.id, "tsserver/prettier");
+        assert!(tool.instead_of_lsp);
+        assert!(tool.on_save);
+        // Lower case, because that is what a language is called here — a tool
+        // naming `TypeScript` would match nothing and say nothing about it.
+        assert!(tool.wants("tsx"));
+        assert!(!tool.wants("python"));
+
+        // And somebody whose taste runs the other way can say so, without
+        // editing a manifest that the next update replaces.
+        let mut file: FilePlugin = serde_json::from_str(
+            r#"{"id":"tsserver","tools":[
+                 {"name":"prettier","command":"prettier",
+                  "on_save":true,"instead_of_lsp":true}]}"#,
+        )
+        .unwrap();
+        let said: FileOverride =
+            serde_json::from_str(r#"{"tools":{"prettier":{"instead_of_lsp":false}}}"#).unwrap();
+        file.apply_override(said);
+        let (plugin, _) = file.into_plugin("tsserver", Source::BuiltIn);
+        assert!(!plugin.tools[0].instead_of_lsp);
+        assert!(plugin.tools[0].on_save, "and the rest of it is untouched");
+    }
+
+    #[test]
+    fn only_something_that_lays_a_file_out_can_claim_the_last_word() {
+        // A linter saying `instead_of_lsp` is a manifest saying nothing: it
+        // does not format, so there is nothing for it to be instead of, and
+        // honouring it would switch off the formatting the file did have.
+        let file: FilePlugin = serde_json::from_str(
+            r#"{"id":"p","tools":[
+                 {"name":"lint","command":"lint","output":"problems",
+                  "instead_of_lsp":true}]}"#,
+        )
+        .unwrap();
+        let (plugin, _) = file.into_plugin("p", Source::BuiltIn);
+        assert!(!plugin.tools[0].instead_of_lsp);
     }
 
     #[test]

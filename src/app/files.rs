@@ -392,6 +392,27 @@ impl App {
             .collect()
     }
 
+    /// Whether one of these steps has claimed the last word on the layout,
+    /// so that the language server's own formatter should not run at all.
+    ///
+    /// Taking the step out rather than sorting it last, which is what
+    /// `formatter_order` would do. Sorting cannot express this: the default
+    /// order already puts the server last, precisely so it can tidy what a
+    /// tool left behind, and being tidied afterwards is the thing being
+    /// refused here. A file laid out by `prettier` and then tidied by
+    /// tsserver is laid out like neither of them, and the next person to run
+    /// `prettier` alone puts it all back.
+    ///
+    /// See [`crate::plugin::Tool::instead_of_lsp`], and
+    /// [`crate::plugin::Tool::supersedes_lsp`] for why a formatter nobody
+    /// installed does not get a say.
+    pub(super) fn lsp_is_superseded(steps: &[Step]) -> bool {
+        steps.iter().any(|step| match step {
+            Step::Rewrite(tool) => tool.supersedes_lsp(),
+            _ => false,
+        })
+    }
+
     /// Everything that lays this file out, in the order it should happen.
     ///
     /// One list, and both doors into formatting come through it: `format`,
@@ -417,11 +438,13 @@ impl App {
             true => self.rewriters(doc).into_iter().map(Step::Rewrite).collect(),
             false => Vec::new(),
         };
-        // Only where there is a server that would answer. A dead step costs
-        // nothing at the far end — `advance` walks past one that will not
-        // start — but it is the difference between "nothing here formats this
-        // file" and silence, and that is worth saying.
+        // Only where there is a server that would answer, and only where
+        // nothing else has claimed the last word. A dead step costs nothing at
+        // the far end — `advance` walks past one that will not start — but it
+        // is the difference between "nothing here formats this file" and
+        // silence, and that is worth saying.
         if lsp
+            && !Self::lsp_is_superseded(&steps)
             && let Some(open) = self.doc(doc)
             && self.lsp.can(open, "documentFormattingProvider")
         {
