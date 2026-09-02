@@ -1987,6 +1987,24 @@ impl App {
         if !now_due(&mut self.lsp_extras_due) {
             return;
         }
+        // Problems first, and for every open file rather than the one in
+        // front of us. An edit to one file is exactly how another file comes
+        // to have something wrong with it — that is what a type system is for
+        // — so asking only about the focused file leaves the other tab
+        // showing what was true before the change, until you save it to
+        // provoke a fresh answer.
+        //
+        // Before the early return below, too: which file happens to be
+        // focused says nothing about the others, and a scratch buffer in
+        // front should not stop the project being checked.
+        //
+        // Only the servers that wait to be asked answer this;
+        // `pull_diagnostics` walks past a server with no `diagnosticProvider`,
+        // which is most of them. The ones that push instead are covered from
+        // the other end, by keeping what they say about a file whether or not
+        // a buffer is open on it. See [`App::take_diagnostics`].
+        self.pull_diagnostics_everywhere();
+
         let want_hints = self.config.inlay_hints();
         let want_lenses = self.config.code_lenses();
         let id = self.view().doc;
@@ -1998,13 +2016,31 @@ impl App {
             // Nothing a server has ever heard of.
             return;
         }
+        // Colours, hints and notes are about what is being drawn, so those
+        // are asked for the file you are looking at and no other.
         lsp.semantic_tokens(doc);
-        lsp.pull_diagnostics(doc);
         if want_hints {
             lsp.inlay_hints(doc);
         }
         if want_lenses {
             lsp.lenses(doc);
+        }
+    }
+
+    /// Ask every server that waits to be asked what is wrong with every open
+    /// file.
+    fn pull_diagnostics_everywhere(&mut self) {
+        let ids: Vec<DocId> = self
+            .docs
+            .iter()
+            .filter(|d| d.path.is_some())
+            .map(|d| d.id)
+            .collect();
+        for id in ids {
+            let App { docs, lsp, .. } = self;
+            if let Some(doc) = docs.iter().find(|d| d.id == id) {
+                lsp.pull_diagnostics(doc);
+            }
         }
     }
 
@@ -2196,14 +2232,17 @@ impl App {
             if now == OnDisk::Same {
                 continue;
             }
-            // A file that is *still* changing has no settled contents to read.
-            // Something is part way through writing it, and what a read gets
-            // is a snapshot of a file mid-write — very often cut in the middle
-            // of a character, which is how a buffer fills up with rubbish that
-            // then never goes away. So it is left alone and looked at again
-            // shortly, which is also what keeps a log being appended to from
-            // replacing your buffer several times a second.
-            if now == OnDisk::Changed && !doc.has_settled() {
+            // A file that is *still* changing is left alone and looked at
+            // again shortly, rather than read in whatever state this instant
+            // caught it in. `unsettled` is what makes that "shortly".
+            //
+            // Not for ever, though: a log a service is appending to never
+            // looks the same twice, and a buffer that waited for it to stop
+            // would show what the file said when it was opened until the
+            // service was. So the wait has a bound on it — see
+            // [`Document::ready_to_read`], which is also where the reason it
+            // is safe to read one lives.
+            if now == OnDisk::Changed && !doc.ready_to_read() {
                 self.unsettled = true;
                 continue;
             }

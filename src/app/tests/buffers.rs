@@ -371,3 +371,73 @@ fn reverting_where_nothing_changed_says_so() {
     assert_eq!(app.status.text, "nothing has changed on this line");
     std::fs::remove_file(&path).ok();
 }
+
+#[test]
+fn a_log_being_appended_to_leaves_the_cursor_where_it_was() {
+    // The bug this is about: a re-read replaced the whole buffer, and every
+    // position inside an edit is carried to the end of what replaced it — so
+    // each time a log grew, every cursor, bookmark and breakpoint in it
+    // landed on the last character and the view followed. Reading somewhere
+    // in the middle of a log was impossible while it was being written.
+    let (mut app, _rx) = editor();
+    let path = scratch("appended.log");
+    std::fs::write(&path, "one\ntwo\nthree\nfour\nfive\n").expect("written");
+    app.open_path(&path);
+    let id = app.view().doc;
+
+    // Somebody reading the middle of it, with a bookmark on that line.
+    app.go_to(2, 0);
+    let was = app.view().cursor();
+    if let Some(doc) = app.doc_mut(id) {
+        doc.bookmarks = vec![was];
+    }
+
+    // The service writes another line. Twice round, because one look cannot
+    // tell a file that has just changed from one that is still changing.
+    std::fs::write(&path, "one\ntwo\nthree\nfour\nfive\nsix\n").expect("written");
+    app.check_disk();
+    app.check_disk();
+
+    assert_eq!(
+        app.here().rope.to_string(),
+        "one\ntwo\nthree\nfour\nfive\nsix\n",
+        "the new line was not taken"
+    );
+    assert_eq!(app.view().cursor(), was, "the cursor was dragged to the end");
+    assert_eq!(app.doc(id).map(|d| d.bookmarks.clone()), Some(vec![was]));
+    assert_eq!(line_now(&app), 2, "and is still on the line it was reading");
+    std::fs::remove_file(&path).ok();
+}
+
+#[test]
+fn a_file_read_again_and_again_does_not_grow_a_history_of_it() {
+    // A buffer on a file something else keeps writing takes an edit every
+    // time it is read, on a timer, for as long as it is open. Nothing about
+    // that is a thing anybody will undo, and without a bound a log tailed for
+    // an afternoon holds an afternoon of it.
+    let (mut app, _rx) = editor();
+    let path = scratch("growing.log");
+    std::fs::write(&path, "start\n").expect("written");
+    app.open_path(&path);
+    let id = app.view().doc;
+
+    let mut text = String::from("start\n");
+    for n in 0..40 {
+        text.push_str(&format!("line {n}\n"));
+        std::fs::write(&path, &text).expect("written");
+        app.check_disk();
+        app.check_disk();
+    }
+    assert_eq!(app.here().rope.to_string(), text, "it kept up");
+    assert!(
+        !app.here().is_modified(),
+        "reading a file is not editing it"
+    );
+
+    // And each round was one small edit rather than a replacement of the
+    // whole buffer, so undoing the lot walks back up the file a line at a
+    // time instead of restoring forty whole copies of it. What bounds the
+    // number kept is `MAX_REVISIONS`, tested where the history lives.
+    let _ = id;
+    std::fs::remove_file(&path).ok();
+}

@@ -31,6 +31,21 @@ const COLOUR_LIMIT: usize = 4 * 1024 * 1024;
 /// two.
 const MERGE_WINDOW: Duration = Duration::from_millis(500);
 
+/// The most revisions one buffer keeps before the oldest start falling off.
+///
+/// A limit rather than none, because not every edit is one somebody typed. A
+/// buffer open on a file that something else keeps writing takes an edit each
+/// time it is read again, on a timer, for as long as it is open — and a log
+/// being tailed for an afternoon would otherwise hold an afternoon of undo
+/// nobody will ever ask for. Two thousand is far past a day's typing and far
+/// short of a problem: what is dropped is always the oldest, and undo only
+/// ever runs out at the far end of the history.
+const MAX_REVISIONS: usize = 2000;
+
+/// How long a file may go on changing every time we look before it is read
+/// anyway. See [`Document::ready_to_read`].
+const KEEP_UP_AFTER: Duration = Duration::from_secs(1);
+
 /// How long to leave a file alone before trying to colour it again after a
 /// parse gave up. Long enough that the burst of work that starved the last
 /// attempt — a language server waking up and indexing a project — has had a
@@ -342,6 +357,13 @@ pub struct Document {
     seen: Option<Stamp>,
     /// Whether it looked the same at the last two checks.
     settled: bool,
+    /// Since when it has been changing every time we look, if it is.
+    ///
+    /// A file being written continuously never looks the same twice, so
+    /// waiting for it to settle is waiting for it to be closed — which for a
+    /// log a service is writing is never. This is what puts a bound on the
+    /// wait. See [`Document::ready_to_read`].
+    unsettled_since: Option<Instant>,
     /// The state of the file we last said something about, or tried to read.
     ///
     /// Compared against the stamp rather than against [`OnDisk`], which is too
@@ -584,6 +606,69 @@ pub fn read_whole(path: &Path) -> Result<Option<(Vec<u8>, Stamp)>> {
     Ok(None)
 }
 
+/// What actually differs between a buffer and the text that is now in its
+/// file: `(from, to, replacement)` in characters, or `None` if nothing does.
+///
+/// The alternative is replacing the whole buffer, and the whole buffer is
+/// never what changed. An edit's job is not only to put the right text in
+/// place — it is also the record every position in the buffer is carried
+/// across, and [`AppliedEdit::map`] sends anything *inside* an edit to the end
+/// of what replaced it. Replace all of it and every cursor, selection,
+/// diagnostic, bookmark and breakpoint in the file is inside the edit, so all
+/// of them land on the last character. On a file being written repeatedly —
+/// a log, a build's output — that is the view yanking to the bottom several
+/// times a second while somebody is trying to read the middle of it.
+///
+/// Trimming the ends fixes that by making the edit describe what happened.
+/// A log that was appended to becomes an insertion at the end, which nothing
+/// before it is inside, so nothing before it moves. A formatter that rewrote
+/// one function becomes an edit to that function.
+///
+/// Character counts rather than a real diff: two scans and no allocation
+/// beyond the replacement itself, which matters because this runs on a timer
+/// against every open file. It finds the one changed span and does not try to
+/// find several, which is exactly right for an append and good enough for the
+/// rest — the span it finds is always correct, only sometimes larger than the
+/// smallest one.
+pub fn changed_span(rope: &Rope, text: &str) -> Option<(usize, usize, String)> {
+    let old_len = rope.len_chars();
+    let new_len = text.chars().count();
+
+    let mut prefix = 0;
+    let mut old = rope.chars();
+    let mut new = text.chars();
+    while let (Some(a), Some(b)) = (old.next(), new.next()) {
+        if a != b {
+            break;
+        }
+        prefix += 1;
+    }
+    if prefix == old_len && prefix == new_len {
+        return None;
+    }
+
+    // Backwards from both ends, stopping before the prefix: a file of one
+    // repeated character must not have its prefix and suffix claim the same
+    // characters twice.
+    let most = (old_len - prefix).min(new_len - prefix);
+    let mut suffix = 0;
+    let mut old = rope.chars_at(old_len);
+    let mut new = text.chars().rev();
+    while suffix < most {
+        match (old.prev(), new.next()) {
+            (Some(a), Some(b)) if a == b => suffix += 1,
+            _ => break,
+        }
+    }
+
+    let replacement = text
+        .chars()
+        .skip(prefix)
+        .take(new_len - prefix - suffix)
+        .collect();
+    Some((prefix, old_len - suffix, replacement))
+}
+
 /// Whether any of these edits fell inside a stretch of text — or against
 /// either end of it, since typing at the end of a word makes it a different
 /// word.
@@ -758,6 +843,7 @@ impl Document {
             seen: None,
             told: None,
             settled: true,
+            unsettled_since: None,
             on_disk: OnDisk::Same,
         }
     }
@@ -850,6 +936,7 @@ impl Document {
             // no stamp for a file that is there reads as changed — which is
             // exactly right, and gets it re-read once it stops moving.
             settled: stamp.is_some(),
+            unsettled_since: None,
             stamp,
             on_disk: OnDisk::Same,
         };
@@ -1078,8 +1165,26 @@ impl Document {
             if self.saved_at.is_some_and(|at| at >= self.done.len()) {
                 self.saved_at = None;
             }
+            self.trim_history();
         }
         edits
+    }
+
+    /// Drop the oldest revisions once there are more than anybody will undo.
+    ///
+    /// `saved_at` counts revisions, so it moves down with them. Where the
+    /// saved state is older than the oldest revision still held it becomes
+    /// unreachable, and saying so — rather than leaving an index pointing at
+    /// somebody else's revision — is what keeps "modified" honest.
+    fn trim_history(&mut self) {
+        let Some(over) = self.done.len().checked_sub(MAX_REVISIONS) else {
+            return;
+        };
+        if over == 0 {
+            return;
+        }
+        self.done.drain(..over);
+        self.saved_at = self.saved_at.and_then(|at| at.checked_sub(over));
     }
 
     /// Where the cursors should end up after the action now being recorded.
@@ -1522,14 +1627,38 @@ impl Document {
         // check before an ordinary `git checkout` is taken and is what keeps a
         // file that is halfway through being written out of your buffer.
         self.settled = self.seen == now;
+        match self.settled {
+            true => self.unsettled_since = None,
+            false => {
+                self.unsettled_since.get_or_insert_with(Instant::now);
+            }
+        }
         self.seen = now;
         self.on_disk
     }
 
-    /// Whether the file has stopped changing: it looked the same at the last
-    /// two checks. Only meaningful just after [`Document::check_disk`].
-    pub fn has_settled(&self) -> bool {
+    /// Whether it is worth reading the file now: it has settled — it looked
+    /// the same at the last two checks — or it has been refusing to settle
+    /// for long enough that waiting for it to is waiting for it to be closed.
+    ///
+    /// Settling is the ordinary answer and covers what it was written for — a
+    /// build or a `git checkout` writing a file in one burst, which looks
+    /// changed once and settled the next time we look, a quarter of a second
+    /// later. What it does not cover is a file written to *continuously*: a
+    /// log a service is appending to never looks the same twice, so a buffer
+    /// waiting for it to settle shows what the file said when it was opened
+    /// and goes on showing that for as long as the service runs.
+    ///
+    /// Reading one anyway is safe, which it was not when this was written:
+    /// [`read_whole`] stamps the file on both sides of the read and throws
+    /// away anything that moved in between, so what comes back is a whole
+    /// file or nothing. So the wait is now about cost rather than about
+    /// correctness, and a bound on it costs one read a second.
+    pub fn ready_to_read(&self) -> bool {
         self.settled
+            || self
+                .unsettled_since
+                .is_some_and(|since| since.elapsed() >= KEEP_UP_AFTER)
     }
 
     /// Whether what is on disk now is something we have not already dealt
@@ -1554,6 +1683,7 @@ impl Document {
         self.seen = self.stamp;
         self.told = self.stamp;
         self.settled = true;
+        self.unsettled_since = None;
         self.on_disk = OnDisk::Same;
     }
 
@@ -1583,6 +1713,7 @@ impl Document {
         self.seen = Some(stamp);
         self.told = Some(stamp);
         self.settled = true;
+        self.unsettled_since = None;
         self.on_disk = OnDisk::Same;
     }
 
@@ -1844,6 +1975,94 @@ mod tests {
     }
 
     #[test]
+    fn the_history_stops_growing_somewhere() {
+        // A buffer on a file something else keeps writing takes an edit each
+        // time it is read again, on a timer, for as long as it is open. The
+        // oldest fall off rather than the buffer growing for ever.
+        let mut d = doc("");
+        for round in 0..(MAX_REVISIONS + 50) {
+            let was = d.len_chars();
+            d.apply_atomic(vec![Change::replace(was, was, format!("{round}\n"))], &sel(was));
+        }
+        assert_eq!(d.done.len(), MAX_REVISIONS, "the history grew past its bound");
+
+        // What is dropped is always the oldest, so undo still works and only
+        // runs out at the far end.
+        let text = d.rope.to_string();
+        assert!(text.ends_with(&format!("{}\n", MAX_REVISIONS + 49)));
+        assert!(d.can_undo());
+        d.undo();
+        assert!(
+            d.rope.to_string().ends_with(&format!("{}\n", MAX_REVISIONS + 48)),
+            "undo did not take back the newest thing"
+        );
+    }
+
+    #[test]
+    fn trimming_the_history_keeps_saved_and_modified_honest() {
+        // `saved_at` counts revisions, so dropping revisions off the front
+        // has to move it down with them or a saved file reads as modified.
+        let mut d = doc("");
+        for round in 0..(MAX_REVISIONS + 10) {
+            let was = d.len_chars();
+            d.apply_atomic(vec![Change::replace(was, was, format!("{round}\n"))], &sel(was));
+        }
+        d.mark_saved();
+        assert!(!d.is_modified());
+
+        // More rounds, past the bound again. Still saved-then-edited rather
+        // than mysteriously already saved.
+        let was = d.len_chars();
+        d.apply_atomic(vec![Change::replace(was, was, "after\n")], &sel(was));
+        assert!(d.is_modified(), "an edit after a save is a modified buffer");
+    }
+
+    #[test]
+    fn what_changed_on_disk_is_the_part_that_changed() {
+        // An append has to come back as an insertion at the end, because that
+        // is the only shape of edit that leaves every position before it
+        // alone — which is what keeps a cursor in the middle of a log from
+        // being dragged to the bottom every time the log grows.
+        let d = doc("one\ntwo\n");
+        let (from, to, text) = changed_span(&d.rope, "one\ntwo\nthree\n").expect("it changed");
+        assert_eq!((from, to), (8, 8), "an append is an insertion at the end");
+        assert_eq!(text, "three\n");
+
+        // A change in the middle names the middle, and nothing either side.
+        let (from, to, text) = changed_span(&d.rope, "one\nTWO\n").expect("it changed");
+        assert_eq!(&d.rope.to_string()[from..to], "two");
+        assert_eq!(text, "TWO");
+
+        // Identical text is not a change at all, however it is spelled.
+        assert!(changed_span(&d.rope, "one\ntwo\n").is_none());
+
+        // A file emptied, and one filled from empty.
+        assert_eq!(changed_span(&d.rope, ""), Some((0, 8, String::new())));
+        assert_eq!(
+            changed_span(&doc("").rope, "hello"),
+            Some((0, 0, "hello".into()))
+        );
+
+        // The prefix and the suffix must not claim the same characters twice,
+        // which is what a file of one repeated character is here to catch.
+        let repeated = doc("aaaa");
+        let (from, to, text) = changed_span(&repeated.rope, "aaaaa").expect("it changed");
+        assert_eq!(to - from + text.chars().count(), 5 - 4 + (to - from));
+        let mut applied = repeated.rope.to_string();
+        applied.replace_range(from..to, &text);
+        assert_eq!(applied, "aaaaa");
+
+        // And it counts in characters rather than bytes, or an edit to a file
+        // with anything but ASCII in it lands in the wrong place.
+        let wide = doc("héllo wörld\n");
+        let (from, to, text) = changed_span(&wide.rope, "héllo wärld\n").expect("it changed");
+        // The seventh *character*, not the eighth byte, which is where the
+        // `ö` would be if this counted the wrong thing.
+        assert_eq!((from, to), (7, 8));
+        assert_eq!(text, "ä");
+    }
+
+    #[test]
     fn a_buffer_refilled_a_thousand_times_remembers_none_of_it() {
         // A plugin's panel is replaced whole every time the plugin has
         // something new to say. Without this, a file tree that redraws on each
@@ -2064,18 +2283,55 @@ mod tests {
         // one look cannot tell "it has just changed" from "it is changing".
         write(&path, "one\ntwo\n");
         assert_eq!(d.check_disk(), OnDisk::Changed);
-        assert!(!d.has_settled(), "one look is not enough to know it has stopped");
+        assert!(
+            !d.ready_to_read(),
+            "one look is not enough to know it has stopped"
+        );
 
-        // Still changing, still not settled, however many times we look.
+        // Still changing, still not worth reading, however many times we
+        // look — for as long as looking again is going to be soon.
         for n in 3..8 {
             write(&path, &format!("{}\n", "x\n".repeat(n)));
             assert_eq!(d.check_disk(), OnDisk::Changed);
-            assert!(!d.has_settled(), "it moved again between the two looks");
+            assert!(!d.ready_to_read(), "it moved again between the two looks");
         }
 
         // It stops. The next look sees the same thing twice and says so.
         assert_eq!(d.check_disk(), OnDisk::Changed);
-        assert!(d.has_settled());
+        assert!(d.ready_to_read());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_file_that_never_stops_changing_is_read_anyway_in_the_end() {
+        // A log a service is appending to never looks the same at two
+        // consecutive checks, so waiting for it to settle is waiting for the
+        // service to be stopped. Without a bound on that wait a buffer on one
+        // shows what the file said when it was opened, for ever.
+        let dir = scratch_dir("never-settles");
+        let path = dir.join("busy.log");
+        write(&path, "one\n");
+        let mut d = Document::open(DocId(0), &path, Indent::Spaces(4)).expect("opened");
+
+        write(&path, "one\ntwo\n");
+        assert_eq!(d.check_disk(), OnDisk::Changed);
+        assert!(!d.ready_to_read(), "the first sighting waits");
+
+        // Still moving every time we look, and now for longer than we are
+        // willing to wait.
+        d.unsettled_since = Some(Instant::now() - KEEP_UP_AFTER);
+        write(&path, "one\ntwo\nthree\n");
+        assert_eq!(d.check_disk(), OnDisk::Changed);
+        assert!(
+            d.ready_to_read(),
+            "a file that will not settle is never read at all"
+        );
+
+        // And taking it puts the clock back, so the next one waits again
+        // rather than reading on every check from here on.
+        let (bytes, stamp) = read_whole(&path).expect("readable").expect("settled");
+        d.took_from_disk(stamp, Bytes::of(&bytes));
+        assert!(d.unsettled_since.is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 

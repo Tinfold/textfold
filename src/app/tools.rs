@@ -666,13 +666,22 @@ impl App {
         let Some(doc) = self.doc_mut(id) else {
             anyhow::bail!("that buffer has gone");
         };
-        if doc.rope == text.as_str() {
+        // Only what differs, rather than the whole file. Every position in a
+        // buffer is carried across an edit, and anything *inside* one lands at
+        // the end of it — so replacing the whole buffer puts every cursor,
+        // selection, diagnostic, bookmark and breakpoint on the last
+        // character. On a file being appended to on a timer that is the view
+        // jumping to the bottom over and over while somebody reads the middle
+        // of it. See [`crate::doc::changed_span`].
+        let Some((from, to, replacement)) = crate::doc::changed_span(&doc.rope, &text) else {
             doc.took_from_disk(stamp, kind);
             return Ok(false);
-        }
-        let len = doc.len_chars();
+        };
         let sel = crate::text::Selections::single(Range::point(0));
-        let edits = doc.apply_atomic(vec![crate::doc::Change::replace(0, len, text)], &sel);
+        let edits = doc.apply_atomic(
+            vec![crate::doc::Change::replace(from, to, replacement)],
+            &sel,
+        );
         doc.took_from_disk(stamp, kind);
         self.after_edit_to(id, edits, None);
         Ok(true)
