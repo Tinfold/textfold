@@ -342,9 +342,20 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::PLAY_MACRO, &["alt-shift-p"]),
     (Cmd::INDENT, &["tab"]),
     (Cmd::UNINDENT, &["shift-tab"]),
-    // Terminals disagree about Ctrl-/: some send it as Ctrl-_, which is the
-    // same byte with a different name. Both are bound rather than explained.
-    (Cmd::TOGGLE_COMMENT, &["ctrl-/", "ctrl-_"]),
+    // Ctrl-/ is three keys, because it arrives as three different things.
+    //
+    // A terminal speaking the extended protocol says what was actually
+    // pressed, and that is `ctrl-/`. A terminal that does not sends the byte
+    // 0x1F and nothing else — the ASCII control code the key has produced
+    // since the teletype, which Ctrl-/, Ctrl-_ and Ctrl-7 all make and which
+    // carries no record of which of the three it was. crossterm reads that
+    // byte back as Ctrl-7, so `ctrl-7` is the spelling every ordinary
+    // terminal needs; without it this command is unreachable in xterm,
+    // xfce4-terminal, gnome-terminal, PuTTY and Terminal.app.
+    //
+    // Nothing is stolen by binding all three: on a terminal where Ctrl-7 is
+    // its own keystroke, it is also the key that makes 0x1F.
+    (Cmd::TOGGLE_COMMENT, &["ctrl-/", "ctrl-_", "ctrl-7"]),
     (Cmd::UNDO, &["ctrl-z"]),
     (Cmd::REDO, &["ctrl-y", "ctrl-shift-z"]),
     (Cmd::COPY, &["ctrl-c"]),
@@ -593,6 +604,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn ctrl_slash_comments_on_a_terminal_that_cannot_say_ctrl_slash() {
+        // What an ordinary terminal actually sends when Ctrl-/ is pressed:
+        // the byte 0x1F, alone, with no record of which key made it. This is
+        // how crossterm reads that byte back — `0x1C..=0x1F` become `4`
+        // through `7` with Control — so this is the event the editor sees on
+        // every terminal without the extended keyboard protocol.
+        let legacy = Key::from_event(KeyEvent::new(
+            KeyCode::Char('7'),
+            KeyModifiers::CONTROL,
+        ));
+        let keys = Keys::default();
+        assert_eq!(
+            keys.lookup(legacy),
+            Some(Cmd::TOGGLE_COMMENT),
+            "Ctrl-/ does nothing on a plain terminal"
+        );
+        // And the spelling a terminal that *can* tell them apart sends.
+        let rich = Key::parse("ctrl-/").expect("parses");
+        assert_eq!(keys.lookup(rich), Some(Cmd::TOGGLE_COMMENT));
     }
 
     #[test]
