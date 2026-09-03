@@ -979,6 +979,25 @@ catch-all that takes every identifier in the file before their own rules get a
 look in — which in Java's case leaves the types coloured, because those are a
 node of their own, and everything else a plain variable.
 
+Markdown is read with textfold's own queries instead of the shipped ones rather
+than on top of them, and with two grammars rather than one. The shipped query
+is written in another editor's capture names, almost none of which mean
+anything here, so a markdown file used to arrive with its `#` and its `-`
+coloured and its headings, fences and links in the colour of prose. And
+markdown's grammar is really two: the block grammar finds the headings, the
+fences, the lists and the tables, and then hands each line of prose over as a
+single node it has nothing more to say about — every `**bold**`, `` `code` ``
+and link in the file is inside one of those. The second grammar reads those,
+for the lines on screen, as they are drawn. Bold and italic come out as two
+different colours rather than as weights, because a terminal theme names
+colours and nothing else.
+
+Grammars written for other editors name their captures for markup —
+`@markup.heading`, `@text.literal`, `@markup.link.url` — and those are
+understood too, in both of the spellings that are in circulation, so a grammar
+a plugin brings is not silently uncoloured for having been written somewhere
+else.
+
 A file that would take longer than a moment to parse — a minified bundle, a
 megabyte of something the grammar cannot make sense of — is opened without
 colours rather than kept waiting for, and the status bar says so.

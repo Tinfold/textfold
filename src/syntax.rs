@@ -16,6 +16,7 @@
 //! why the generic `(identifier) @variable` at the bottom of a highlights file
 //! does not flatten everything above it.
 
+use std::cell::RefCell;
 use std::ops::ControlFlow;
 use std::ops::Range as ByteRange;
 use std::time::{Duration, Instant};
@@ -67,6 +68,28 @@ pub struct Grammar {
     /// and where two patterns claim exactly the same bytes that is what
     /// settles which one is being more precise about them.
     specificity: Vec<u8>,
+    /// A second grammar for the parts of a file this one hands over whole.
+    /// `None` for every language that is only one grammar, which is nearly all
+    /// of them.
+    inside: Option<Box<Inside>>,
+}
+
+/// A grammar that runs inside another one's nodes.
+///
+/// Markdown is one language written as two grammars. The block grammar finds
+/// the headings, the fences and the lists, and then hands a whole line of
+/// prose over as a single `inline` node — it has nothing to say about the
+/// `**bold**` or the `` `code` `` in it. The inline grammar is what reads
+/// that, and without it a markdown file is a file with its markers coloured
+/// and its text left plain.
+///
+/// A general shape rather than a special case for markdown, because it is not
+/// one: this is how a grammar says "this part is somebody else's language".
+pub struct Inside {
+    /// The kinds of node in the outer tree whose contents the inner grammar
+    /// reads. Two of them for markdown: a line of prose, and a table cell.
+    kinds: &'static [&'static str],
+    grammar: Grammar,
 }
 
 impl Grammar {
@@ -87,7 +110,15 @@ impl Grammar {
             query,
             roles,
             specificity,
+            inside: None,
         })
+    }
+
+    /// The same, with a second grammar for the nodes this one hands over
+    /// whole. See [`Inside`].
+    pub fn and_inside(mut self, kinds: &'static [&'static str], grammar: Grammar) -> Self {
+        self.inside = Some(Box::new(Inside { kinds, grammar }));
+        self
     }
 }
 
@@ -132,6 +163,11 @@ pub struct Syntax {
     /// Bumped whenever the tree changes, so a cache can tell whether the
     /// answer it is holding is still the answer.
     pub revision: u64,
+    /// The parser for [`Grammar::inside`], where there is one. In a cell
+    /// because working out colours only reads the file, and a parser has to be
+    /// borrowed to run — see [`Syntax::inside_captures`], the only thing that
+    /// touches it.
+    inside: Option<RefCell<Parser>>,
 }
 
 impl Syntax {
@@ -155,11 +191,24 @@ impl Syntax {
         let mut parser = Parser::new();
         parser.set_language(&grammar.language).ok()?;
         let tree = parse(&mut parser, rope, None, budget)?;
+        // One parser for the inner grammar, kept for as long as the file is
+        // open. It runs a few dozen times a frame on a markdown file, and
+        // building one each time is the sort of cost that never shows up as
+        // anything but the editor feeling slightly slow.
+        let inside = match &grammar.inside {
+            Some(inside) => {
+                let mut second = Parser::new();
+                second.set_language(&inside.grammar.language).ok()?;
+                Some(RefCell::new(second))
+            }
+            None => None,
+        };
         Some(Self {
             grammar,
             parser,
             tree,
             revision: 1,
+            inside,
         })
     }
 
@@ -203,34 +252,21 @@ impl Syntax {
             return Vec::new();
         }
 
-        let mut cursor = QueryCursor::new();
-        cursor.set_byte_range(range.clone());
         // Start, end, how specific the capture name was, which pattern, what.
         let mut found: Vec<(usize, usize, u8, usize, Role)> = Vec::new();
-        let mut captures = cursor.captures(
-            &self.grammar.query,
+        captures_of(
+            self.grammar,
             self.tree.root_node(),
-            RopeProvider(rope),
+            rope,
+            &range,
+            &mut found,
         );
-        while let Some((matched, index)) = captures.next() {
-            let capture = matched.captures[*index];
-            let Some(Some(role)) = self.grammar.roles.get(capture.index as usize) else {
-                continue;
-            };
-            let node = capture.node;
-            let specificity = self
-                .grammar
-                .specificity
-                .get(capture.index as usize)
-                .copied()
-                .unwrap_or(0);
-            found.push((
-                node.start_byte(),
-                node.end_byte(),
-                specificity,
-                matched.pattern_index,
-                *role,
-            ));
+        // And whatever a second grammar makes of the parts this one handed
+        // over whole. They go into the same list and through the same sort, so
+        // an inner grammar's `**bold**` beats the outer one's claim on the
+        // line around it for the same reason anything nested does.
+        if let Some(inside) = &self.grammar.inside {
+            self.inside_captures(inside, rope, &range, &mut found);
         }
 
         // Paint from least specific to most, so that what ends up on top is
@@ -282,6 +318,82 @@ impl Syntax {
             spans.push((range.start + start..range.start + at, role));
         }
         spans
+    }
+
+    /// What the inner grammar makes of the nodes the outer one handed over
+    /// whole. See [`Inside`].
+    ///
+    /// Reparsed on the spot rather than kept: what is parsed is one line of
+    /// prose, and only the ones on screen. The alternative is a tree for every
+    /// paragraph in the file, all of them to be edited and reparsed on every
+    /// keystroke, to save a few dozen parses of a line each.
+    fn inside_captures(
+        &self,
+        inside: &Inside,
+        rope: &Rope,
+        range: &ByteRange<usize>,
+        found: &mut Vec<(usize, usize, u8, usize, Role)>,
+    ) {
+        let Some(parser) = &self.inside else { return };
+        let Ok(mut parser) = parser.try_borrow_mut() else {
+            return;
+        };
+        for node in self.inside_nodes(inside, range) {
+            // The node's text, minus the outer language running through it: a
+            // `> ` at the start of the second line of a quoted paragraph is
+            // markdown's punctuation and not part of the sentence. Those
+            // arrive as the node's named children, and what lies between them
+            // is what the inner grammar is given.
+            //
+            // Included ranges rather than a copy of the text, so that the tree
+            // that comes back is already in the file's own byte offsets and
+            // nothing has to be added back on.
+            let mut rest = node.range();
+            let mut ranges = Vec::new();
+            let mut walk = node.walk();
+            for child in node.children(&mut walk).filter(Node::is_named) {
+                let child = child.range();
+                ranges.push(tree_sitter::Range {
+                    start_byte: rest.start_byte,
+                    start_point: rest.start_point,
+                    end_byte: child.start_byte,
+                    end_point: child.start_point,
+                });
+                rest.start_byte = child.end_byte;
+                rest.start_point = child.end_point;
+            }
+            ranges.push(rest);
+            // An empty range is not a range, and a list of nothing but empty
+            // ones is read as "the whole file" — which would hand the inner
+            // grammar the document.
+            ranges.retain(|range| range.end_byte > range.start_byte);
+            if ranges.is_empty() || parser.set_included_ranges(&ranges).is_err() {
+                continue;
+            }
+            let Some(tree) = parse(&mut parser, rope, None, BUDGET) else {
+                continue;
+            };
+            captures_of(&inside.grammar, tree.root_node(), rope, range, found);
+        }
+    }
+
+    /// The nodes the inner grammar reads, among those showing in this stretch
+    /// of the file. What is off screen is not parsed at all.
+    fn inside_nodes(&self, inside: &Inside, range: &ByteRange<usize>) -> Vec<Node<'_>> {
+        let mut found = Vec::new();
+        let mut stack = vec![self.tree.root_node()];
+        while let Some(node) = stack.pop() {
+            if node.end_byte() <= range.start || node.start_byte() >= range.end {
+                continue;
+            }
+            if inside.kinds.contains(&node.kind()) {
+                found.push(node);
+                continue;
+            }
+            let mut walk = node.walk();
+            stack.extend(node.children(&mut walk));
+        }
+        found
     }
 
     /// The innermost node covering a byte, as a name — what the status line
@@ -404,6 +516,41 @@ fn point((row, column): (usize, usize)) -> Point {
     Point { row, column }
 }
 
+/// Every capture a grammar's query makes over a stretch of a tree: start, end,
+/// how specific the capture name was, which pattern it came from, and what
+/// colour it means. Appended rather than returned, because a file with a
+/// second grammar in it fills one list from two trees.
+fn captures_of(
+    grammar: &Grammar,
+    root: Node,
+    rope: &Rope,
+    range: &ByteRange<usize>,
+    found: &mut Vec<(usize, usize, u8, usize, Role)>,
+) {
+    let mut cursor = QueryCursor::new();
+    cursor.set_byte_range(range.clone());
+    let mut captures = cursor.captures(&grammar.query, root, RopeProvider(rope));
+    while let Some((matched, index)) = captures.next() {
+        let capture = matched.captures[*index];
+        let Some(Some(role)) = grammar.roles.get(capture.index as usize) else {
+            continue;
+        };
+        let node = capture.node;
+        let specificity = grammar
+            .specificity
+            .get(capture.index as usize)
+            .copied()
+            .unwrap_or(0);
+        found.push((
+            node.start_byte(),
+            node.end_byte(),
+            specificity,
+            matched.pattern_index,
+            *role,
+        ));
+    }
+}
+
 /// Parse straight out of the rope, without flattening it into a string first.
 /// A ten-megabyte file would otherwise be copied on every keystroke.
 ///
@@ -483,6 +630,96 @@ mod tests {
             .into_iter()
             .map(|(span, role)| (text[span].to_string(), role))
             .collect()
+    }
+
+    #[test]
+    fn markdown_is_more_than_its_punctuation() {
+        // What this is about: the grammar ships a query written in another
+        // editor's capture names, and read against textfold's colours almost
+        // none of it landed on one. A markdown file arrived with its `#` and
+        // its `-` coloured and its headings, its fences and its links in the
+        // colour of prose.
+        let found = roles_in(
+            "markdown",
+            "# A heading\n\n- a list item\n\n```rust\nfn main() {}\n```\n",
+        );
+        let role = |want: &str| {
+            found
+                .iter()
+                .find(|(text, _)| text == want)
+                .map(|(_, role)| *role)
+        };
+        assert_eq!(role("A heading"), Some(Role::Function));
+        assert_eq!(role("#"), Some(Role::Punctuation));
+        assert_eq!(role("- "), Some(Role::Punctuation));
+        // A fence is code, and the word after the backticks says which.
+        assert_eq!(role("```"), Some(Role::Delimiter));
+        assert_eq!(role("rust"), Some(Role::Type));
+        assert_eq!(role("\nfn main() {}\n"), Some(Role::String));
+    }
+
+    #[test]
+    fn markdown_colours_what_is_inside_a_line() {
+        // The block grammar hands a whole line of prose over as one `inline`
+        // node and has nothing to say about what is in it. Everything here is
+        // the second grammar's work — see [`Inside`].
+        let found = roles_in(
+            "markdown",
+            "Some **bold** and *thin* and `code` and [a link](http://x).\n",
+        );
+        let role = |want: &str| {
+            found
+                .iter()
+                .find(|(text, _)| text == want)
+                .map(|(_, role)| *role)
+        };
+        assert_eq!(role("bold"), Some(Role::Keyword));
+        assert_eq!(role("thin"), Some(Role::Type));
+        assert_eq!(role("code"), Some(Role::String));
+        assert_eq!(role("`"), Some(Role::Delimiter));
+        // What the link says and where it goes, told apart.
+        assert_eq!(role("a link"), Some(Role::Label));
+        assert_eq!(role("http://x"), Some(Role::StringSpecial));
+        // And the prose around them is left as prose.
+        assert_eq!(role("Some "), None);
+    }
+
+    #[test]
+    fn a_quote_marker_is_not_read_as_part_of_the_sentence() {
+        // The `> ` at the start of a continued line belongs to the block
+        // grammar, and the inline grammar must not be handed it: given the raw
+        // text of the paragraph it would count the `>` as prose, and in a
+        // paragraph with emphasis running across the line break it would pair
+        // the wrong asterisks.
+        let found = roles_in("markdown", "> a **quoted\n> sentence** here\n");
+        let role = |want: &str| {
+            found
+                .iter()
+                .find(|(text, _)| text == want)
+                .map(|(_, role)| *role)
+        };
+        assert_eq!(role("quoted\n"), Some(Role::Keyword));
+        assert_eq!(role("sentence"), Some(Role::Keyword));
+        assert_eq!(role("> "), Some(Role::Punctuation));
+    }
+
+    #[test]
+    fn a_table_cell_is_read_the_way_a_paragraph_is() {
+        let found = roles_in(
+            "markdown",
+            "| name | what |\n|---|---|\n| `x` | *a thing* |\n",
+        );
+        let role = |want: &str| {
+            found
+                .iter()
+                .find(|(text, _)| text == want)
+                .map(|(_, role)| *role)
+        };
+        assert_eq!(role("name "), Some(Role::Property));
+        assert_eq!(role("---"), Some(Role::Punctuation));
+        assert_eq!(role("|"), Some(Role::Delimiter));
+        assert_eq!(role("x"), Some(Role::String));
+        assert_eq!(role("a thing"), Some(Role::Type));
     }
 
     #[test]

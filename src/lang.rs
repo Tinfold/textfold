@@ -114,6 +114,9 @@ enum GrammarSource {
     BuiltIn {
         language: fn() -> Language,
         highlights: &'static [&'static str],
+        /// A second grammar for the parts the first hands over whole, where
+        /// the language is really two of them. See [`built_in_inside`].
+        inside: Option<Inside>,
     },
     /// A shared library on disk, opened when first needed.
     Library {
@@ -296,6 +299,7 @@ impl Lang {
                 GrammarSource::BuiltIn {
                     language,
                     highlights,
+                    ..
                 } => (language(), highlights.join("\n")),
                 GrammarSource::Library {
                     path,
@@ -326,6 +330,26 @@ impl Lang {
                      library built against another tree-sitter"
                         .to_string(),
                 );
+            };
+            // The other half of a language that is two grammars. One that
+            // will not compile costs the colours inside a line rather than
+            // all of them, so markdown without its inline grammar is still
+            // markdown with its headings and its fences.
+            let grammar = match source {
+                GrammarSource::BuiltIn {
+                    inside: Some(inside),
+                    ..
+                } => match crate::syntax::Grammar::new(
+                    (inside.language)(),
+                    &inside.highlights.join("\n"),
+                ) {
+                    Some(inner) => grammar.and_inside(inside.kinds, inner),
+                    None => {
+                        complain("the grammar inside it would not compile".to_string());
+                        grammar
+                    }
+                },
+                _ => grammar,
             };
             // The registry outlives the process, and a grammar is wanted for
             // as long as a file of its language is open, which is the same
@@ -860,6 +884,7 @@ fn built_in_grammar(name: &str) -> Option<GrammarSource> {
                 $($key => Some(GrammarSource::BuiltIn {
                     language: || $language.into(),
                     highlights: &[$($query),*],
+                    inside: built_in_inside($key),
                 }),)*
                 _ => None,
             }
@@ -893,7 +918,11 @@ fn built_in_grammar(name: &str) -> Option<GrammarSource> {
             tree_sitter_javascript::JSX_HIGHLIGHT_QUERY,
         ],
         "json" => tree_sitter_json::LANGUAGE, [tree_sitter_json::HIGHLIGHTS_QUERY],
-        "markdown" => tree_sitter_md::LANGUAGE, [tree_sitter_md::HIGHLIGHT_QUERY_BLOCK],
+        // Ours instead of the grammar's own, not in front of it: the shipped
+        // query is written in nvim-treesitter's capture names and almost none
+        // of it lands on a colour textfold has. And half of the language is in
+        // the second grammar — see `built_in_inside`.
+        "markdown" => tree_sitter_md::LANGUAGE, [include_str!("queries/markdown.scm")],
         "python" => tree_sitter_python::LANGUAGE, [tree_sitter_python::HIGHLIGHTS_QUERY],
         "rust" => tree_sitter_rust::LANGUAGE, [
             include_str!("queries/rust.scm"),
@@ -917,6 +946,33 @@ fn built_in_grammar(name: &str) -> Option<GrammarSource> {
             include_str!("queries/yaml.scm"),
             tree_sitter_yaml::HIGHLIGHTS_QUERY,
         ],
+    }
+}
+
+/// The second grammar of a language written as two, and the nodes of the
+/// first one it reads.
+///
+/// Markdown is the one there is. Its block grammar finds the headings, the
+/// fences and the lists, and hands each line of prose over as a single
+/// `inline` node — every `**bold**`, `` `code` `` and link in the file is
+/// inside one of those and invisible to it. `pipe_table_cell` is the same for
+/// the inside of a table. See [`crate::syntax::Inside`], which is what runs
+/// it.
+struct Inside {
+    kinds: &'static [&'static str],
+    language: fn() -> Language,
+    highlights: &'static [&'static str],
+}
+
+/// The second grammar a built-in language wants, if it wants one.
+fn built_in_inside(name: &str) -> Option<Inside> {
+    match name {
+        "markdown" => Some(Inside {
+            kinds: &["inline", "pipe_table_cell"],
+            language: || tree_sitter_md::INLINE_LANGUAGE.into(),
+            highlights: &[include_str!("queries/markdown-inline.scm")],
+        }),
+        _ => None,
     }
 }
 
@@ -1343,6 +1399,7 @@ mod tests {
                 let Some(GrammarSource::BuiltIn {
                     language,
                     highlights,
+                    inside,
                 }) = built_in_grammar(built_in)
                 else {
                     panic!("{name} wants a grammar called {built_in:?} that is not compiled in");
@@ -1354,6 +1411,19 @@ mod tests {
                     crate::syntax::Grammar::new(language(), &highlights.join("\n")).is_some(),
                     "{name}: the {built_in:?} highlight query would not compile"
                 );
+                // And the same for the second grammar, where a language is two
+                // of them: markdown loses its bold and its links quietly if
+                // that is the one that will not compile.
+                if let Some(inside) = inside {
+                    assert!(
+                        crate::syntax::Grammar::new(
+                            (inside.language)(),
+                            &inside.highlights.join("\n")
+                        )
+                        .is_some(),
+                        "{name}: the query inside {built_in:?} would not compile"
+                    );
+                }
             }
         }
     }
