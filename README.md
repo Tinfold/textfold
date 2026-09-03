@@ -979,6 +979,25 @@ catch-all that takes every identifier in the file before their own rules get a
 look in — which in Java's case leaves the types coloured, because those are a
 node of their own, and everything else a plain variable.
 
+Markdown is read with textfold's own queries instead of the shipped ones rather
+than on top of them, and with two grammars rather than one. The shipped query
+is written in another editor's capture names, almost none of which mean
+anything here, so a markdown file used to arrive with its `#` and its `-`
+coloured and its headings, fences and links in the colour of prose. And
+markdown's grammar is really two: the block grammar finds the headings, the
+fences, the lists and the tables, and then hands each line of prose over as a
+single node it has nothing more to say about — every `**bold**`, `` `code` ``
+and link in the file is inside one of those. The second grammar reads those,
+for the lines on screen, as they are drawn. Bold and italic come out as two
+different colours rather than as weights, because a terminal theme names
+colours and nothing else.
+
+Grammars written for other editors name their captures for markup —
+`@markup.heading`, `@text.literal`, `@markup.link.url` — and those are
+understood too, in both of the spellings that are in circulation, so a grammar
+a plugin brings is not silently uncoloured for having been written somewhere
+else.
+
 A file that would take longer than a moment to parse — a minified bundle, a
 megabyte of something the grammar cannot make sense of — is opened without
 colours rather than kept waiting for, and the status bar says so.
@@ -2879,9 +2898,9 @@ plugin author writes handlers rather than a transport. In Python it is about
 twenty lines to do by hand, which is what the `cargo` plugin does so that you
 can read all of it.
 
-Anything the program writes to standard error goes to the log — `textfold
---log-path` says where — rather than onto the screen, which belongs to the
-editor.
+Anything the program writes to standard error goes to the log rather than onto
+the screen, which belongs to the editor. The `logs` command opens it; `textfold
+--log-path` says where it is.
 
 ### Languages
 
@@ -3082,8 +3101,18 @@ right says so while it is. If it is not running at all, it is probably not
 installed: `plugins` says **needs** rather than **on** beside a server whose
 program is missing, and `install-plugin` will fetch it.
 
-**A server said something and I missed it.** Servers' complaints go to a file,
-not the screen. `textfold --log-path` says where.
+**Something said something and I missed it.** The status bar shows one line for
+a few seconds and then it is gone, which is exactly the wrong place for the
+line that arrives while something else is going wrong. Everything that gets
+said gets written down as well — textfold's own messages, every language
+server's and every plugin's complaints, and the problems found in your settings
+at startup, of which the status bar only ever showed the first. The `logs`
+command opens the file. It is an ordinary buffer on an ordinary file, so it is
+searchable, it can sit in a split beside whatever is misbehaving, and it keeps
+up while it is open. Every line is stamped with the local time, and each run
+writes the version and the date it started, so one session can be told from the
+one before it in a file that outlives both. `textfold --log-path` says where it
+is, for reading from somewhere else.
 
 **No colours.** The status bar says why when there is a reason worth giving.
 `colouring this file again` means a parse ran out of time and another attempt

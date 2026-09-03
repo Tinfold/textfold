@@ -1963,10 +1963,6 @@ pub fn point_of(value: &Value) -> Option<(usize, usize)> {
     ))
 }
 
-/// Where a server's complaints go, so that the status line can tell you.
-/// Shared with everything else textfold starts — see [`crate::rpc::log_path`].
-pub use crate::rpc::log_path;
-
 #[cfg(test)]
 mod tests {
     use super::*;

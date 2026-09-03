@@ -17,6 +17,7 @@ mod host;
 mod jdk;
 mod keys;
 mod lang;
+mod log;
 mod lsp;
 mod menu;
 mod pack;
@@ -121,7 +122,7 @@ struct Args {
     #[arg(long, value_name = "ID", num_args = 0..=1, default_missing_value = "")]
     update: Option<String>,
 
-    /// Say where language servers' complaints are written and stop
+    /// Say where the log is written and stop
     #[arg(long)]
     log_path: bool,
 }
@@ -262,7 +263,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
     if args.log_path {
-        match lsp::log_path() {
+        match log::path() {
             Some(path) => println!("{}", path.display()),
             None => println!("nowhere to write one"),
         }
@@ -281,6 +282,10 @@ fn main() -> Result<()> {
     // a frame that can be wrecked by asking a terminal for a sequence it does
     // not have.
     term::set_underline_colour(config.underline_colour());
+
+    // The first line of this session's half of the log, which is what tells
+    // one run from the one before it in a file that outlives both.
+    log::started();
 
     let (tx, rx) = mpsc::channel::<Event>();
     let mut app = App::new(config, tx.clone());

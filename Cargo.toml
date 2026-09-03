@@ -8,6 +8,12 @@ anyhow = "1.0.104"
 clap = { version = "4.6.6", features = ["derive"] }
 dirs = "6.0.0"
 ignore = "0.4.33"
+# For the clock the log is stamped with, and only that. Not `time`, which is
+# already here underneath something else: on Linux it refuses to work out the
+# local offset once a process has more than one thread, and textfold has one
+# per language server before you have typed anything. A log stamped in UTC on a
+# machine that is not is a log you have to do arithmetic to read.
+jiff = "0.2.35"
 nucleo-matcher = "0.3.1"
 ratatui = "0.30.2"
 ropey = "1.6.1"

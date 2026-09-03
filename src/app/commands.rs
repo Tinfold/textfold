@@ -446,6 +446,8 @@ commands! {
         |app| app.escape();
     HELP => "help", Help, Passive, "The keys, and what they do",
         |app| app.overlay = Overlay::Help(0);
+    LOGS => "logs", Help, Passive, "Open the log: what textfold and its plugins have been saying",
+        |app| app.show_logs();
     ABOUT => "about", Help, Passive, "Which textfold this is",
         |app| app.say(format!(
                         "textfold {} — {} languages, {} themes",

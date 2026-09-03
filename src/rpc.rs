@@ -42,7 +42,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender};
@@ -286,7 +286,7 @@ impl<A> Peer<A> {
                 .spawn(move || {
                     let _finished = finished;
                     for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                        log(&label, &line);
+                        crate::log::say(&label, &line);
                         let Ok(mut kept) = kept.lock() else { return };
                         // Only ever the last few. A language server that logs
                         // a line per keystroke would otherwise be a leak, and
@@ -783,42 +783,6 @@ fn read_dap(message: Value) -> Option<Incoming> {
         }
         _ => None,
     }
-}
-
-/// Where a peer's complaints go. A file, because the screen belongs to the
-/// editor and the terminal underneath it belongs to whoever started us.
-pub fn log(name: &str, line: &str) {
-    use std::sync::Mutex;
-    static FILE: Mutex<Option<std::fs::File>> = Mutex::new(None);
-    let Ok(mut file) = FILE.lock() else { return };
-    if file.is_none() {
-        let Some(path) = log_path() else { return };
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).ok();
-        }
-        *file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-            .ok();
-    }
-    if let Some(file) = file.as_mut() {
-        writeln!(file, "[{name}] {line}").ok();
-    }
-}
-
-/// Where the log is, so that the status line can tell you.
-///
-/// One file for every peer rather than one each: what a person is doing when
-/// they go looking is working out why something did not happen, and the
-/// answer is often in the other program's half of the conversation.
-pub fn log_path() -> Option<PathBuf> {
-    Some(
-        dirs::state_dir()
-            .or_else(dirs::cache_dir)?
-            .join("textfold")
-            .join("textfold.log"),
-    )
 }
 
 #[cfg(test)]

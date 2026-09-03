@@ -296,6 +296,31 @@ pub const CAPTURES: &[(&str, Role)] = &[
     ("tag", Role::Tag),
     ("label", Role::Label),
     ("error", Role::Error),
+    // Prose. Grammars for things that are written rather than run — markdown,
+    // LaTeX, a docstring — name their captures for markup, in one of the two
+    // spellings nvim-treesitter has used. None of them is a kind of code, so
+    // each lands on whichever role already means the same thing: a heading
+    // names the section under it, a code span is a literal, a URL is a string
+    // the machine reads, and struck-through text is text taken back.
+    //
+    // Markdown ships its own queries and says this in textfold's own names —
+    // see `queries/markdown.scm`. These are for the grammars a plugin brings,
+    // which are written for somebody else's editor and cannot be.
+    ("markup.heading", Role::Function),
+    ("text.title", Role::Function),
+    ("markup.raw", Role::String),
+    ("text.literal", Role::String),
+    ("markup.link.url", Role::StringSpecial),
+    ("text.uri", Role::StringSpecial),
+    ("markup.link", Role::Label),
+    ("text.reference", Role::Label),
+    ("markup.strong", Role::Keyword),
+    ("text.strong", Role::Keyword),
+    ("markup.italic", Role::Type),
+    ("text.emphasis", Role::Type),
+    ("markup.strikethrough", Role::Comment),
+    ("markup.quote", Role::Comment),
+    ("markup.list", Role::Punctuation),
 ];
 
 impl Theme {
