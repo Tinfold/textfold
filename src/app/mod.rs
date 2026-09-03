@@ -2238,6 +2238,8 @@ impl App {
             .map(|d| d.id)
             .collect();
         let auto = self.config.reload_on_change();
+        // Whose name is never mentioned below. See `mention`.
+        let log = crate::log::path();
         self.unsettled = false;
         let mut reloaded: Vec<String> = Vec::new();
         let mut clashed: Vec<String> = Vec::new();
@@ -2274,21 +2276,33 @@ impl App {
                 continue;
             }
             doc.noted();
-            let name = doc.name.clone();
+            // Nothing is ever said about the log. Being appended to is the
+            // whole point of it, so there is no news in saying so — and worse
+            // than no news: the line saying it is itself written to the log,
+            // which changes the log, which says so again, for ever, with a
+            // disk read and a disk write every time round. The buffer still
+            // keeps up; it just does it without announcing itself.
+            //
+            // `None` rather than a flag because it is exactly the name that is
+            // withheld, and every list below holds names.
+            let mention = match doc.path.as_deref() == log.as_deref() {
+                true => None,
+                false => Some(doc.name.clone()),
+            };
             let modified = doc.is_modified();
             match now {
-                OnDisk::Gone => gone.push(name),
+                OnDisk::Gone => gone.extend(mention),
                 // Only the person editing it can say which side wins, so it is
                 // marked and left. Nothing is read.
-                OnDisk::Changed if modified => clashed.push(name),
-                OnDisk::Changed if !auto => waiting.push(name),
+                OnDisk::Changed if modified => clashed.extend(mention),
+                OnDisk::Changed if !auto => waiting.extend(mention),
                 // Nobody asked for this one, so it is only taken where it can
                 // be taken without guessing — see `take_from_disk`. What it
                 // would not take is left marked as changed and mentioned, so
                 // `reload` is still there to do it deliberately.
                 OnDisk::Changed => match self.take_from_disk(id, Reread::OnATimer) {
-                    Ok(_) => reloaded.push(name),
-                    Err(_) => waiting.push(name),
+                    Ok(_) => reloaded.extend(mention),
+                    Err(_) => waiting.extend(mention),
                 },
                 OnDisk::Same => {}
             }
