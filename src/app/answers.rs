@@ -899,9 +899,15 @@ impl App {
         // A grammar is compiled the first time a file of its language is
         // shown, so a plugin that brought one broken says so here rather than
         // at startup — and says so at all, which it did not before.
-        let problems = problems
+        let problems: Vec<String> = problems
             .into_iter()
-            .chain(crate::lang::take_grammar_problems());
+            .chain(crate::lang::take_grammar_problems())
+            .collect();
+        // Every one of them into the log, and the first into the status bar.
+        // Two arriving together used to mean one of them was never shown.
+        for problem in &problems {
+            crate::log::say("plugins", problem);
+        }
         if let Some(first) = problems.into_iter().next() {
             self.say_bad(first);
         }

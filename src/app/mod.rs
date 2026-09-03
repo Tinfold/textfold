@@ -1125,6 +1125,28 @@ pub enum Tone {
 }
 
 impl Status {
+    /// Something to show, written down on the way past.
+    ///
+    /// The log is the whole point of this being a constructor: a message shown
+    /// for four seconds and then replaced is a message that was not read, and
+    /// the ones worth reading are exactly the ones that arrive while something
+    /// else is going wrong. Tone and all — "saved" and "would not save" are
+    /// not the same line to be reading afterwards.
+    fn said(text: String, tone: Tone) -> Self {
+        crate::log::say(
+            match tone {
+                Tone::Bad => "textfold: problem",
+                _ => "textfold",
+            },
+            &text,
+        );
+        Self {
+            text,
+            tone,
+            at: Instant::now(),
+        }
+    }
+
     fn quiet() -> Self {
         Self {
             text: String::new(),
@@ -1603,11 +1625,17 @@ impl App {
         problems.extend(self.themes.problems.iter().cloned());
         problems.extend(self.keys.problems.iter().cloned());
         problems.extend(lang::all().problems.iter().cloned());
+        // All of them into the log. Only one fits in the status bar, and
+        // "and 4 more" is not a thing anybody can act on unless the other four
+        // are written down somewhere.
+        for problem in &problems {
+            crate::log::say("settings", problem);
+        }
         if let Some(first) = problems.first() {
             let more = problems.len() - 1;
             self.say_bad(match more {
                 0 => first.clone(),
-                _ => format!("{first} (and {more} more)"),
+                _ => format!("{first} (and {more} more — the `logs` command has them all)"),
             });
         }
     }
@@ -1782,28 +1810,20 @@ impl App {
 
     // ---- Saying things ----
 
+    /// Put a line in the status bar — and in the log, because the status bar
+    /// shows one line for four seconds and the thing worth reading is very
+    /// often the one that has just been replaced. See [`crate::log`], and the
+    /// `logs` command that opens it.
     pub fn say(&mut self, text: impl Into<String>) {
-        self.status = Status {
-            text: text.into(),
-            tone: Tone::Plain,
-            at: Instant::now(),
-        };
+        self.status = Status::said(text.into(), Tone::Plain);
     }
 
     pub fn say_good(&mut self, text: impl Into<String>) {
-        self.status = Status {
-            text: text.into(),
-            tone: Tone::Good,
-            at: Instant::now(),
-        };
+        self.status = Status::said(text.into(), Tone::Good);
     }
 
     pub fn say_bad(&mut self, text: impl Into<String>) {
-        self.status = Status {
-            text: text.into(),
-            tone: Tone::Bad,
-            at: Instant::now(),
-        };
+        self.status = Status::said(text.into(), Tone::Bad);
     }
 
     // ---- The loop ----

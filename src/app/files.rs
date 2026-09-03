@@ -210,6 +210,24 @@ impl App {
         count
     }
 
+    /// Open the log — see [`crate::log`].
+    ///
+    /// An ordinary buffer on an ordinary file, which is most of why this is
+    /// two lines: it is searchable, it can sit in a split beside the thing
+    /// that is misbehaving, and it keeps up while it is open, because the same
+    /// thing that notices any other file changing underneath you notices this
+    /// one. At the end, because the line that sent you looking is the last.
+    pub(super) fn show_logs(&mut self) {
+        let Some(path) = crate::log::path() else {
+            return self.say("this machine has nowhere to keep a log");
+        };
+        if !path.exists() {
+            return self.say(format!("nothing has been written to {}", path.display()));
+        }
+        self.open_path(&path);
+        self.go_to(self.here().len_lines().saturating_sub(1), 0);
+    }
+
     /// Close the empty untouched buffer textfold starts with, once there is
     /// something real open.
     pub(super) fn drop_untouched_scratch(&mut self, keep: DocId) {
