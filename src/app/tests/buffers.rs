@@ -373,6 +373,54 @@ fn reverting_where_nothing_changed_says_so() {
 }
 
 #[test]
+fn textfolds_own_log_growing_is_not_news() {
+    // The bug this is about was a loop that did not stop. A buffer on the log
+    // noticed the file had grown and said "read again"; that line is itself
+    // written to the log, which grows the file, which says it again — a disk
+    // read and a disk write every time round the timer, for as long as the
+    // buffer was open.
+    //
+    // Nothing said is what breaks it, and nothing said is also right on its
+    // own terms: a log being appended to is a log doing what it is for.
+    let (mut app, _rx) = editor();
+    let path = scratch("pretend.log");
+    std::fs::write(&path, "12:00:00 [textfold] one\n").expect("written");
+    *crate::log::INSTEAD.lock().expect("free") = Some(path.clone());
+
+    app.open_path(&path);
+    app.say("");
+    std::fs::write(&path, "12:00:00 [textfold] one\n12:00:01 [textfold] two\n").expect("written");
+    app.check_disk();
+    app.check_disk();
+
+    // It kept up — the point of the buffer is that it tails.
+    assert_eq!(
+        app.here().rope.to_string(),
+        "12:00:00 [textfold] one\n12:00:01 [textfold] two\n"
+    );
+    // And said nothing about having done so.
+    assert_eq!(app.status.text, "", "the log announced itself");
+
+    // Any other file still gets a word, which is what the silence is carved
+    // out of rather than replacing.
+    let other = scratch("ordinary.txt");
+    std::fs::write(&other, "one\n").expect("written");
+    app.open_path(&other);
+    std::fs::write(&other, "one\ntwo\n").expect("written");
+    app.check_disk();
+    app.check_disk();
+    assert!(
+        app.status.text.contains("read again"),
+        "{}",
+        app.status.text
+    );
+
+    *crate::log::INSTEAD.lock().expect("free") = None;
+    std::fs::remove_file(&path).ok();
+    std::fs::remove_file(&other).ok();
+}
+
+#[test]
 fn a_log_being_appended_to_leaves_the_cursor_where_it_was() {
     // The bug this is about: a re-read replaced the whole buffer, and every
     // position inside an edit is carried to the end of what replaced it — so

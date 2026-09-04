@@ -93,8 +93,22 @@ pub fn started() {
     );
 }
 
+/// Somewhere else for the log to be, so that a test can have one of its own
+/// instead of writing into the state directory of whoever is running them.
+///
+/// Tests share a process, so this is global to all of them. Nothing else reads
+/// it, and the one test that sets it puts it back.
+#[cfg(test)]
+pub(crate) static INSTEAD: Mutex<Option<PathBuf>> = Mutex::new(None);
+
 /// Where the log is, so that the status line and `--log-path` can tell you.
 pub fn path() -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Ok(instead) = INSTEAD.lock()
+        && instead.is_some()
+    {
+        return instead.clone();
+    }
     Some(
         dirs::state_dir()
             .or_else(dirs::cache_dir)?
