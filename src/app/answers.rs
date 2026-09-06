@@ -46,6 +46,7 @@ impl App {
                     .map(|s| s.name.clone())
                     .unwrap_or_else(|| "a language server".into());
                 self.lsp.died(id, why.clone());
+                self.forget_what_it_said(id);
                 // Not being installed is the ordinary case and not worth a red
                 // line; it is worth one line saying what would have run.
                 self.say(format!("{name}: {why}"));
@@ -1236,6 +1237,30 @@ impl App {
         // file at a compiler's line and column looks like.
         if self.fixes.is_about_doc(doc_id) {
             self.fixes.forget();
+        }
+    }
+
+    /// Take back what a server said, everywhere it was drawn.
+    ///
+    /// A server that has gone has no opinions any more, and leaving its last
+    /// ones on the screen is not merely stale: a diagnostic remembers where it
+    /// came from as `Told::Server(n)`, and `n` is a position in the server
+    /// list, so the next server to take that position inherits them. That is
+    /// how a linter you switched off kept its marks until an unrelated server
+    /// happened to publish over them.
+    pub(super) fn forget_what_it_said(&mut self, id: ServerId) {
+        for doc in &mut self.docs {
+            doc.diagnostics
+                .retain(|d| d.told != crate::doc::Told::Server(id.0));
+        }
+    }
+
+    /// The same for all of them, which is what a restart needs: every id in
+    /// every buffer is about to name somebody else.
+    pub(super) fn forget_what_they_all_said(&mut self) {
+        for doc in &mut self.docs {
+            doc.diagnostics
+                .retain(|d| !matches!(d.told, crate::doc::Told::Server(_)));
         }
     }
 

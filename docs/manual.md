@@ -795,8 +795,11 @@ itself; the first file you open in a large project is slow once and quick
 afterwards.
 
 Run `server-status` from the palette to see what is running and what it is
-doing, and `restart-servers` after installing one by hand — installing one with
-`install-plugin` does that for you.
+doing, and `restart-servers` after installing one by hand. Installing one with
+`install-plugin` needs no such thing: the servers that are running are compared
+against what the plugins now say, and only the ones that changed are stopped.
+The server you have just installed starts where you are standing, and
+rust-analyzer, halfway through indexing something else, is left where it was.
 
 ### When a language has two of them
 
@@ -3268,7 +3271,10 @@ same switch beside them. Turning one off rebuilds the languages, the commands,
 the keys and the colours rather than asking you to restart the editor, and an
 id survives that, so a buffer that was Python is still Python when Python
 comes back. Installing one is the same rebuild, which is why a plugin you have
-just fetched works where you are standing.
+just fetched works where you are standing. The language servers are the one
+thing not simply built again: they are the expensive part, and a running one is
+compared against what the plugins now say rather than being stopped on the
+principle that something somewhere changed.
 
 **Installing is data too.** A plugin says what programs it needs and gives a
 list of ways to get them, and that list is a table rather than a script: you

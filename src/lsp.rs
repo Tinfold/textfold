@@ -260,7 +260,13 @@ pub struct Server {
     /// that a server without rename does not get a rename request and an
     /// error message nobody can act on.
     capabilities: Value,
-    settings: Option<Value>,
+    /// What was run, with its placeholders already filled in.
+    ///
+    /// Kept rather than thrown away after starting because it is what a
+    /// rebuilt language table is compared against: a server whose entry still
+    /// says exactly this is the same server, and one whose entry has changed
+    /// or gone is not. See [`Servers::stop_what_changed`].
+    config: lang::Server,
     /// The process, the pipe to it, and the questions it has not answered yet.
     rpc: Peer<Ask>,
     /// Files this server has been told about.
@@ -613,23 +619,28 @@ impl Servers {
             // nothing to be sorry about.
             return;
         };
+        let mut belongs_to: Vec<usize> = Vec::new();
         for config in &lang::get(doc.language).servers {
             let root = lang::project_root(&path, &config.roots);
             let key = (config.command.clone(), root.clone());
-            if self.failed.contains(&key) {
-                continue;
-            }
             let existing = self
                 .servers
                 .iter()
                 .position(|s| s.name == config.command && s.root == root)
                 .filter(|&at| !matches!(self.servers[at].state, State::Dead(_)));
+            if let Some(at) = existing {
+                belongs_to.push(at);
+            }
+            if existing.is_none() && self.failed.contains(&key) {
+                continue;
+            }
 
             let at = match existing {
                 Some(at) => at,
                 None => match self.start(config, &root) {
                     Ok(server) => {
                         self.servers.push(server);
+                        belongs_to.push(self.servers.len() - 1);
                         self.servers.len() - 1
                     }
                     Err(why) => {
@@ -649,6 +660,20 @@ impl Servers {
             } else {
                 self.servers[at].queued.push(doc.id);
             }
+        }
+
+        // And a server that has this file open but is no longer one of the
+        // ones its language names is told to let it go. That is what a plugin
+        // switched off looks like from the file's side: the server is still
+        // running, still right about every other file it was given, and simply
+        // has no business with this one any more. Nearly always nothing to do,
+        // which is why it is safe here, on every switch to a tab.
+        let params = json!({ "textDocument": { "uri": uri_of(&path) } });
+        for at in 0..self.servers.len() {
+            if belongs_to.contains(&at) || !self.servers[at].open.remove(&path) {
+                continue;
+            }
+            self.servers[at].notify("textDocument/didClose", params.clone());
         }
     }
 
@@ -689,7 +714,7 @@ impl Servers {
             root: root.to_path_buf(),
             state: State::Starting,
             capabilities: Value::Null,
-            settings: filled.settings.clone(),
+            config: filled.clone(),
             rpc,
             open: HashSet::new(),
             queued: Vec::new(),
@@ -766,7 +791,7 @@ impl Servers {
         self.servers[at].state = State::Ready;
         self.servers[at].notify("initialized", json!({}));
 
-        if let Some(settings) = self.servers[at].settings.clone() {
+        if let Some(settings) = self.servers[at].config.settings.clone() {
             self.servers[at].notify(
                 "workspace/didChangeConfiguration",
                 json!({ "settings": settings }),
@@ -1509,7 +1534,7 @@ impl Servers {
         let result = match method {
             // rust-analyzer asks for its own settings back, by section.
             "workspace/configuration" => {
-                let settings = server.settings.clone().unwrap_or(Value::Null);
+                let settings = server.config.settings.clone().unwrap_or(Value::Null);
                 let items = params.get("items").and_then(Value::as_array);
                 let answers: Vec<Value> = items
                     .map(|items| {
@@ -1618,6 +1643,45 @@ impl Servers {
         }
     }
 
+    /// Stop the servers the plugins have changed under, and leave the rest
+    /// running. Says which ones went, since what they said has to go too.
+    ///
+    /// The whole point of not restarting everything: installing a theme, a
+    /// linter for another language or a formatter has nothing to do with
+    /// rust-analyzer, and throwing away its index costs minutes of a project
+    /// having no answers for a change that never mentioned it.
+    ///
+    /// A server is still the one the plugins describe when the rebuilt table
+    /// has an entry that runs the same command and, filled in against the same
+    /// root, is the same table of arguments, environment, settings and
+    /// initialization options. Anything else — a plugin switched off, a
+    /// setting edited, a server replaced by a same-named one from another
+    /// plugin — and it goes, because there is no way to tell a running server
+    /// it was started wrong.
+    pub fn stop_what_changed(&mut self) -> Vec<ServerId> {
+        // A server that would not start is worth another go now: an install
+        // that has just finished is the usual reason it would work this time,
+        // and this is the same clearing a full restart did.
+        self.failed.clear();
+
+        let mut stopped = Vec::new();
+        for at in 0..self.servers.len() {
+            if matches!(self.servers[at].state, State::Dead(_)) {
+                continue;
+            }
+            let root = self.servers[at].root.clone();
+            let still_wanted = lang::servers_that_run(&self.servers[at].name)
+                .into_iter()
+                .any(|config| self.fill(config, &root) == self.servers[at].config);
+            if !still_wanted {
+                let id = self.servers[at].id;
+                self.stop(id, "the plugins changed under it");
+                stopped.push(id);
+            }
+        }
+        stopped
+    }
+
     /// Start them all again. For after installing a server, or after one has
     /// wedged itself.
     pub fn restart(&mut self) {
@@ -1636,16 +1700,47 @@ impl Servers {
     /// keystroke, and again, and again. `restart-servers` clears that list,
     /// which is what to do once whatever was wrong is fixed.
     pub fn died(&mut self, id: ServerId, why: String) {
+        if let Some(server) = self.get(id) {
+            let key = (server.name.clone(), server.root.clone());
+            self.failed.insert(key);
+        }
+        self.put_down(id, why);
+    }
+
+    /// Stop a server on purpose, leaving its place in the list behind it.
+    ///
+    /// Unlike [`Servers::died`] this is not a failure, so nothing goes on the
+    /// list of ones not to try again: the next file that wants it starts a
+    /// fresh one. Used when the plugins have been built again and this
+    /// server is no longer what they describe.
+    fn stop(&mut self, id: ServerId, why: &str) {
+        if let Some(server) = self.get_mut(id)
+            && server.rpc.is_writable()
+        {
+            server.shutdown();
+        }
+        self.put_down(id, why.to_string());
+    }
+
+    /// What is true of a server however it stopped: it is dead, it is holding
+    /// nothing, and what it said about files nobody has open goes with it.
+    ///
+    /// The entry stays in the list, dead and inert. A `ServerId` is a position
+    /// in that list and those positions are held all over the editor — in the
+    /// diagnostics in a buffer, in a set of code actions waiting on an answer,
+    /// in a debug session — so closing the gap would hand a stopped server's
+    /// number to whoever came after it. [`Servers::open`] skips the dead, so
+    /// an entry left there costs a comparison and nothing else.
+    fn put_down(&mut self, id: ServerId, why: String) {
         if let Some(server) = self.get_mut(id) {
             server.state = State::Dead(why);
             server.rpc.close();
             server.open.clear();
+            server.queued.clear();
             server.progress.clear();
-            let key = (server.name.clone(), server.root.clone());
-            self.failed.insert(key);
         }
         // Nothing it said is worth holding for a file opened later: the
-        // findings of a server that has fallen over are about a state of the
+        // findings of a server that has stopped are about a state of the
         // project nobody can ask about any more.
         for per_server in self.published.values_mut() {
             per_server.remove(&id.0);
@@ -2134,6 +2229,107 @@ mod tests {
         let def = read.languages.get(language).expect("that language");
         let said = def.servers.as_ref().expect("a server")[0].clone();
         said.into_server("test")
+    }
+
+    /// A server that is running, standing in for one nobody has installed.
+    ///
+    /// `cat` sits there reading its input and never answers, which from here
+    /// is a server that has been asked to initialize and has not replied yet —
+    /// enough to be a live entry in the list. What it was started from is then
+    /// said to be `config`, because what is under test is the comparison
+    /// against the table, not the spawning.
+    fn a_running_server(servers: &mut Servers, config: &lang::Server, root: &Path) -> ServerId {
+        let stand_in = lang::Server {
+            command: "cat".into(),
+            args: Vec::new(),
+            env: BTreeMap::new(),
+            ..config.clone()
+        };
+        let mut server = servers.start(&stand_in, root).expect("cat started");
+        server.name = config.command.clone();
+        server.config = servers.fill(config, root);
+        let id = server.id;
+        servers.servers.push(server);
+        id
+    }
+
+    #[test]
+    fn a_server_no_language_names_any_more_is_stopped() {
+        // What switching a plugin off looks like from here: the command is
+        // still running and nothing in the table asks for it any more.
+        if !crate::pack::on_path("cat") {
+            return;
+        }
+        let config = lang::Server {
+            id: "gone/server".into(),
+            name: "server".into(),
+            command: "a-server-no-plugin-names".into(),
+            args: Vec::new(),
+            roots: Vec::new(),
+            init_options: None,
+            settings: None,
+            env: BTreeMap::new(),
+        };
+        let root = std::env::current_dir().expect("a working directory");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut servers = Servers::new(tx);
+        let id = a_running_server(&mut servers, &config, &root);
+
+        assert_eq!(servers.stop_what_changed(), vec![id]);
+        assert!(matches!(
+            servers.get(id).map(|s| &s.state),
+            Some(State::Dead(_))
+        ));
+
+        // And its place in the list stays behind it. Ids are positions, and
+        // every buffer holding a diagnostic holds one of these numbers, so
+        // closing the gap would hand this server's number to the next one.
+        assert_eq!(servers.servers.len(), 1);
+        assert_eq!(servers.servers[0].id, id);
+        // A server already stopped is not stopped again.
+        assert!(servers.stop_what_changed().is_empty());
+    }
+
+    #[test]
+    fn a_server_the_plugins_did_not_change_is_left_alone() {
+        // Installing a theme or a linter for another language has nothing to
+        // do with rust-analyzer, and stopping it costs minutes of a project
+        // with no answers — which is what made this worth telling apart.
+        //
+        // Skipped where rust-analyzer is not installed: language servers
+        // arrive as packages rather than in the binary, so on a machine
+        // without one there is no table entry to compare against.
+        if !crate::pack::on_path("cat") {
+            return;
+        }
+        let Some(config) = lang::servers_that_run("rust-analyzer").first().copied() else {
+            return;
+        };
+        let root = std::env::current_dir().expect("a working directory");
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut servers = Servers::new(tx);
+        let id = a_running_server(&mut servers, config, &root);
+
+        // The table still says exactly what this server was started from.
+        assert!(
+            servers.stop_what_changed().is_empty(),
+            "a server nothing had changed was stopped anyway"
+        );
+        assert!(
+            servers
+                .get(id)
+                .is_some_and(|s| !matches!(s.state, State::Dead(_)))
+        );
+
+        // Now it was started with something the table no longer says: a
+        // setting edited, or a plugin replaced by another naming the same
+        // server. There is no way to tell a running server it was started
+        // wrong, so it goes.
+        servers.servers[id.0]
+            .config
+            .args
+            .push("--from-before".into());
+        assert_eq!(servers.stop_what_changed(), vec![id]);
     }
 
     #[test]

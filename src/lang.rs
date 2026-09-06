@@ -127,7 +127,12 @@ enum GrammarSource {
 }
 
 /// A language server, as a table of what to run.
-#[derive(Clone, Debug)]
+///
+/// Compared whole, and that is what decides whether a server already running
+/// is still the one the plugins describe: see [`Servers::stop_what_changed`].
+///
+/// [`Servers::stop_what_changed`]: crate::lsp::Servers::stop_what_changed
+#[derive(Clone, Debug, PartialEq)]
 pub struct Server {
     /// What the settings file and the plugin list call it: `python/ruff`.
     /// This is what a switch is thrown against.
@@ -456,6 +461,22 @@ pub fn rebuild() {
 /// Every language there is. Cheap, and the same table every time.
 pub fn all() -> &'static Languages {
     *registry().read().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Every server configuration that runs this command, whichever language
+/// names it.
+///
+/// How a server that is already running is found again in a table that has
+/// just been built: what is known about it is what was run, and the same
+/// command can be named by more than one language — which is the ordinary
+/// case for the TypeScript server, named by four.
+pub fn servers_that_run(command: &str) -> Vec<&'static Server> {
+    all()
+        .langs
+        .iter()
+        .flat_map(|lang| lang.servers.iter())
+        .filter(|server| server.command == command)
+        .collect()
 }
 
 /// One language by id.

@@ -2766,12 +2766,23 @@ impl App {
     }
 
     fn restart_servers(&mut self) {
+        self.start_the_servers_again();
+        self.say("starting the language servers again");
+    }
+
+    /// Every server goes and comes back, and nothing it said outlives it.
+    ///
+    /// The order matters. Server ids are positions in the list, so the moment
+    /// the list is cleared every id held anywhere else names whoever starts
+    /// next — which is why the buffers are emptied of what the old servers
+    /// said before the new ones are given their numbers.
+    pub(super) fn start_the_servers_again(&mut self) {
         self.lsp.restart();
+        self.forget_what_they_all_said();
         let docs: Vec<DocId> = self.docs.iter().map(|d| d.id).collect();
         for id in docs {
             self.lsp_open(id);
         }
-        self.say("starting the language servers again");
     }
 
     fn swap_split_direction(&mut self) {

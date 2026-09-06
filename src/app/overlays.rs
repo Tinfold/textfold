@@ -1126,10 +1126,16 @@ impl App {
     ///
     /// Everything downstream is built from the plugins rather than checking
     /// them as it goes, so the way to change one's mind is to build it all
-    /// again: the language table, the commands, the keys and the colours, and
-    /// then the servers, which are stopped and started so that a linter that
-    /// has just gone stops sending diagnostics rather than leaving its last
-    /// ones on the screen.
+    /// again: the language table, the commands, the keys and the colours.
+    ///
+    /// The servers are the exception, because they are the one thing here that
+    /// is expensive to make: rust-analyzer and jdtls spend minutes indexing a
+    /// project and answer nothing until they have. So they are compared
+    /// against the table that has just been built and only the ones it no
+    /// longer describes are stopped — installing a theme or a linter for
+    /// another language leaves them alone. What a stopped server said goes
+    /// with it, and every open file is offered to the servers again so that
+    /// one which has just arrived starts here rather than at the next restart.
     ///
     /// The same work whether a switch was thrown or a plugin was installed,
     /// which is the point of it having a name.
@@ -1143,7 +1149,9 @@ impl App {
         for doc in &mut self.docs {
             doc.redetect_language();
         }
-        self.lsp.restart();
+        for id in self.lsp.stop_what_changed() {
+            self.forget_what_it_said(id);
+        }
         let docs: Vec<DocId> = self.docs.iter().map(|d| d.id).collect();
         for doc in docs {
             self.lsp_open(doc);
@@ -1619,11 +1627,7 @@ impl App {
         // The servers were started pointing somewhere else, and there is no
         // way to tell one it was wrong about which Python a project uses. They
         // go and come back.
-        self.lsp.restart();
-        let docs: Vec<DocId> = self.docs.iter().map(|d| d.id).collect();
-        for id in docs {
-            self.lsp_open(id);
-        }
+        self.start_the_servers_again();
         let name = root
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())

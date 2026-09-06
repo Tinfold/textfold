@@ -797,3 +797,48 @@ fn a_replay_never_overwrites_something_fresher() {
     assert_eq!(found[0].message, "the new complaint");
     std::fs::remove_file(&path).ok();
 }
+
+#[test]
+fn a_server_that_has_gone_takes_its_marks_with_it() {
+    // A diagnostic remembers who said so as a position in the server list, so
+    // one left behind by a server that has gone is not merely stale: the next
+    // server to take that position inherits it. This is what a linter you had
+    // just switched off looked like — its complaints stayed on the screen and
+    // were then attributed to whichever server started in its place.
+    let (mut app, _rx) = editor();
+    typed(&mut app, "let x = 1\n");
+    let said = |told| crate::doc::Diagnostic {
+        range: Range::new(4, 5),
+        severity: crate::doc::Severity::Error,
+        message: format!("{told:?} said so"),
+        source: None,
+        code: None,
+        data: None,
+        told,
+    };
+    app.here_mut().diagnostics = vec![
+        said(crate::doc::Told::Server(0)),
+        said(crate::doc::Told::Server(1)),
+        said(crate::doc::Told::Tool("clippy")),
+    ];
+
+    app.on_lsp(
+        crate::lsp::ServerId(0),
+        Incoming::Exited("it fell over".into()),
+    );
+    let left: Vec<crate::doc::Told> = app.here().diagnostics.iter().map(|d| d.told).collect();
+    assert_eq!(
+        left,
+        vec![
+            crate::doc::Told::Server(1),
+            crate::doc::Told::Tool("clippy")
+        ],
+        "only the one that died should have lost its say"
+    );
+
+    // And a restart, where every id is about to name somebody else, takes all
+    // of them — but not what a tool found, which is nobody's to hand out.
+    app.forget_what_they_all_said();
+    let left: Vec<crate::doc::Told> = app.here().diagnostics.iter().map(|d| d.told).collect();
+    assert_eq!(left, vec![crate::doc::Told::Tool("clippy")]);
+}
