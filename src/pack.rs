@@ -983,7 +983,8 @@ pub fn install(package: &Package) -> Result<Plan, String> {
 
 /// Work out what removing this would do.
 pub fn uninstall(id: &str) -> Result<Plan, String> {
-    let plugin = crate::plugin::find(id).ok_or_else(|| format!("there is no plugin called {id}"))?;
+    let plugin =
+        crate::plugin::find(id).ok_or_else(|| format!("there is no plugin called {id}"))?;
     let files = match removable(id) {
         Some(dir) => Files::Remove(dir),
         None => Files::Leave,
@@ -1002,7 +1003,12 @@ pub fn uninstall(id: &str) -> Result<Plan, String> {
         id: plugin.id.clone(),
         name: plugin.name.clone(),
         removing: true,
-        steps: plugin.uninstall.iter().filter(|s| s.here()).cloned().collect(),
+        steps: plugin
+            .uninstall
+            .iter()
+            .filter(|s| s.here())
+            .cloned()
+            .collect(),
         steps_from: None,
         needs: Vec::new(),
         see: None,
@@ -1054,7 +1060,9 @@ impl Plan {
         // The files first when installing, because a step may want to run
         // something the package brought with it; last when removing, because
         // a step may want the same.
-        if !self.removing && let Err(why) = self.do_files(say) {
+        if !self.removing
+            && let Err(why) = self.do_files(say)
+        {
             say(Note::Done { ok: false, why });
             return false;
         }
@@ -1144,7 +1152,9 @@ impl Plan {
             }
         }
 
-        if self.removing && let Err(why) = self.do_files(say) {
+        if self.removing
+            && let Err(why) = self.do_files(say)
+        {
             say(Note::Done { ok: false, why });
             return false;
         }
@@ -1323,8 +1333,7 @@ fn fetch_in(remote: &Remote, to: &Path) -> Result<(), String> {
     crate::repo::fetch(&remote.repository, &remote.entry, &tarball).map_err(tidy)?;
 
     let unpacked = holding.join("unpacked");
-    std::fs::create_dir_all(&unpacked)
-        .map_err(|e| tidy(format!("{}: {e}", unpacked.display())))?;
+    std::fs::create_dir_all(&unpacked).map_err(|e| tidy(format!("{}: {e}", unpacked.display())))?;
     let done = std::process::Command::new("tar")
         .arg("-xzf")
         .arg(&tarball)
@@ -1338,7 +1347,10 @@ fn fetch_in(remote: &Remote, to: &Path) -> Result<(), String> {
         Ok(out) if out.status.success() => {}
         Ok(out) => {
             let said = String::from_utf8_lossy(&out.stderr).trim().to_string();
-            return Err(tidy(format!("could not unpack {}: {said}", remote.entry.id)));
+            return Err(tidy(format!(
+                "could not unpack {}: {said}",
+                remote.entry.id
+            )));
         }
         Err(e) => return Err(tidy(format!("tar: {e}"))),
     }
@@ -1408,7 +1420,8 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
         let target = to.join(&name);
         match source.is_dir() {
             true => {
-                std::fs::create_dir_all(&target).map_err(|e| format!("{}: {e}", target.display()))?;
+                std::fs::create_dir_all(&target)
+                    .map_err(|e| format!("{}: {e}", target.display()))?;
                 copy_tree(&source, &target)?;
             }
             false => {
@@ -1582,8 +1595,7 @@ mod tests {
         {
             use std::os::unix::fs::PermissionsExt;
             assert!(!runnable(&path), "it has no executable bit yet");
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("chmod");
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).expect("chmod");
         }
         assert!(runnable(&path));
         assert!(!runnable(&dir.join("not-there")));
@@ -1768,8 +1780,14 @@ mod tests {
         };
         assert!(notes(&plan).0);
         assert!(to.join(MANIFEST).is_file());
-        assert!(to.join("guts").join("run.py").is_file(), "and what is beside it");
-        assert!(to.join(RECEIPT).is_file(), "so that it can be removed again");
+        assert!(
+            to.join("guts").join("run.py").is_file(),
+            "and what is beside it"
+        );
+        assert!(
+            to.join(RECEIPT).is_file(),
+            "so that it can be removed again"
+        );
 
         // And removing it takes the lot.
         let away = Plan {

@@ -46,8 +46,8 @@ impl Key {
     /// reports it as `A` *and* a shift flag. Both have to mean the same thing
     /// or half the bindings would only work on half the terminals.
     pub fn from_event(event: KeyEvent) -> Self {
-        let mut mods = event.modifiers
-            & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT);
+        let mut mods =
+            event.modifiers & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT);
         let code = match event.code {
             KeyCode::Char(c) => {
                 let c = if mods.contains(KeyModifiers::SHIFT) {
@@ -263,7 +263,6 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::MOVE_TAB_RIGHT, &["ctrl-shift-pagedown"]),
     (Cmd::COMMAND_PALETTE, &["alt-x", "ctrl-shift-p"]),
     (Cmd::HELP, &["f1"]),
-
     // Moving.
     (Cmd::MOVE_LEFT, &["left"]),
     (Cmd::MOVE_RIGHT, &["right"]),
@@ -290,14 +289,19 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::NEXT_BOOKMARK, &["alt-shift-n"]),
     (Cmd::PREV_BOOKMARK, &["alt-shift-b"]),
     (Cmd::CENTRE_CURSOR, &["alt-m"]),
-
     // Selecting. Shift and a movement, which is what it is everywhere.
     (Cmd::EXTEND_LEFT, &["shift-left"]),
     (Cmd::EXTEND_RIGHT, &["shift-right"]),
     (Cmd::EXTEND_UP, &["shift-up"]),
     (Cmd::EXTEND_DOWN, &["shift-down"]),
-    (Cmd::EXTEND_WORD_LEFT, &["ctrl-shift-left", "alt-shift-left"]),
-    (Cmd::EXTEND_WORD_RIGHT, &["ctrl-shift-right", "alt-shift-right"]),
+    (
+        Cmd::EXTEND_WORD_LEFT,
+        &["ctrl-shift-left", "alt-shift-left"],
+    ),
+    (
+        Cmd::EXTEND_WORD_RIGHT,
+        &["ctrl-shift-right", "alt-shift-right"],
+    ),
     (Cmd::EXTEND_LINE_START, &["shift-home"]),
     (Cmd::EXTEND_LINE_END, &["shift-end"]),
     (Cmd::EXTEND_PAGE_UP, &["shift-pageup"]),
@@ -321,12 +325,14 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::SELECT_ALL_MATCHES, &["ctrl-shift-l"]),
     (Cmd::CURSORS_TO_LINE_ENDS, &["alt-shift-i"]),
     (Cmd::COLLAPSE_CURSORS, &["alt-shift-c"]),
-
     // Changing text.
     (Cmd::INSERT_NEWLINE, &["enter"]),
     (Cmd::DELETE_BACKWARD, &["backspace"]),
     (Cmd::DELETE_FORWARD, &["delete"]),
-    (Cmd::DELETE_WORD_BACKWARD, &["ctrl-backspace", "alt-backspace"]),
+    (
+        Cmd::DELETE_WORD_BACKWARD,
+        &["ctrl-backspace", "alt-backspace"],
+    ),
     (Cmd::DELETE_WORD_FORWARD, &["ctrl-delete", "alt-delete"]),
     (Cmd::DELETE_LINE, &["ctrl-shift-k"]),
     (Cmd::DUPLICATE_LINE, &["alt-shift-down", "alt-shift-up"]),
@@ -361,7 +367,6 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::COPY, &["ctrl-c"]),
     (Cmd::CUT, &["ctrl-x"]),
     (Cmd::PASTE, &["ctrl-v"]),
-
     // Finding.
     (Cmd::FIND, &["ctrl-f"]),
     (Cmd::FIND_NEXT, &["f3"]),
@@ -389,7 +394,6 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     // worse than a key that does nothing.
     (Cmd::NEXT_CHANGE, &["ctrl-f9"]),
     (Cmd::PREV_CHANGE, &["ctrl-shift-f9"]),
-
     // Language servers.
     (Cmd::COMPLETION, &["ctrl-space"]),
     (Cmd::GOTO_DEFINITION, &["f12", "ctrl-enter"]),
@@ -408,7 +412,6 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     // Not Ctrl-Shift-Space: with shift folded into the character, that is the
     // same keystroke as Ctrl-Space, which already asks for completions.
     (Cmd::SIGNATURE_HELP, &["alt-p"]),
-
     // Debugging. The keys every debugger written in the last thirty years
     // uses, which is the whole of the argument for them — somebody who has
     // used Visual Studio, VS Code, IntelliJ or Eclipse already knows these,
@@ -425,7 +428,6 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     // already the list of buffers and stays that way: a key people press
     // twenty times an hour beats one they press when a compile is due.
     (Cmd::BUILD, &["ctrl-shift-b", "f6"]),
-
     // Panes and the view.
     (Cmd::SPLIT, &["alt-v"]),
     (Cmd::CLOSE_PANE, &["alt-q"]),
@@ -441,11 +443,9 @@ const DEFAULTS: &[(Cmd, &[&str])] = &[
     (Cmd::TOGGLE_FOLD, &["alt-h"]),
     (Cmd::FOLD_ALL, &["alt-shift-h"]),
     (Cmd::UNFOLD_ALL, &["alt-shift-u"]),
-
     // What a keyboard with a menu key sends, and the key Windows and GTK have
     // both meant by it for thirty years for keyboards without one.
     (Cmd::CONTEXT_MENU, &["shift-f10", "menu"]),
-
     (Cmd::ESCAPE, &["esc"]),
 ];
 
@@ -613,10 +613,7 @@ mod tests {
         // how crossterm reads that byte back — `0x1C..=0x1F` become `4`
         // through `7` with Control — so this is the event the editor sees on
         // every terminal without the extended keyboard protocol.
-        let legacy = Key::from_event(KeyEvent::new(
-            KeyCode::Char('7'),
-            KeyModifiers::CONTROL,
-        ));
+        let legacy = Key::from_event(KeyEvent::new(KeyCode::Char('7'), KeyModifiers::CONTROL));
         let keys = Keys::default();
         assert_eq!(
             keys.lookup(legacy),
@@ -671,7 +668,10 @@ mod tests {
         let press = |code, mods| keys.lookup(Key::from_event(KeyEvent::new(code, mods)));
         let ctrl_shift = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
         assert_eq!(press(KeyCode::Up, ctrl_shift), Some(Cmd::ADD_CURSOR_ABOVE));
-        assert_eq!(press(KeyCode::Down, ctrl_shift), Some(Cmd::ADD_CURSOR_BELOW));
+        assert_eq!(
+            press(KeyCode::Down, ctrl_shift),
+            Some(Cmd::ADD_CURSOR_BELOW)
+        );
         // A modified arrow is one escape sequence with a number in it, so
         // Ctrl-Shift-Up is a different key from Ctrl-Up rather than the same
         // byte twice — which is why this pair can be the one shown.
@@ -695,7 +695,10 @@ mod tests {
             press(KeyCode::Char('z'), KeyModifiers::CONTROL),
             Some(Cmd::UNDO)
         );
-        assert_eq!(press(KeyCode::Left, KeyModifiers::SHIFT), Some(Cmd::EXTEND_LEFT));
+        assert_eq!(
+            press(KeyCode::Left, KeyModifiers::SHIFT),
+            Some(Cmd::EXTEND_LEFT)
+        );
         assert_eq!(press(KeyCode::Esc, KeyModifiers::NONE), Some(Cmd::ESCAPE));
     }
 
@@ -758,10 +761,7 @@ mod tests {
         let mut overrides = BTreeMap::new();
         overrides.insert("save".to_string(), vec!["f4".to_string()]);
         let keys = Keys::new(&overrides);
-        assert_eq!(
-            keys.lookup(Key::parse("f4").unwrap()),
-            Some(Cmd::SAVE)
-        );
+        assert_eq!(keys.lookup(Key::parse("f4").unwrap()), Some(Cmd::SAVE));
         assert_eq!(keys.lookup(Key::parse("ctrl-s").unwrap()), None);
     }
 
@@ -796,10 +796,22 @@ mod tests {
     fn a_key_is_spelled_the_way_a_settings_file_spells_it() {
         // Which means it reads back: whatever a plugin is told was pressed,
         // it could have written in its own manifest to ask for.
-        for text in ["ctrl-s", "alt-shift-up", "f12", "enter", "r", "space", "ctrl-."] {
+        for text in [
+            "ctrl-s",
+            "alt-shift-up",
+            "f12",
+            "enter",
+            "r",
+            "space",
+            "ctrl-.",
+        ] {
             let key = Key::parse(text).unwrap_or_else(|| panic!("{text} should parse"));
             assert_eq!(key.spelled(), text);
-            assert_eq!(Key::parse(&key.spelled()), Some(key), "{text} did not read back");
+            assert_eq!(
+                Key::parse(&key.spelled()),
+                Some(key),
+                "{text} did not read back"
+            );
         }
         // A capital letter is shift, said the one way rather than two.
         assert_eq!(Key::parse("K").map(|k| k.spelled()), Some("shift-k".into()));

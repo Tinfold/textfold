@@ -42,8 +42,8 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::io::{BufRead, BufReader, Read, Write};
-use std::path::Path;
 use std::net::TcpStream;
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -789,7 +789,6 @@ fn read_dap(message: Value) -> Option<Incoming> {
 mod tests {
     use super::*;
 
-
     /// Whether a process is still there, by asking the kernel rather than by
     /// running `ps`.
     #[cfg(unix)]
@@ -966,7 +965,10 @@ mod tests {
         match event {
             crate::app::Event::Dap(_, Incoming::Response { id: got, result }) => {
                 assert_eq!(got, id, "the answer should carry the sequence we sent");
-                assert_eq!(result.expect("it worked")["supportsConfigurationDoneRequest"], true);
+                assert_eq!(
+                    result.expect("it worked")["supportsConfigurationDoneRequest"],
+                    true
+                );
             }
             other => panic!("{other:?}", other = std::mem::discriminant(&other)),
         }
@@ -993,7 +995,10 @@ mod tests {
         let peer: Peer<()> = Peer::start(
             Spawn {
                 command: "sh",
-                args: &["-c".into(), "echo 'no module named nope' >&2; exit 1".into()],
+                args: &[
+                    "-c".into(),
+                    "echo 'no module named nope' >&2; exit 1".into(),
+                ],
                 root: std::path::Path::new("."),
                 env: &Default::default(),
                 label: "test",
@@ -1014,7 +1019,9 @@ mod tests {
         assert!(gone.is_some(), "it never said the peer had gone");
         // And by the time it says so, what the peer said is there to be read.
         assert!(
-            peer.complaints().iter().any(|line| line.contains("no module named nope")),
+            peer.complaints()
+                .iter()
+                .any(|line| line.contains("no module named nope")),
             "the reason had not arrived yet: {:?}",
             peer.complaints()
         );

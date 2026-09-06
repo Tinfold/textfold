@@ -199,7 +199,13 @@ mod tests {
     fn a_session_survives_being_written_down_and_read_back() {
         let session = Session {
             tabs: vec![tab("src/main.rs", 41), tab("README.md", 0)],
-            panes: vec![Pane { tab: 0, wrap: false }, Pane { tab: 1, wrap: true }],
+            panes: vec![
+                Pane {
+                    tab: 0,
+                    wrap: false,
+                },
+                Pane { tab: 1, wrap: true },
+            ],
             focus: 1,
             side_by_side: false,
             at: 1_700_000_000,
@@ -240,9 +246,13 @@ mod tests {
         }
         trim(&mut file);
         assert_eq!(file.projects.len(), KEEP);
-        assert!(!file.projects.contains_key("/project/0"), "the oldest stayed");
         assert!(
-            file.projects.contains_key(&format!("/project/{}", KEEP + 4)),
+            !file.projects.contains_key("/project/0"),
+            "the oldest stayed"
+        );
+        assert!(
+            file.projects
+                .contains_key(&format!("/project/{}", KEEP + 4)),
             "the newest went"
         );
     }

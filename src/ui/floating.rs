@@ -182,13 +182,16 @@ pub(super) fn draw_completion(frame: &mut Frame, app: &mut App, at: Position, gr
     let buf = frame.buffer_mut();
     buf.set_style(area, box_style(&theme, ground).fg(theme.foreground));
 
-    for (row, Row {
-        label,
-        suffix,
-        detail,
-        kind,
-        role,
-    }) in items.iter().enumerate()
+    for (
+        row,
+        Row {
+            label,
+            suffix,
+            detail,
+            kind,
+            role,
+        },
+    ) in items.iter().enumerate()
     {
         let y = area.y + row as u16;
         let chosen = top + row == cursor;
@@ -420,9 +423,7 @@ pub(super) fn draw_hover(frame: &mut Frame, app: &mut App, at: Position, ground:
         .pointer
         .and_then(|(column, row)| hover.link_at(column, row))
         .map(|link| link.word);
-    let dragged = hover
-        .select
-        .is_some_and(|(anchor, head)| anchor != head);
+    let dragged = hover.select.is_some_and(|(anchor, head)| anchor != head);
     let hint = match (&under, dragged, hover.focused, more) {
         (Some(word), ..) => Some(format!(" Ctrl-click to go to {word} ")),
         (None, true, ..) => Some(" Ctrl-C copies what you dragged over ".to_string()),
@@ -616,7 +617,14 @@ pub(super) fn draw_menu(frame: &mut Frame, app: &mut App, ground: Color) {
 
     let buf = frame.buffer_mut();
     let room = inside.width as usize;
-    for (row, item) in menu.items.iter().enumerate().skip(scroll).take(shown).map(|(n, item)| (n - scroll, item)) {
+    for (row, item) in menu
+        .items
+        .iter()
+        .enumerate()
+        .skip(scroll)
+        .take(shown)
+        .map(|(n, item)| (n - scroll, item))
+    {
         let y = inside.y + row as u16;
         if matches!(item.action, crate::menu::Action::Divide) {
             buf.set_stringn(

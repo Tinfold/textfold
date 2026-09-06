@@ -251,8 +251,10 @@ impl Said {
         // old colours. Dropped, it falls back to the grammar until the server
         // answers, which is a fraction of a second and correct throughout.
         self.semantic.retain(|(range, _)| !touched(*range, edits));
-        self.inlays.retain(|inlay| !touched(Range::point(inlay.at), edits));
-        self.lenses.retain(|lens| !touched(Range::point(lens.at), edits));
+        self.inlays
+            .retain(|inlay| !touched(Range::point(inlay.at), edits));
+        self.lenses
+            .retain(|lens| !touched(Range::point(lens.at), edits));
         for (range, _) in &mut self.semantic {
             *range = carried_range(*range, edits, len);
         }
@@ -594,8 +596,7 @@ const READ_TRIES: usize = 3;
 pub fn read_whole(path: &Path) -> Result<Option<(Vec<u8>, Stamp)>> {
     for _ in 0..READ_TRIES {
         let before = Stamp::of(path);
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let after = Stamp::of(path);
         if let Some(stamp) = after
             && before == after
@@ -868,9 +869,7 @@ impl Document {
                 Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
             },
             Err(e) => match e.downcast_ref::<std::io::Error>() {
-                Some(io) if io.kind() == std::io::ErrorKind::NotFound => {
-                    (Vec::new(), false, None)
-                }
+                Some(io) if io.kind() == std::io::ErrorKind::NotFound => (Vec::new(), false, None),
                 _ => return Err(e),
             },
         };
@@ -885,7 +884,11 @@ impl Document {
         // taken out here and put back on save, so nothing between the two ever
         // has to think about it.
         let crlf = text.contains("\r\n");
-        let text = if crlf { text.replace("\r\n", "\n") } else { text };
+        let text = if crlf {
+            text.replace("\r\n", "\n")
+        } else {
+            text
+        };
         let had_final_newline = text.is_empty() || text.ends_with('\n');
 
         // Two reasons a buffer cannot be written: the file says so, or reading
@@ -1116,7 +1119,11 @@ impl Document {
     /// The same, but standing alone in the undo history: the next thing typed
     /// starts a new revision rather than joining this one. For pastes,
     /// formats, and anything a language server did.
-    pub fn apply_atomic(&mut self, changes: Vec<Change>, selections: &Selections) -> Vec<AppliedEdit> {
+    pub fn apply_atomic(
+        &mut self,
+        changes: Vec<Change>,
+        selections: &Selections,
+    ) -> Vec<AppliedEdit> {
         let edits = self.apply_inner(changes, selections, false);
         if let Some(last) = self.done.last_mut() {
             last.open = false;
@@ -1139,10 +1146,7 @@ impl Document {
         // exists.
         self.undone.clear();
 
-        let step = Step {
-            changes,
-            inverse,
-        };
+        let step = Step { changes, inverse };
         let joins = mergeable
             && self
                 .done
@@ -1745,7 +1749,9 @@ const LINK_DEPTH: usize = 40;
 fn through_links(path: &Path) -> PathBuf {
     let mut at = path.to_path_buf();
     for _ in 0..LINK_DEPTH {
-        let Ok(to) = std::fs::read_link(&at) else { break };
+        let Ok(to) = std::fs::read_link(&at) else {
+            break;
+        };
         // A relative link is relative to the directory the link is in, not to
         // where the editor happens to have been started.
         at = match to.is_absolute() {
@@ -1982,9 +1988,16 @@ mod tests {
         let mut d = doc("");
         for round in 0..(MAX_REVISIONS + 50) {
             let was = d.len_chars();
-            d.apply_atomic(vec![Change::replace(was, was, format!("{round}\n"))], &sel(was));
+            d.apply_atomic(
+                vec![Change::replace(was, was, format!("{round}\n"))],
+                &sel(was),
+            );
         }
-        assert_eq!(d.done.len(), MAX_REVISIONS, "the history grew past its bound");
+        assert_eq!(
+            d.done.len(),
+            MAX_REVISIONS,
+            "the history grew past its bound"
+        );
 
         // What is dropped is always the oldest, so undo still works and only
         // runs out at the far end.
@@ -1993,7 +2006,9 @@ mod tests {
         assert!(d.can_undo());
         d.undo();
         assert!(
-            d.rope.to_string().ends_with(&format!("{}\n", MAX_REVISIONS + 48)),
+            d.rope
+                .to_string()
+                .ends_with(&format!("{}\n", MAX_REVISIONS + 48)),
             "undo did not take back the newest thing"
         );
     }
@@ -2005,7 +2020,10 @@ mod tests {
         let mut d = doc("");
         for round in 0..(MAX_REVISIONS + 10) {
             let was = d.len_chars();
-            d.apply_atomic(vec![Change::replace(was, was, format!("{round}\n"))], &sel(was));
+            d.apply_atomic(
+                vec![Change::replace(was, was, format!("{round}\n"))],
+                &sel(was),
+            );
         }
         d.mark_saved();
         assert!(!d.is_modified());
@@ -2079,7 +2097,10 @@ mod tests {
         }
         assert!(d.done.is_empty(), "{} revisions kept", d.done.len());
         assert!(d.undone.is_empty());
-        assert!(!d.is_modified(), "it should read as exactly what was put in");
+        assert!(
+            !d.is_modified(),
+            "it should read as exactly what was put in"
+        );
 
         // And undo has nothing to give back, which is the point: the history
         // is not merely hidden, it is gone.
@@ -2092,7 +2113,10 @@ mod tests {
         let mut d = doc("");
         for round in 0..50 {
             let was = d.len_chars();
-            d.apply_atomic(vec![Change::replace(0, was, format!("round {round}\n"))], &sel(0));
+            d.apply_atomic(
+                vec![Change::replace(0, was, format!("round {round}\n"))],
+                &sel(0),
+            );
         }
         assert_eq!(d.done.len(), 50, "the history really does grow otherwise");
     }
@@ -2124,7 +2148,10 @@ mod tests {
 
         let mut d = Document::open(DocId(0), &path, Indent::Spaces(4)).expect("opened");
         assert_eq!(d.bytes, Bytes::Lossy);
-        assert!(d.read_only, "a buffer that is not its file cannot be written");
+        assert!(
+            d.read_only,
+            "a buffer that is not its file cannot be written"
+        );
 
         let refused = d.save_to(&path, true).expect_err("it must refuse");
         assert!(
@@ -2179,7 +2206,10 @@ mod tests {
 
         let mut d = Document::open(DocId(0), &link, Indent::Spaces(4)).expect("opened");
         let len = d.len_chars();
-        d.apply_atomic(vec![Change::replace(0, len, "second\n".to_string())], &sel(0));
+        d.apply_atomic(
+            vec![Change::replace(0, len, "second\n".to_string())],
+            &sel(0),
+        );
         d.save_to(&link, true).expect("saved");
 
         assert!(
@@ -2234,7 +2264,10 @@ mod tests {
 
         let mut d = Document::open(DocId(0), &one, Indent::Spaces(4)).expect("opened");
         let len = d.len_chars();
-        d.apply_atomic(vec![Change::replace(0, len, "second\n".to_string())], &sel(0));
+        d.apply_atomic(
+            vec![Change::replace(0, len, "second\n".to_string())],
+            &sel(0),
+        );
         d.save_to(&one, true).expect("saved");
 
         assert_eq!(
@@ -2353,7 +2386,11 @@ mod tests {
         d.took_from_disk(stamp, Bytes::Utf8);
 
         assert!(!d.is_modified());
-        assert_eq!(d.check_disk(), OnDisk::Same, "it is up to date, and knows it");
+        assert_eq!(
+            d.check_disk(),
+            OnDisk::Same,
+            "it is up to date, and knows it"
+        );
 
         // And a further change is still noticed, rather than being hidden
         // behind a stamp taken at the wrong moment.
@@ -2563,7 +2600,10 @@ mod point_tests {
     fn a_line_and_column_counted_in_characters_finds_the_place() {
         let mut doc = Document::scratch(DocId(0), "test".into(), Indent::Spaces(4));
         let sel = crate::text::Selections::single(crate::text::Range::point(0));
-        doc.apply_atomic(vec![Change::replace(0, 0, String::from("héllo\nwörld\n"))], &sel);
+        doc.apply_atomic(
+            vec![Change::replace(0, 0, String::from("héllo\nwörld\n"))],
+            &sel,
+        );
 
         // Characters, not bytes and not UTF-16: the accented letter is one of
         // each, and column three is past it either way.

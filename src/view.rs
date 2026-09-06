@@ -878,7 +878,10 @@ mod tests {
         view.folds = vec![(3, 13)];
         // Four characters go in above it, the way typing a word would.
         let sel = Selections::single(Range::point(0));
-        let edits = doc.apply_atomic(vec![crate::doc::Change::insert(0, "abcd".to_string())], &sel);
+        let edits = doc.apply_atomic(
+            vec![crate::doc::Change::insert(0, "abcd".to_string())],
+            &sel,
+        );
         let len = doc.rope.len_chars();
         view.absorb(&edits, len);
         assert_eq!(

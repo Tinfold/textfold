@@ -30,8 +30,8 @@ mod session;
 mod syntax;
 mod term;
 mod text;
-mod tool;
 mod theme;
+mod tool;
 mod ui;
 mod venv;
 mod view;
@@ -182,15 +182,30 @@ fn main() -> Result<()> {
                 );
             }
             for server in &plugin.servers {
-                let state = if plugin::is_on(&server.id) { "on " } else { "off" };
+                let state = if plugin::is_on(&server.id) {
+                    "on "
+                } else {
+                    "off"
+                };
                 println!("{state}    {:<20} runs {}", server.id, server.command);
             }
             for debugger in &plugin.debuggers {
-                let state = if plugin::is_on(&debugger.id) { "on " } else { "off" };
-                println!("{state}    {:<20} debugs with {}", debugger.id, debugger.command);
+                let state = if plugin::is_on(&debugger.id) {
+                    "on "
+                } else {
+                    "off"
+                };
+                println!(
+                    "{state}    {:<20} debugs with {}",
+                    debugger.id, debugger.command
+                );
             }
             for tool in &plugin.tools {
-                let state = if plugin::is_on(&tool.id) { "on " } else { "off" };
+                let state = if plugin::is_on(&tool.id) {
+                    "on "
+                } else {
+                    "off"
+                };
                 println!("{state}    {:<20} runs {}", tool.id, tool.command);
             }
             // A plugin that brings a program of its own says so here as well
@@ -199,7 +214,11 @@ fn main() -> Result<()> {
             if let Some(host) = &plugin.host {
                 println!("      {:<20} its own program: {}", "", host.command);
                 for command in &plugin.commands {
-                    let state = if plugin::is_on(&command.id) { "on " } else { "off" };
+                    let state = if plugin::is_on(&command.id) {
+                        "on "
+                    } else {
+                        "off"
+                    };
                     println!("{state}    {:<20} {}", command.id, command.about);
                 }
             }
@@ -399,8 +418,11 @@ fn do_update(config: &Config, what: &str) -> Result<()> {
         return Ok(());
     }
     for package in updates {
-        println!("
-{}", package.detail());
+        println!(
+            "
+{}",
+            package.detail()
+        );
         do_package(pack::install(&package))?;
     }
     Ok(())
@@ -598,10 +620,7 @@ fn split_place(name: &str) -> (PathBuf, Option<(usize, usize)>) {
             Err(_) => (whole, None),
         },
         // `path:line`
-        (None, Some(path), Ok(line)) => (
-            PathBuf::from(path),
-            Some((line.saturating_sub(1), 0)),
-        ),
+        (None, Some(path), Ok(line)) => (PathBuf::from(path), Some((line.saturating_sub(1), 0))),
         _ => (whole, None),
     }
 }
@@ -620,7 +639,10 @@ mod tests {
             split_place("src/main.rs:42"),
             (PathBuf::from("src/main.rs"), Some((41, 0)))
         );
-        assert_eq!(split_place("src/main.rs"), (PathBuf::from("src/main.rs"), None));
+        assert_eq!(
+            split_place("src/main.rs"),
+            (PathBuf::from("src/main.rs"), None)
+        );
         // Not a number, so not a line.
         assert_eq!(
             split_place("weird:name"),

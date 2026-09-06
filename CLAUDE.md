@@ -13,17 +13,19 @@ Ctrl-Q leaves. Keyboard and mouse are both first-class.
 ## Commands
 
 ```sh
+cargo fmt --all          # rustfmt defaults, no rustfmt.toml
 cargo build              # debug; deps build at opt-level 2 (see Cargo.toml)
 cargo build --release
-cargo test               # ~660 tests, no terminal, network or LSP needed
+cargo test               # ~600 tests, no terminal, network or LSP needed
 cargo clippy --all-targets -- -D warnings
 ```
 
-CI (`.github/workflows/ci.yml`) runs build, test and clippy on Linux and macOS.
+CI (`.github/workflows/ci.yml`) runs `cargo fmt --check`, build, test and
+clippy on Linux and macOS. The format check runs first and is a hard failure,
+so **run `cargo fmt --all` before committing**.
 
-**Do not run `rustfmt`.** Formatting is deliberately not checked, and the
-source is hand-set in places rustfmt would undo. Match the surrounding style by
-hand instead.
+`./scripts/install-hooks.sh` points `core.hooksPath` at `.githooks/`, whose
+pre-commit hook formats the staged Rust files and restages them.
 
 Rust 1.89+, edition 2024. A cold build takes a couple of minutes because the
 tree-sitter grammars are C and are compiled in.

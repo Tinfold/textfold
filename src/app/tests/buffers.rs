@@ -17,8 +17,7 @@ fn what_is_open_and_where_you_are_in_it_is_what_gets_written_down() {
     app.go_to(1, 3);
 
     let session = app.session();
-    let paths: Vec<&std::path::Path> =
-        session.tabs.iter().map(|t| t.path.as_path()).collect();
+    let paths: Vec<&std::path::Path> = session.tabs.iter().map(|t| t.path.as_path()).collect();
     assert_eq!(paths, [one.as_path(), two.as_path()], "tab order");
     assert_eq!((session.tabs[0].line, session.tabs[0].column), (1, 3));
     // One pane, showing the file it is showing.
@@ -355,7 +354,10 @@ fn a_file_being_written_to_is_left_alone_until_it_stops() {
     // It stops. The next look sees it twice the same and takes it.
     app.check_disk();
     assert!(!app.unsettled);
-    assert_eq!(app.doc(id).map(|d| d.rope.to_string()).as_deref(), Some("line\nline\nline\nline\n\n"));
+    assert_eq!(
+        app.doc(id).map(|d| d.rope.to_string()).as_deref(),
+        Some("line\nline\nline\nline\n\n")
+    );
     std::fs::remove_file(&path).ok();
 }
 
@@ -451,7 +453,11 @@ fn a_log_being_appended_to_leaves_the_cursor_where_it_was() {
         "one\ntwo\nthree\nfour\nfive\nsix\n",
         "the new line was not taken"
     );
-    assert_eq!(app.view().cursor(), was, "the cursor was dragged to the end");
+    assert_eq!(
+        app.view().cursor(),
+        was,
+        "the cursor was dragged to the end"
+    );
     assert_eq!(app.doc(id).map(|d| d.bookmarks.clone()), Some(vec![was]));
     assert_eq!(line_now(&app), 2, "and is still on the line it was reading");
     std::fs::remove_file(&path).ok();

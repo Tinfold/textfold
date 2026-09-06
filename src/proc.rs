@@ -217,7 +217,10 @@ mod tests {
 
     #[test]
     fn a_command_line_is_its_arguments_with_the_nuls_taken_out() {
-        assert_eq!(from_argv(b"cc\0-g\0-o\0main\0main.c\0"), "cc -g -o main main.c");
+        assert_eq!(
+            from_argv(b"cc\0-g\0-o\0main\0main.c\0"),
+            "cc -g -o main main.c"
+        );
         // A kernel thread has nothing at all, and is not something to attach
         // to.
         assert_eq!(from_argv(b""), "");
@@ -249,7 +252,6 @@ mod tests {
         assert_eq!(started_at(&stat), Some(22));
         std::fs::remove_dir_all(&dir).ok();
     }
-
 
     #[test]
     fn what_is_running_includes_something_we_started_and_never_ourselves() {

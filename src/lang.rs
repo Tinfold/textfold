@@ -1152,7 +1152,10 @@ impl FileDebugger {
     /// a debugger that could never do anything, and is dropped with a word
     /// rather than offered and then failing when somebody presses the key.
     pub fn is_whole(&self) -> bool {
-        let program = self.command.as_deref().is_some_and(|c| !c.trim().is_empty());
+        let program = self
+            .command
+            .as_deref()
+            .is_some_and(|c| !c.trim().is_empty());
         let asked = self.server.as_deref().is_some_and(|s| !s.trim().is_empty())
             && self.start.as_deref().is_some_and(|s| !s.trim().is_empty());
         program || asked
@@ -1326,7 +1329,11 @@ mod tests {
         let rope = Rope::from_str("pick c0ffee a commit\n");
         let rebase = by_name("git-rebase").expect("the plugin ships");
         for name in ["git-rebase-todo", "git-rebase-todo.backup"] {
-            assert_eq!(detect(Path::new(name), &rope), rebase, "{name} is a rebase plan");
+            assert_eq!(
+                detect(Path::new(name), &rope),
+                rebase,
+                "{name} is a rebase plan"
+            );
         }
         let git = by_name("git").expect("the plugin ships");
         for name in ["COMMIT_EDITMSG", "MERGE_MSG", "SQUASH_MSG", "TAG_EDITMSG"] {
@@ -1484,10 +1491,8 @@ mod tests {
             langs: vec![blank(LangId(0), "rust")],
             problems: Vec::new(),
         };
-        let first: BTreeMap<String, FileLang> = serde_json::from_str(
-            r#"{"rust":{"extensions":["rs"],"line_comment":"//"}}"#,
-        )
-        .unwrap();
+        let first: BTreeMap<String, FileLang> =
+            serde_json::from_str(r#"{"rust":{"extensions":["rs"],"line_comment":"//"}}"#).unwrap();
         langs.merge("rust", &first);
         let second: BTreeMap<String, FileLang> =
             serde_json::from_str(r#"{"rust":{"servers":[{"command":"rust-analyzer"}]}}"#).unwrap();
@@ -1679,7 +1684,3 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
-
-
-
-

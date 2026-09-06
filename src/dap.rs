@@ -353,7 +353,10 @@ impl Session {
     /// Whether the adapter says it can do something. The names are the
     /// protocol's own, so this reads as its documentation does.
     pub fn can(&self, what: &str) -> bool {
-        self.caps.get(what).and_then(Value::as_bool).unwrap_or(false)
+        self.caps
+            .get(what)
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
     }
 
     fn notify(&mut self, command: &str, arguments: Value) {
@@ -646,7 +649,6 @@ impl Debugger {
         environment: Option<&Path>,
         peer: Peer<Ask>,
     ) {
-
         let what = file
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -775,7 +777,12 @@ impl Debugger {
     }
 
     /// Something the adapter volunteered.
-    fn on_event(&mut self, event: &str, body: &Value, breakpoints: &[(PathBuf, Vec<usize>)]) -> Change {
+    fn on_event(
+        &mut self,
+        event: &str,
+        body: &Value,
+        breakpoints: &[(PathBuf, Vec<usize>)],
+    ) -> Change {
         // "I am ready to be configured." Breakpoints go now and not before:
         // this is the one ordering rule in the protocol that every adapter
         // enforces, and answering it here rather than handing it back to the
@@ -988,9 +995,7 @@ impl Debugger {
                     .and_then(Value::as_array)
                     .map(|list| {
                         list.iter()
-                            .filter(|b| {
-                                b.get("verified").and_then(Value::as_bool).unwrap_or(false)
-                            })
+                            .filter(|b| b.get("verified").and_then(Value::as_bool).unwrap_or(false))
                             .filter_map(|b| Some(b.get("line")?.as_i64()? as usize))
                             .map(|line| line.saturating_sub(1))
                             .collect()
@@ -1374,17 +1379,10 @@ fn read_frames(value: &Value) -> Vec<Frame> {
                             .and_then(Value::as_str)
                             .filter(|p| !p.is_empty())
                             .map(PathBuf::from),
-                        line: f
-                            .get("line")
-                            .and_then(Value::as_i64)
-                            .unwrap_or(1)
-                            .max(1) as usize
+                        line: f.get("line").and_then(Value::as_i64).unwrap_or(1).max(1) as usize
                             - 1,
-                        column: f
-                            .get("column")
-                            .and_then(Value::as_i64)
-                            .unwrap_or(1)
-                            .max(1) as usize
+                        column: f.get("column").and_then(Value::as_i64).unwrap_or(1).max(1)
+                            as usize
                             - 1,
                     })
                 })
@@ -1403,9 +1401,7 @@ fn read_variables(value: &Value) -> Vec<Variable> {
                 .filter_map(|v| {
                     Some(Variable {
                         name: v.get("name")?.as_str()?.to_string(),
-                        value: shorten(
-                            v.get("value").and_then(Value::as_str).unwrap_or(""),
-                        ),
+                        value: shorten(v.get("value").and_then(Value::as_str).unwrap_or("")),
                         kind: v
                             .get("type")
                             .and_then(Value::as_str)
@@ -1636,10 +1632,7 @@ pub fn filled(
     // the whole question. You cannot debug `main.c`; you debug what came out
     // of compiling it, and `cc -g -o main main.c` is what everybody's first
     // one is called.
-    vars.set(
-        "file_stem",
-        file.with_extension("").display().to_string(),
-    );
+    vars.set("file_stem", file.with_extension("").display().to_string());
     // And its own name with the extension off, which is what a Java class is
     // called: `src/Main.java` is the class `Main`.
     if let Some(base) = file.file_stem() {
@@ -1670,14 +1663,18 @@ pub fn filled(
         // than dropped. `${python}` with no environment anywhere should fall
         // back to running `python3` off the `PATH`, which is what most people
         // have and what the manifest says to do about it.
-        command: vars.fill(&config.command).unwrap_or_else(|| config.command.clone()),
+        command: vars
+            .fill(&config.command)
+            .unwrap_or_else(|| config.command.clone()),
         args: config
             .args
             .iter()
             .map(|a| vars.fill(a).unwrap_or_else(|| a.clone()))
             .collect(),
         roots: config.roots.clone(),
-        launch: vars.fill_value(&config.launch).unwrap_or_else(|| config.launch.clone()),
+        launch: vars
+            .fill_value(&config.launch)
+            .unwrap_or_else(|| config.launch.clone()),
         // Carried through as written. What reaches the adapter is a copy of
         // this with a picked process in it, put where `launch` goes — see
         // [`about_process`], which is the whole of the difference between the
@@ -1931,7 +1928,10 @@ mod tests {
     /// packages in it is the ordinary case rather than the exception.
     #[test]
     fn a_class_is_qualified_by_the_package_it_declares() {
-        assert_eq!(package_of("package com.example.calc;\n"), Some("com.example.calc".into()));
+        assert_eq!(
+            package_of("package com.example.calc;\n"),
+            Some("com.example.calc".into())
+        );
         assert_eq!(
             package_of("package com.example;\n\nimport java.util.List;\n\nclass Main {}\n"),
             Some("com.example".into()),
@@ -1942,7 +1942,10 @@ mod tests {
     fn a_file_with_no_package_line_is_in_the_default_package() {
         // The bare name is right here, and is what `${file_base}` also gives.
         assert_eq!(package_of("class Main {}\n"), None);
-        assert_eq!(package_of("import java.util.List;\n\nclass Main {}\n"), None);
+        assert_eq!(
+            package_of("import java.util.List;\n\nclass Main {}\n"),
+            None
+        );
         assert_eq!(package_of(""), None);
     }
 
@@ -1951,7 +1954,10 @@ mod tests {
     #[test]
     fn the_word_package_in_a_comment_is_not_a_package_declaration() {
         assert_eq!(package_of("// package com.wrong;\nclass Main {}\n"), None);
-        assert_eq!(package_of("/* package com.wrong; */\nclass Main {}\n"), None);
+        assert_eq!(
+            package_of("/* package com.wrong; */\nclass Main {}\n"),
+            None
+        );
         assert_eq!(
             package_of("/*\n * package com.wrong;\n */\npackage com.right;\nclass Main {}\n"),
             Some("com.right".into()),
@@ -2182,7 +2188,9 @@ mod tests {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let mut debug = Debugger::new(tx);
-        debug.start(&config, &root, &source, None).expect("gdb started");
+        debug
+            .start(&config, &root, &source, None)
+            .expect("gdb started");
         let attached = run_until(&mut debug, &rx, &[], 40, |d| {
             d.session().is_some_and(|s| s.state.is_stopped())
         });
@@ -2198,7 +2206,10 @@ mod tests {
         running.kill().ok();
         running.wait().ok();
         std::fs::remove_dir_all(&root).ok();
-        assert!(alive, "stopping the debugger killed a program it did not start");
+        assert!(
+            alive,
+            "stopping the debugger killed a program it did not start"
+        );
     }
 
     #[test]
@@ -2233,7 +2244,10 @@ mod tests {
         // everybody means by it and typing `127.0.0.1:` first is a toll.
         assert_eq!(read_address("5005"), Some(("127.0.0.1".into(), 5005)));
         assert_eq!(read_address("  5005 "), Some(("127.0.0.1".into(), 5005)));
-        assert_eq!(read_address("10.0.0.2:5005"), Some(("10.0.0.2".into(), 5005)));
+        assert_eq!(
+            read_address("10.0.0.2:5005"),
+            Some(("10.0.0.2".into(), 5005))
+        );
         assert_eq!(read_address("box.local:9"), Some(("box.local".into(), 9)));
         // An address whose own colons are its own.
         assert_eq!(read_address("[::1]:5005"), Some(("::1".into(), 5005)));
@@ -2269,7 +2283,9 @@ mod tests {
         // difference is a number or a placeholder, which is the manifest's to
         // write.
         assert!(needs_an_address(&json!({ "port": "${port}" })));
-        assert!(needs_an_address(&json!({ "listen": { "host": "${host}" } })));
+        assert!(needs_an_address(
+            &json!({ "listen": { "host": "${host}" } })
+        ));
         assert!(!needs_an_address(&json!({ "port": 5005 })));
         // And neither kind of address is a process to pick out of a list.
         assert!(!needs_a_process(&json!({ "port": "${port}" })));
@@ -2452,7 +2468,9 @@ mod tests {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let mut debug = Debugger::new(tx);
-        debug.start(&config, &root, &file, None).expect("sh started");
+        debug
+            .start(&config, &root, &file, None)
+            .expect("sh started");
 
         let over = run_until(&mut debug, &rx, &[], 20, |d| {
             d.session().is_some_and(|s| s.state.is_over())
@@ -2465,7 +2483,9 @@ mod tests {
         );
         assert_eq!(session.state, State::Ended("would not start".into()));
         assert!(
-            session.why_not().is_some_and(|why| why.contains("No module named nope")),
+            session
+                .why_not()
+                .is_some_and(|why| why.contains("No module named nope")),
             "the one line worth showing should be what it actually said"
         );
         let said = session.all_printed();
@@ -2473,7 +2493,10 @@ mod tests {
         // What was actually run — resolved, because `${python}` quietly
         // becoming an interpreter with nothing in it is invisible from
         // anywhere else, and two different `python3`s look identical.
-        assert!(said.contains("textfold ran: /"), "not a full path: {said:?}");
+        assert!(
+            said.contains("textfold ran: /"),
+            "not a full path: {said:?}"
+        );
         assert!(said.contains("sh -c"), "{said:?}");
         // And *not* where a Python came from. This adapter is `sh`; it never
         // asked for an interpreter, and telling somebody debugging something
@@ -2522,7 +2545,9 @@ mod tests {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let mut debug = Debugger::new(tx);
-        debug.start(&config, &root, &file, None).expect("sh started");
+        debug
+            .start(&config, &root, &file, None)
+            .expect("sh started");
         let over = run_until(&mut debug, &rx, &[], 20, |d| {
             d.session().is_some_and(|s| s.state.is_over())
         });
@@ -2553,7 +2578,9 @@ mod tests {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let mut debug = Debugger::new(tx);
-        debug.start(&config, &root, &file, None).expect("sh started");
+        debug
+            .start(&config, &root, &file, None)
+            .expect("sh started");
         let over = run_until(&mut debug, &rx, &[], 20, |d| {
             d.session().is_some_and(|s| s.state.is_over())
         });
@@ -2720,10 +2747,7 @@ mod tests {
             d.session().is_some_and(|s| s.state.is_over())
         });
         assert!(ended, "it never finished: {:?}", state_of(&debug));
-        let printed = debug
-            .session()
-            .map(|s| s.all_printed())
-            .unwrap_or_default();
+        let printed = debug.session().map(|s| s.all_printed()).unwrap_or_default();
         assert!(printed.contains("answer 10"), "{printed:?}");
         // And not gdb clearing its throat before there was a program at all.
         assert!(
@@ -2769,9 +2793,13 @@ mod tests {
 
         // One session, and then another — which is what pressing the key
         // again does once the first attempt has been given up on.
-        debug.start(&sit_there, &root, &file, None).expect("started");
+        debug
+            .start(&sit_there, &root, &file, None)
+            .expect("started");
         let first = debug.session().expect("a session").id;
-        debug.start(&sit_there, &root, &file, None).expect("started again");
+        debug
+            .start(&sit_there, &root, &file, None)
+            .expect("started again");
         let second = debug.session().expect("a session").id;
         assert_ne!(first, second, "a restart is a new session");
 
@@ -2813,18 +2841,26 @@ mod tests {
         session.state = State::Running;
         debug.session = Some(session);
 
-        debug.on(id, Incoming::Notification {
-            method: "exited".into(),
-            params: json!({ "exitCode": 3 }),
-        }, &[]);
+        debug.on(
+            id,
+            Incoming::Notification {
+                method: "exited".into(),
+                params: json!({ "exitCode": 3 }),
+            },
+            &[],
+        );
         assert_eq!(
             debug.session().expect("a session").state,
             State::Ended("exited 3".into())
         );
-        debug.on(id, Incoming::Notification {
-            method: "terminated".into(),
-            params: Value::Null,
-        }, &[]);
+        debug.on(
+            id,
+            Incoming::Notification {
+                method: "terminated".into(),
+                params: Value::Null,
+            },
+            &[],
+        );
         assert_eq!(
             debug.session().expect("a session").state,
             State::Ended("exited 3".into()),
@@ -3006,7 +3042,9 @@ mod tests {
         // function. Sent as line 3 on the wire, which is the conversion this
         // test exists to catch.
         let breakpoints = vec![(file.clone(), vec![1])];
-        debug.start(&config, &root, &file, None).expect("debugpy started");
+        debug
+            .start(&config, &root, &file, None)
+            .expect("debugpy started");
 
         let stopped = run_until(&mut debug, &rx, &breakpoints, 60, |d| {
             d.session()
@@ -3034,19 +3072,15 @@ mod tests {
         // variables in them — so this waits rather than asserting at once.
         let got_values = run_until(&mut debug, &rx, &breakpoints, 20, |d| {
             d.session().is_some_and(|s| {
-                s.values.values().any(|list| list.iter().any(|v| v.name == "n"))
+                s.values
+                    .values()
+                    .any(|list| list.iter().any(|v| v.name == "n"))
             })
         });
         assert!(got_values, "no locals ever arrived");
         let n = debug
             .session()
-            .and_then(|s| {
-                s.values
-                    .values()
-                    .flatten()
-                    .find(|v| v.name == "n")
-                    .cloned()
-            })
+            .and_then(|s| s.values.values().flatten().find(|v| v.name == "n").cloned())
             .expect("n is a local of fizz");
         assert_eq!(n.value, "5", "fizz was called with 5");
 
@@ -3130,15 +3164,14 @@ mod tests {
         };
         let (tx, rx) = std::sync::mpsc::channel();
         let mut debug = Debugger::new(tx);
-        debug.start(&config, &root, &file, None).expect("debugpy started");
+        debug
+            .start(&config, &root, &file, None)
+            .expect("debugpy started");
         let ended = run_until(&mut debug, &rx, &[], 60, |d| {
             d.session().is_some_and(|s| s.state.is_over())
         });
         assert!(ended, "it never finished: {:?}", state_of(&debug));
-        let printed = debug
-            .session()
-            .map(|s| s.all_printed())
-            .unwrap_or_default();
+        let printed = debug.session().map(|s| s.all_printed()).unwrap_or_default();
         assert!(printed.contains("hello"), "{printed:?}");
         debug.stop();
         std::fs::remove_dir_all(&root).ok();

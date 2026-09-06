@@ -153,7 +153,9 @@ pub(super) fn draw_tabs(frame: &mut Frame, app: &mut App, area: Rect, ground: Co
     if scroll > 0 {
         let back = starts().rfind(|at| *at < scroll).unwrap_or(0);
         arrow(buf, area.x, area.y, '\u{2039}', theme);
-        app.hits.nudges.push((Rect::new(area.x, area.y, 1, 1), back));
+        app.hits
+            .nudges
+            .push((Rect::new(area.x, area.y, 1, 1), back));
     }
     if scroll < furthest {
         let on = starts()

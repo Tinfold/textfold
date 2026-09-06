@@ -149,7 +149,8 @@ impl App {
         // that belongs to the tab beneath it, and the arrow is what is on the
         // screen there.
         if let Some(to) = self
-            .hits.nudges
+            .hits
+            .nudges
             .iter()
             .find(|(area, _)| hits(*area, column, row))
             .map(|(_, to)| *to)
@@ -158,7 +159,8 @@ impl App {
             return;
         }
         if let Some((id, close)) = self
-            .hits.tabs
+            .hits
+            .tabs
             .iter()
             .find(|(area, _, _)| hits(*area, column, row))
             .map(|(_, id, close)| (*id, *close))
@@ -190,7 +192,8 @@ impl App {
 
         // The status bar.
         if let Some(cmd) = self
-            .hits.status
+            .hits
+            .status
             .iter()
             .find(|(area, _)| hits(*area, column, row))
             .map(|(_, cmd)| *cmd)
@@ -426,7 +429,8 @@ impl App {
             return;
         }
         if let Some(id) = self
-            .hits.tabs
+            .hits
+            .tabs
             .iter()
             .find(|(area, _, _)| hits(*area, column, row))
             .map(|(_, id, _)| *id)
@@ -642,7 +646,11 @@ impl App {
         let ordinary: Vec<usize> = (0..self.panes.len())
             .filter(|at| self.panes[*at].dock.is_none())
             .collect();
-        let Some(which) = ordinary.iter().position(|at| *at == pane).filter(|at| *at > 0) else {
+        let Some(which) = ordinary
+            .iter()
+            .position(|at| *at == pane)
+            .filter(|at| *at > 0)
+        else {
             return;
         };
         let (before, here) = (ordinary[which - 1], ordinary[which]);
@@ -693,7 +701,9 @@ impl App {
     /// drifting away from it over a long drag.
     pub(super) fn resize_dock(&mut self, pane: usize, column: u16, row: u16) {
         let screen = self.screen;
-        let Some(view) = self.panes.get(pane) else { return };
+        let Some(view) = self.panes.get(pane) else {
+            return;
+        };
         let (Some(dock), frame) = (view.dock, view.frame) else {
             return;
         };
@@ -867,7 +877,8 @@ impl App {
     /// came from.
     pub(super) fn tip_at_screen(&mut self, column: u16, row: u16) -> bool {
         let Some(id) = self
-            .hits.tabs
+            .hits
+            .tabs
             .iter()
             .find(|(area, _, _)| hits(*area, column, row))
             .map(|(_, id, _)| *id)
@@ -879,7 +890,8 @@ impl App {
         // a label that flickered as you crossed between them would be a
         // label about the wrong thing.
         let about = self
-            .hits.tabs
+            .hits
+            .tabs
             .iter()
             .filter(|(_, other, _)| *other == id)
             .map(|(area, _, _)| *area)

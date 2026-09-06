@@ -148,7 +148,10 @@ impl Menu {
             .items
             .iter()
             .map(|item| {
-                let key = item.key.as_deref().map_or(0, |k| crate::text::str_width(k) + 3);
+                let key = item
+                    .key
+                    .as_deref()
+                    .map_or(0, |k| crate::text::str_width(k) + 3);
                 crate::text::str_width(&item.label) + key
             })
             .max()
@@ -248,7 +251,10 @@ mod tests {
 
     #[test]
     fn a_menu_of_nothing_choosable_chooses_nothing() {
-        let mut m = menu(vec![Item::divider(), Item::new("cut", Cmd::CUT).enabled(false)]);
+        let mut m = menu(vec![
+            Item::divider(),
+            Item::new("cut", Cmd::CUT).enabled(false),
+        ]);
         m.step(1);
         assert_eq!(m.chosen(), None);
     }

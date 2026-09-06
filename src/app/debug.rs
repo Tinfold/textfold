@@ -51,7 +51,9 @@ impl App {
     pub(super) fn build(&mut self) {
         let language = lang::get(self.here().language).name.clone();
         if self.start_building(AfterBuild::Nothing) == Building::NotAThing {
-            self.say(format!("nothing installed here knows how to build {language}"));
+            self.say(format!(
+                "nothing installed here knows how to build {language}"
+            ));
         }
     }
 
@@ -199,7 +201,10 @@ impl App {
             return Building::NotAThing;
         };
         if !saved {
-            self.say(format!("save this to a file first — {} needs one", tool.name));
+            self.say(format!(
+                "save this to a file first — {} needs one",
+                tool.name
+            ));
             return Building::Refused;
         }
         // The compiler reads the file on disk, exactly as the debugger runs
@@ -266,7 +271,10 @@ impl App {
             // different Python from the type checker is a debugger that will
             // disagree with your editor about what is installed.
             let environment = self.lsp.environments.get(&root).cloned();
-            match self.debug.start(config, &root, &path, environment.as_deref()) {
+            match self
+                .debug
+                .start(config, &root, &path, environment.as_deref())
+            {
                 Ok(()) => return self.debugging_now(config, &path),
                 // The last word rather than the first: the last adapter tried
                 // is the one whose absence is worth reporting, and a list of
@@ -338,13 +346,16 @@ impl App {
         let mine = |process: &crate::proc::Process| {
             root.as_deref().is_some_and(|root| process.is_inside(root))
         };
-        let (ours, theirs): (Vec<_>, Vec<_>) =
-            running.into_iter().partition(mine);
+        let (ours, theirs): (Vec<_>, Vec<_>) = running.into_iter().partition(mine);
 
         let rows: Vec<Row> = ours
             .iter()
             .map(|process| self.process_row(process, true))
-            .chain(theirs.iter().map(|process| self.process_row(process, false)))
+            .chain(
+                theirs
+                    .iter()
+                    .map(|process| self.process_row(process, false)),
+            )
             .collect();
         self.overlay = Overlay::Picker(Picker::new(Kind::Processes, rows));
     }
@@ -401,11 +412,7 @@ impl App {
     /// start looking.
     pub(super) fn remembered_address(&self) -> String {
         let root = self.attach_root();
-        if let Some(said) = self
-            .config
-            .debug_addresses
-            .get(&root.display().to_string())
-        {
+        if let Some(said) = self.config.debug_addresses.get(&root.display().to_string()) {
             return said.clone();
         }
         // Nothing remembered, so whatever the adapter says is conventional for
@@ -501,7 +508,10 @@ impl App {
                 }
             }
             let environment = self.lsp.environments.get(&root).cloned();
-            match self.debug.start(&config, &root, &path, environment.as_deref()) {
+            match self
+                .debug
+                .start(&config, &root, &path, environment.as_deref())
+            {
                 Ok(()) => {
                     self.say_good(match (&process, &address) {
                         (Some(process), _) => format!(
@@ -625,10 +635,7 @@ impl App {
             root,
             file,
         };
-        if !self
-            .lsp
-            .start_debug_session(server, &from.start, &[], ask)
-        {
+        if !self.lsp.start_debug_session(server, &from.start, &[], ask) {
             self.say_bad(format!("{} would not start a debug session", from.server));
         }
     }
@@ -931,7 +938,10 @@ impl App {
             return self.say("no conflict markers in this file");
         }
         let to = match forwards {
-            true => found.iter().find(|c| c.start > line).or_else(|| found.first()),
+            true => found
+                .iter()
+                .find(|c| c.start > line)
+                .or_else(|| found.first()),
             false => found
                 .iter()
                 .rev()
@@ -1310,7 +1320,8 @@ impl App {
 
     pub(super) fn debug_panel_lines(&self) -> Vec<Value> {
         let mut lines: Vec<Value> = Vec::new();
-        let plain = |text: &str, style: &str| json!({ "spans": [{ "text": text, "style": style }] });
+        let plain =
+            |text: &str, style: &str| json!({ "spans": [{ "text": text, "style": style }] });
 
         let Some(session) = self.debug.session() else {
             lines.push(self.debug_buttons(None));
@@ -1337,7 +1348,10 @@ impl App {
                 _ => lines.push(plain("Nothing is being debugged.", "muted")),
             }
             lines.push(json!(""));
-            let key = self.keys.shortcut(Cmd::DEBUG).unwrap_or_else(|| "F5".into());
+            let key = self
+                .keys
+                .shortcut(Cmd::DEBUG)
+                .unwrap_or_else(|| "F5".into());
             lines.push(plain(
                 &format!("{key} runs the file you are looking at under a debugger."),
                 "muted",
@@ -1378,11 +1392,7 @@ impl App {
             for frame in &session.frames {
                 let here = session.frame == Some(frame.id);
                 let place = match &frame.path {
-                    Some(path) => format!(
-                        "{}:{}",
-                        short(path, &self.project),
-                        frame.line + 1
-                    ),
+                    Some(path) => format!("{}:{}", short(path, &self.project), frame.line + 1),
                     None => "no source".to_string(),
                 };
                 lines.push(json!({ "spans": [
@@ -1526,7 +1536,10 @@ impl App {
         // row that offered it mid-session would be offering to throw the
         // session away.
         let can_attach = self.the_code().is_some_and(|doc| {
-            lang::get(doc.language).debuggers.iter().any(|d| d.can_attach())
+            lang::get(doc.language)
+                .debuggers
+                .iter()
+                .any(|d| d.can_attach())
         });
         if !alive && !coming && can_attach {
             button("⚯ Attach", "attach", true);

@@ -637,7 +637,10 @@ impl Themes {
         let mut files: Vec<PathBuf> = read
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")))
+            .filter(|p| {
+                p.extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("json"))
+            })
             .collect();
         // A fixed order, so two files claiming one name settle the same way
         // every time rather than by whatever the directory happens to say.
@@ -961,7 +964,10 @@ impl FileTheme {
             muted: first([ui.and_then(|u| u.muted), old.muted], base.muted),
             faint: first([ui.and_then(|u| u.faint), old.dim], base.faint),
             accent: first([ui.and_then(|u| u.accent), old.accent], base.accent),
-            on_accent: first([ui.and_then(|u| u.on_accent), old.on_accent], base.on_accent),
+            on_accent: first(
+                [ui.and_then(|u| u.on_accent), old.on_accent],
+                base.on_accent,
+            ),
             success: first([ui.and_then(|u| u.success), old.good], base.success),
             warning: first([ui.and_then(|u| u.warning), old.warn], base.warning),
             error: first([ui.and_then(|u| u.error), old.bad], base.error),
@@ -1292,7 +1298,11 @@ mod tests {
                 ("changed", theme.changed),
                 ("removed", theme.removed),
             ] {
-                assert_ne!(colour, ground, "{}: {what} is the background colour", named.name);
+                assert_ne!(
+                    colour, ground,
+                    "{}: {what} is the background colour",
+                    named.name
+                );
             }
         }
     }

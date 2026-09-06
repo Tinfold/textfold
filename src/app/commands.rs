@@ -456,4 +456,3 @@ commands! {
                         app.themes.entries.len()
                     ));
 }
-

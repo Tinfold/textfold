@@ -153,7 +153,11 @@ pub struct Config {
     /// instructions and turns your file dim, italic, and in places invisible
     /// — see [`crate::term::understands_underline_colour`]. Say `"on"` if
     /// your terminal does have it and textfold has not worked that out.
-    #[serde(default, alias = "underline_color", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "underline_color",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub underline_colour: Option<String>,
 
     /// Whether to try the terminal's extended keyboard protocol, which is
@@ -478,14 +482,14 @@ mod tests {
         // Anything unnamed sorts after everything named rather than being
         // dropped. Naming one formatter moves it to the front; it does not
         // switch off the ones you did not think to write down.
-        assert_eq!(
-            config.formatter_rank(["python/black", "black"]),
-            usize::MAX
-        );
+        assert_eq!(config.formatter_rank(["python/black", "black"]), usize::MAX);
         // And saying nothing at all leaves everything exactly where it was.
         let quiet = Config::default();
         assert_eq!(quiet.formatter_rank(["lsp", "language-server"]), usize::MAX);
-        assert_eq!(quiet.formatter_rank(["web/prettier", "prettier"]), usize::MAX);
+        assert_eq!(
+            quiet.formatter_rank(["web/prettier", "prettier"]),
+            usize::MAX
+        );
     }
 
     #[test]

@@ -482,7 +482,10 @@ fn resting_on_a_tab_says_which_file_it_is() {
     // crossing between them does not take it away and does not start again.
     assert_eq!(tip.about, Rect::new(0, 0, 11, 1));
     app.mouse_moved(10, 0);
-    assert!(app.tip.is_some(), "the label went as the pointer crossed it");
+    assert!(
+        app.tip.is_some(),
+        "the label went as the pointer crossed it"
+    );
     // And leaving the tab does.
     app.mouse_moved(3, 8);
     assert!(app.tip.is_none(), "the label outlived the tab it was about");

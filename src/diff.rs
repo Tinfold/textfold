@@ -204,7 +204,10 @@ impl Diff {
             .filter(|(n, at)| *n == 0 || marks[n - 1].0 + 1 != *at)
             .map(|(_, at)| at);
         if forwards {
-            starts.clone().find(|at| *at > from).or_else(|| starts.min())
+            starts
+                .clone()
+                .find(|at| *at > from)
+                .or_else(|| starts.min())
         } else {
             let before: Vec<usize> = starts.clone().filter(|at| *at < from).collect();
             before.last().copied().or_else(|| starts.max())

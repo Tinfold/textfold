@@ -85,7 +85,10 @@ fn place_panes(app: &mut App, body: Rect) {
         .collect();
     // What each pane in the middle gets, by the share it has been dragged to.
     let along = share_out(
-        &ordinary.iter().map(|at| app.panes[*at].share).collect::<Vec<f32>>(),
+        &ordinary
+            .iter()
+            .map(|at| app.panes[*at].share)
+            .collect::<Vec<f32>>(),
         match app.side_by_side {
             true => middle.width,
             false => middle.height,
@@ -120,10 +123,9 @@ fn place_panes(app: &mut App, body: Rect) {
             && ordinary.first().is_some_and(|first| *first != index);
         let (grip, inner) = match app.panes[index].dock.map(|d| d.edge) {
             _ if frame.width == 0 || frame.height == 0 => (None, frame),
-            None if after_another && app.side_by_side => (
-                Some(Rect::new(frame.x, frame.y, 1, frame.height)),
-                frame,
-            ),
+            None if after_another && app.side_by_side => {
+                (Some(Rect::new(frame.x, frame.y, 1, frame.height)), frame)
+            }
             None if after_another => (
                 Some(Rect::new(frame.x, frame.y, frame.width, 1)),
                 Rect::new(frame.x, frame.y + 1, frame.width, frame.height - 1),

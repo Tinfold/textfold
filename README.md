@@ -135,13 +135,16 @@ every manifest field, and why most of it works the way it does.
 ## Contributing
 
 ```sh
+cargo fmt --all
 cargo build
 cargo test      # a few hundred tests, none need a terminal or a network
 cargo clippy --all-targets -- -D warnings
 ```
 
-Those three are what CI runs, on Linux and macOS. Please don't run rustfmt on
-it; the source is hand-set in places and formatting isn't checked.
+Those four are what CI runs, on Linux and macOS. Formatting is rustfmt's
+default, so run `cargo fmt` before you commit and there's nothing to argue
+about. `./scripts/install-hooks.sh` sets up a pre-commit hook that does it for
+you.
 
 ## Licence
 

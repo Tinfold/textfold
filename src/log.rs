@@ -121,7 +121,9 @@ pub fn path() -> Option<PathBuf> {
 /// [`KEEP`] bytes of the end and cutting at a line break so that what is left
 /// starts with a whole line.
 fn trim(path: &std::path::Path) {
-    let Ok(text) = std::fs::read(path) else { return };
+    let Ok(text) = std::fs::read(path) else {
+        return;
+    };
     if text.len() as u64 <= KEEP_UNDER {
         return;
     }

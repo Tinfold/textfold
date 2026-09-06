@@ -112,8 +112,7 @@ fn many_tabs(count: usize, width: u16) -> App {
 /// top row. The drawing is what settles where the tabs went, so a test
 /// about tabs has to draw.
 fn tab_row(app: &mut App, width: u16) -> String {
-    let mut terminal =
-        Terminal::new(TestBackend::new(width, 12)).expect("a terminal to draw on");
+    let mut terminal = Terminal::new(TestBackend::new(width, 12)).expect("a terminal to draw on");
     terminal
         .draw(|frame| super::draw(frame, app))
         .expect("drawn");
@@ -266,7 +265,9 @@ fn a_suggestion_says_which_module_it_would_import_from() {
         );
     });
 
-    let rows: Vec<String> = (0..buffer.area.height).map(|y| row_text(&buffer, y)).collect();
+    let rows: Vec<String> = (0..buffer.area.height)
+        .map(|y| row_text(&buffer, y))
+        .collect();
     assert!(
         rows.iter()
             .any(|row| row.contains("HashMap (use std::collections::HashMap)")),
@@ -325,7 +326,6 @@ fn help_rows(width: u16, height: u16) -> Vec<String> {
         .map(|y| row_text(&buffer, y))
         .collect()
 }
-
 
 #[test]
 fn the_help_never_shows_the_same_line_twice() {
@@ -396,7 +396,9 @@ fn a_suggestion_that_brings_an_import_says_so() {
         );
     });
 
-    let rows: Vec<String> = (0..buffer.area.height).map(|y| row_text(&buffer, y)).collect();
+    let rows: Vec<String> = (0..buffer.area.height)
+        .map(|y| row_text(&buffer, y))
+        .collect();
     assert!(
         rows.iter().any(|row| row.contains("+ import")),
         "taking it writes a line at the top of the file, and the list should say so, got:\n{}",
@@ -542,16 +544,19 @@ fn menu_on_screen() -> (App, Terminal<TestBackend>) {
     let mut app = App::new(Config::default(), tx);
     app.here_mut().rope = ropey::Rope::from_str("one two three\n".repeat(20).as_str());
     app.screen = Rect::new(0, 0, 60, 24);
-    let mut terminal =
-        Terminal::new(TestBackend::new(60, 24)).expect("a terminal to draw on");
-    terminal.draw(|frame| super::draw(frame, &mut app)).expect("drawn");
+    let mut terminal = Terminal::new(TestBackend::new(60, 24)).expect("a terminal to draw on");
+    terminal
+        .draw(|frame| super::draw(frame, &mut app))
+        .expect("drawn");
     app.handle(crate::app::Event::Term(TermEvent::Mouse(MouseEvent {
         kind: MouseEventKind::Down(MouseButton::Right),
         column: 8,
         row: 6,
         modifiers: KeyModifiers::NONE,
     })));
-    terminal.draw(|frame| super::draw(frame, &mut app)).expect("drawn");
+    terminal
+        .draw(|frame| super::draw(frame, &mut app))
+        .expect("drawn");
     (app, terminal)
 }
 
@@ -580,7 +585,9 @@ fn the_menu_highlight_follows_the_pointer() {
 
     // Cut, then Copy: the row below, and one anything can do.
     move_pointer(&mut app, 12, row + 1);
-    terminal.draw(|frame| super::draw(frame, &mut app)).expect("drawn");
+    terminal
+        .draw(|frame| super::draw(frame, &mut app))
+        .expect("drawn");
     let now = highlighted(terminal.backend().buffer(), accent);
     assert_eq!(now, vec![row + 1], "was {first:?}");
 }
@@ -594,7 +601,9 @@ fn pointing_at_a_row_that_can_do_nothing_does_not_light_it_up_as_though_it_could
     // Cut, Copy, Paste, a divider, then Undo — which a buffer nobody has
     // typed in cannot do.
     move_pointer(&mut app, 12, row + 4);
-    terminal.draw(|frame| super::draw(frame, &mut app)).expect("drawn");
+    terminal
+        .draw(|frame| super::draw(frame, &mut app))
+        .expect("drawn");
     assert!(
         highlighted(terminal.backend().buffer(), accent).is_empty(),
         "an unavailable row was lit as though it were available"
@@ -614,7 +623,9 @@ fn the_menu_highlight_stays_put_over_a_divider() {
     let row = highlighted(terminal.backend().buffer(), accent)[0];
     // Cut, Copy, Paste, then a divider.
     move_pointer(&mut app, 12, row + 3);
-    terminal.draw(|frame| super::draw(frame, &mut app)).expect("drawn");
+    terminal
+        .draw(|frame| super::draw(frame, &mut app))
+        .expect("drawn");
     assert_eq!(highlighted(terminal.backend().buffer(), accent), vec![row]);
 }
 
@@ -750,11 +761,21 @@ fn what_is_docked_is_not_offered_as_a_tab() {
     app.focus = 1;
 
     let mut terminal = Terminal::new(TestBackend::new(90, 12)).expect("a terminal");
-    terminal.draw(|frame| super::draw(frame, &mut app)).expect("drawn");
+    terminal
+        .draw(|frame| super::draw(frame, &mut app))
+        .expect("drawn");
     let buffer = terminal.backend().buffer();
-    let row: String = (0..buffer.area.width).map(|x| buffer[(x, 0)].symbol()).collect();
-    assert!(!row.contains("tree"), "the sidebar was offered as a tab: {row:?}");
-    assert!(row.contains("untitled"), "the real tab went missing: {row:?}");
+    let row: String = (0..buffer.area.width)
+        .map(|x| buffer[(x, 0)].symbol())
+        .collect();
+    assert!(
+        !row.contains("tree"),
+        "the sidebar was offered as a tab: {row:?}"
+    );
+    assert!(
+        row.contains("untitled"),
+        "the real tab went missing: {row:?}"
+    );
 }
 
 #[test]
@@ -798,7 +819,9 @@ fn a_hover_line_wider_than_the_screen_is_folded_rather_than_elided() {
     popup.focused = true;
     app.hover = Some(popup);
     let mut terminal = Terminal::new(TestBackend::new(60, 24)).expect("a terminal");
-    terminal.draw(|frame| super::draw(frame, &mut app)).expect("drawn");
+    terminal
+        .draw(|frame| super::draw(frame, &mut app))
+        .expect("drawn");
 
     let buffer = terminal.backend().buffer();
     let drawn: String = (0..buffer.area.height)
@@ -813,7 +836,12 @@ fn a_hover_line_wider_than_the_screen_is_folded_rather_than_elided() {
     // Every word of it is on the screen somewhere, which is the whole
     // point — the half that says what the arguments are is the half an
     // ellipsis used to take.
-    for word in ["BTreeMap<String,", "second:", "Result<Vec<String>,", "Error>"] {
+    for word in [
+        "BTreeMap<String,",
+        "second:",
+        "Result<Vec<String>,",
+        "Error>",
+    ] {
         assert!(drawn.contains(word), "{word:?} was lost:\n{drawn}");
     }
     // And the box is more than one row of text now.
@@ -1278,7 +1306,9 @@ fn click_at(app: &mut App, column: u16, row: u16) {
 fn clicking_a_divider_does_nothing_rather_than_cutting_your_text() {
     let (mut app, _t) = menu_on_screen();
     let (area, divider) = {
-        let Overlay::Menu(menu) = &app.overlay else { panic!("no menu") };
+        let Overlay::Menu(menu) = &app.overlay else {
+            panic!("no menu")
+        };
         let divider = menu
             .items
             .iter()
@@ -1300,7 +1330,9 @@ fn clicking_a_divider_does_nothing_rather_than_cutting_your_text() {
 fn clicking_a_row_runs_that_row() {
     let (mut app, _t) = menu_on_screen();
     let (area, select_all) = {
-        let Overlay::Menu(menu) = &app.overlay else { panic!("no menu") };
+        let Overlay::Menu(menu) = &app.overlay else {
+            panic!("no menu")
+        };
         let at = menu
             .items
             .iter()
@@ -1320,7 +1352,9 @@ fn clicking_a_row_runs_that_row() {
 fn a_menu_taller_than_the_screen_can_still_reach_its_last_row() {
     let (mut app, mut terminal) = menu_on_screen();
     let last = {
-        let Overlay::Menu(menu) = &app.overlay else { panic!("no menu") };
+        let Overlay::Menu(menu) = &app.overlay else {
+            panic!("no menu")
+        };
         assert!(
             menu.len() > menu.area.height as usize,
             "this test needs a menu that does not fit; it does"
@@ -1330,17 +1364,23 @@ fn a_menu_taller_than_the_screen_can_still_reach_its_last_row() {
     // Walk the highlight to the end, which is what the arrows and the
     // wheel both do.
     for _ in 0..menu_rows(&app) {
-        let Overlay::Menu(menu) = &mut app.overlay else { panic!() };
+        let Overlay::Menu(menu) = &mut app.overlay else {
+            panic!()
+        };
         menu.step(1);
     }
     {
-        let Overlay::Menu(menu) = &mut app.overlay else { panic!() };
+        let Overlay::Menu(menu) = &mut app.overlay else {
+            panic!()
+        };
         menu.cursor = last;
     }
     terminal.draw(|f| super::draw(f, &mut app)).expect("drawn");
 
     let (area, scroll) = {
-        let Overlay::Menu(menu) = &app.overlay else { panic!() };
+        let Overlay::Menu(menu) = &app.overlay else {
+            panic!()
+        };
         (menu.area, menu.scroll)
     };
     assert!(scroll > 0, "the menu did not scroll to show its last row");
@@ -1357,6 +1397,8 @@ fn a_menu_taller_than_the_screen_can_still_reach_its_last_row() {
 }
 
 fn menu_rows(app: &App) -> usize {
-    let Overlay::Menu(menu) = &app.overlay else { panic!() };
+    let Overlay::Menu(menu) = &app.overlay else {
+        panic!()
+    };
     menu.len()
 }

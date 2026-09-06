@@ -473,7 +473,10 @@ mod tests {
     #[test]
     fn nothing_typed_shows_everything_in_the_order_given() {
         let picker = Picker::new(Kind::Files, rows(&["b", "a", "c"]));
-        let shown: Vec<&str> = picker.visible().map(|(row, _)| row.label.as_str()).collect();
+        let shown: Vec<&str> = picker
+            .visible()
+            .map(|(row, _)| row.label.as_str())
+            .collect();
         assert_eq!(shown, ["b", "a", "c"]);
     }
 

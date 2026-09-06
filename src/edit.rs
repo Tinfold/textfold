@@ -46,7 +46,13 @@ pub enum Motion {
 /// selections collapse — and collapse to the *edge* they are moving towards,
 /// which is why pressing Left with something selected puts you at its start
 /// rather than one character to the left of where the cursor happened to be.
-pub fn move_cursors(doc: &Document, view: &mut View, motion: Motion, extend: bool, tab_width: usize) {
+pub fn move_cursors(
+    doc: &Document,
+    view: &mut View,
+    motion: Motion,
+    extend: bool,
+    tab_width: usize,
+) {
     let rope = &doc.rope;
     let layout = Layout::of(view, doc, tab_width);
     let height = view.height();
@@ -58,7 +64,8 @@ pub fn move_cursors(doc: &Document, view: &mut View, motion: Motion, extend: boo
         Motion::Up | Motion::Down | Motion::PageUp | Motion::PageDown
     );
     let goal = if vertical {
-        view.goal.unwrap_or_else(|| layout.place(view.sel.primary().head).1)
+        view.goal
+            .unwrap_or_else(|| layout.place(view.sel.primary().head).1)
     } else {
         0
     };
@@ -103,8 +110,12 @@ pub fn move_cursors(doc: &Document, view: &mut View, motion: Motion, extend: boo
             Motion::LineEnd => text::line_end(rope, text::line_of(rope, from)),
             Motion::Up => vertical_step(&layout, rope, from, -1, goal),
             Motion::Down => vertical_step(&layout, rope, from, 1, goal),
-            Motion::PageUp => vertical_step(&layout, rope, from, -(height as isize - 2).max(1), goal),
-            Motion::PageDown => vertical_step(&layout, rope, from, (height as isize - 2).max(1), goal),
+            Motion::PageUp => {
+                vertical_step(&layout, rope, from, -(height as isize - 2).max(1), goal)
+            }
+            Motion::PageDown => {
+                vertical_step(&layout, rope, from, (height as isize - 2).max(1), goal)
+            }
             Motion::DocStart => 0,
             Motion::DocEnd => rope.len_chars(),
             Motion::ParaUp => paragraph(rope, from, -1),
@@ -350,9 +361,11 @@ pub fn insert_char(
     // character is the answer that at least does what was asked.
     if auto_pairs
         && pairs.iter().any(|(_, close)| *close == c)
-        && view.sel.ranges().iter().all(|range| {
-            range.is_empty() && text::char_at(&doc.rope, range.head) == Some(c)
-        })
+        && view
+            .sel
+            .ranges()
+            .iter()
+            .all(|range| range.is_empty() && text::char_at(&doc.rope, range.head) == Some(c))
     {
         view.sel.map(|range| Range::point(range.head + 1));
         doc.close_revision();
@@ -759,9 +772,8 @@ pub fn move_lines(doc: &mut Document, view: &mut View, down: bool) -> Vec<Applie
         (start + col).min(text::line_end(rope, target))
     };
     let rope = doc.rope.clone();
-    view.sel.map(|range| {
-        Range::new(shift(range.anchor, &rope), shift(range.head, &rope))
-    });
+    view.sel
+        .map(|range| Range::new(shift(range.anchor, &rope), shift(range.head, &rope)));
     doc.record_selections(&view.sel);
     edits
 }
@@ -781,7 +793,9 @@ pub fn join_lines(doc: &mut Document, view: &mut View) -> Vec<AppliedEdit> {
             let end = text::line_end(&doc.rope, line);
             let next = text::first_non_blank(&doc.rope, line + 1);
             // Nothing on the next line means nothing to separate from.
-            let joiner = if next >= text::line_end(&doc.rope, line + 1) || end == text::line_start(&doc.rope, line) {
+            let joiner = if next >= text::line_end(&doc.rope, line + 1)
+                || end == text::line_start(&doc.rope, line)
+            {
                 ""
             } else {
                 " "
@@ -804,7 +818,12 @@ pub fn join_lines(doc: &mut Document, view: &mut View) -> Vec<AppliedEdit> {
 /// With nothing selected, indenting types an indent where you are, which is
 /// what Tab does everywhere. With something selected it moves whole lines,
 /// which is what Tab does in every editor that has ever had a selection.
-pub fn indent(doc: &mut Document, view: &mut View, tab_width: usize, out: bool) -> Vec<AppliedEdit> {
+pub fn indent(
+    doc: &mut Document,
+    view: &mut View,
+    tab_width: usize,
+    out: bool,
+) -> Vec<AppliedEdit> {
     let unit = doc.indent.unit();
     let width = doc.indent.width(tab_width).max(1);
     let selecting = out || view.sel.ranges().iter().any(|r| !r.is_empty());
@@ -869,7 +888,11 @@ fn doc_indent_is_tabs(unit: &str) -> bool {
 ///
 /// The marker goes at the shallowest indentation of the block, so a commented
 /// block keeps its shape instead of collapsing to the left margin.
-pub fn toggle_comment(doc: &mut Document, view: &mut View, tab_width: usize) -> Option<Vec<AppliedEdit>> {
+pub fn toggle_comment(
+    doc: &mut Document,
+    view: &mut View,
+    tab_width: usize,
+) -> Option<Vec<AppliedEdit>> {
     let language = lang::get(doc.language);
     let marker = language.line_comment.clone()?;
     let before = view.sel.clone();

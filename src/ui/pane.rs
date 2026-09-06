@@ -96,7 +96,12 @@ pub(super) fn grammar_spans(
         .unwrap_or_default()
 }
 
-pub(super) fn draw_pane(frame: &mut Frame, app: &App, index: usize, ground: Color) -> Option<Position> {
+pub(super) fn draw_pane(
+    frame: &mut Frame,
+    app: &App,
+    index: usize,
+    ground: Color,
+) -> Option<Position> {
     let view = &app.panes[index];
     let doc = app.doc(view.doc)?;
     let theme = &app.theme;
@@ -286,7 +291,13 @@ pub(super) struct Along {
 /// selection still lands where it looks like it should. Those two have to
 /// agree; this is one half of that agreement and the reason it is written
 /// where the other half can be read beside it.
-pub(super) fn draw_inlays(buf: &mut Buffer, doc: &Document, at: usize, along: Along, style: Style) -> usize {
+pub(super) fn draw_inlays(
+    buf: &mut Buffer,
+    doc: &Document,
+    at: usize,
+    along: Along,
+    style: Style,
+) -> usize {
     let Along {
         area,
         screen,
@@ -379,7 +390,12 @@ impl Ink<'_> {
         // same one a selection is drawn in, because it is the same statement.
         // A selection you made has edges you watched appear; this does not
         // need a colour of its own to be told apart from it.
-        let same = self.doc.said.highlights.iter().any(|range| range.contains(at));
+        let same = self
+            .doc
+            .said
+            .highlights
+            .iter()
+            .any(|range| range.contains(at));
         // Lit under the pointer, in the colour every other list in textfold
         // uses for the row you are pointing at. The span keeps its own
         // foreground: a button's colour is what says whether it is a frame, a
@@ -643,7 +659,10 @@ pub(super) fn draw_row(
         && hint.at <= end
     {
         let mut x = area.x as usize + column - skip;
-        let ghost = Style::new().bg(line_bg).fg(theme.faint).add_modifier(Modifier::ITALIC);
+        let ghost = Style::new()
+            .bg(line_bg)
+            .fg(theme.faint)
+            .add_modifier(Modifier::ITALIC);
         // The first line of it. A suggestion is often several, and the rest
         // are counted rather than drawn: rows below this one belong to the
         // file, and borrowing them would move the text under somebody's mouse.

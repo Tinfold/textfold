@@ -674,10 +674,7 @@ impl App {
         if let Some(at) = self.first_use_of(name) {
             let want = name.to_string();
             let (doc, lsp) = self.doc_and_lsp();
-            if lsp
-                .goto_or(doc, at, Goto::Definition, Some(want))
-                .is_some()
-            {
+            if lsp.goto_or(doc, at, Goto::Definition, Some(want)).is_some() {
                 self.view_mut().mark_jump();
                 return;
             }
@@ -1065,15 +1062,17 @@ impl App {
                         Some(h) => format!("its own program — running in {}", h.root.display()),
                         None => format!("its own program — runs {}", host.command),
                     })
-                    .tag(match (on, running.is_some(), self.hosts.given_up_on(&plugin.id)) {
-                        (false, _, _) => "off",
-                        // Said plainly rather than shown as on: a row that
-                        // looks fine and does nothing is the worst of the
-                        // three things this tag can say.
-                        (_, _, true) => "gave up",
-                        (_, true, _) => "running",
-                        _ => "on",
-                    }),
+                    .tag(
+                        match (on, running.is_some(), self.hosts.given_up_on(&plugin.id)) {
+                            (false, _, _) => "off",
+                            // Said plainly rather than shown as on: a row that
+                            // looks fine and does nothing is the worst of the
+                            // three things this tag can say.
+                            (_, _, true) => "gave up",
+                            (_, true, _) => "running",
+                            _ => "on",
+                        },
+                    ),
                 );
             }
             for tool in &plugin.tools {
@@ -1098,7 +1097,10 @@ impl App {
     /// diagnostics rather than leaving its last ones on the screen.
     pub(super) fn toggle_plugin(&mut self, id: &str) {
         let on = !crate::plugin::is_on(id);
-        if on && let Some((plugin, _)) = id.split_once('/') && !crate::plugin::is_on(plugin) {
+        if on
+            && let Some((plugin, _)) = id.split_once('/')
+            && !crate::plugin::is_on(plugin)
+        {
             // Switching on a server whose plugin is off would look like
             // nothing happening, so switch the plugin on with it.
             crate::plugin::set(plugin, true, &mut self.config.plugins);
@@ -1153,8 +1155,8 @@ impl App {
         let rows: Vec<Row> = crate::plugin::all()
             .iter()
             .map(|plugin| {
-                let mine = crate::plugin::settings_path(&plugin.id)
-                    .is_some_and(|path| path.is_file());
+                let mine =
+                    crate::plugin::settings_path(&plugin.id).is_some_and(|path| path.is_file());
                 Row::new(
                     plugin.name.clone(),
                     Choice::PluginSettings(plugin.id.clone()),
@@ -1359,7 +1361,10 @@ impl App {
             // refresh that never happened.
             return self.say(match self.checked_for_updates {
                 true => "everything is at the newest version there is".to_string(),
-                false => "nothing newer has been heard of yet — the repositories are still being asked".to_string(),
+                false => {
+                    "nothing newer has been heard of yet — the repositories are still being asked"
+                        .to_string()
+                }
             });
         }
         let rows: Vec<Row> = found
@@ -1445,7 +1450,10 @@ impl App {
             return self.say(format!("{} is still going", already.id));
         }
         if plan.is_empty() {
-            return self.say(format!("{} has nothing to do — it is already here", plan.name));
+            return self.say(format!(
+                "{} has nothing to do — it is already here",
+                plan.name
+            ));
         }
         let mut log = format!("{}\n\n", plan.name);
         for line in plan.lines() {
@@ -1456,9 +1464,7 @@ impl App {
         if !plan.removing {
             match (plan.touches_system(), crate::pack::tools_dir()) {
                 (true, _) => log.push_str("\nSome of this installs system-wide.\n"),
-                (false, Some(tools)) => {
-                    log.push_str(&format!("\nInto {}\n", tools.display()))
-                }
+                (false, Some(tools)) => log.push_str(&format!("\nInto {}\n", tools.display())),
                 (false, None) => {}
             }
         }
@@ -1605,10 +1611,9 @@ impl App {
         self.lsp
             .environments
             .insert(project.clone(), root.to_path_buf());
-        self.config.python_environments.insert(
-            project.display().to_string(),
-            root.display().to_string(),
-        );
+        self.config
+            .python_environments
+            .insert(project.display().to_string(), root.display().to_string());
         self.remember_settings();
 
         // The servers were started pointing somewhere else, and there is no
@@ -1623,7 +1628,9 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_else(|| root.display().to_string());
-        self.say_good(format!("Python: {name} — the language servers are starting again"));
+        self.say_good(format!(
+            "Python: {name} — the language servers are starting again"
+        ));
     }
 
     pub(super) fn open_diagnostics_picker(&mut self) {
@@ -1859,12 +1866,20 @@ impl App {
 /// fix each for the same line is the ordinary case for Python, and "which of
 /// these came from the linter" is the question you are actually asking.
 pub(crate) fn action_rows(offered: &[(ServerId, Value)]) -> Vec<Row> {
-    let several = offered.iter().map(|(id, _)| *id).collect::<HashSet<_>>().len() > 1;
+    let several = offered
+        .iter()
+        .map(|(id, _)| *id)
+        .collect::<HashSet<_>>()
+        .len()
+        > 1;
     offered
         .iter()
         .filter_map(|(id, item)| {
             let title = item.get("title").and_then(Value::as_str)?;
-            let mut row = Row::new(title.to_string(), Choice::Action(*id, Box::new(item.clone())));
+            let mut row = Row::new(
+                title.to_string(),
+                Choice::Action(*id, Box::new(item.clone())),
+            );
             if let Some(kind) = item.get("kind").and_then(Value::as_str) {
                 row = row.tag(kind.split('.').next_back().unwrap_or(kind).to_string());
             }

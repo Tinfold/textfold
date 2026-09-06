@@ -56,10 +56,18 @@ impl App {
         // And the same moment is what starts a plugin that said it wanted to
         // know about this kind of file. One funnel for both, so that a plugin
         // cannot be woken by a route a language server is not.
-        let opened = self
-            .doc(id)
-            .and_then(|d| d.path.clone())
-            .map(|path| (path, lang::get(self.doc(id).map(|d| d.language).unwrap_or(lang::LangId::PLAIN)).name.clone()));
+        let opened = self.doc(id).and_then(|d| d.path.clone()).map(|path| {
+            (
+                path,
+                lang::get(
+                    self.doc(id)
+                        .map(|d| d.language)
+                        .unwrap_or(lang::LangId::PLAIN),
+                )
+                .name
+                .clone(),
+            )
+        });
         if let Some((path, language)) = opened {
             self.hosts.opened(&path, &language);
             let App { docs, hosts, .. } = self;
@@ -91,7 +99,13 @@ impl App {
     // ---- Searching ----
 
     /// The next occurrence of `needle`, from `from`, in the focused document.
-    pub(super) fn search(&self, needle: &str, from: usize, forwards: bool, wrap: bool) -> Option<Range> {
+    pub(super) fn search(
+        &self,
+        needle: &str,
+        from: usize,
+        forwards: bool,
+        wrap: bool,
+    ) -> Option<Range> {
         if needle.is_empty() {
             return None;
         }
@@ -424,7 +438,9 @@ impl App {
             return 0;
         }
         let count = changes.len();
-        let Some(doc) = self.doc_mut(id) else { return 0 };
+        let Some(doc) = self.doc_mut(id) else {
+            return 0;
+        };
         // A buffer nobody is looking at has no cursors of its own; the panes
         // that are looking at one are told where everything went by
         // [`App::after_edit_to`], the same as for any other edit.
@@ -850,9 +866,7 @@ impl App {
         if let Some(hover) = &mut self.hover {
             if !hover.focused {
                 hover.focused = true;
-                self.say(
-                    "arrows scroll, drag to select, Ctrl-C copies, Enter opens it in a tab",
-                );
+                self.say("arrows scroll, drag to select, Ctrl-C copies, Enter opens it in a tab");
                 return;
             }
             return self.hover_to_buffer();
@@ -971,9 +985,11 @@ impl App {
         };
         if completion.all[index].resolve != Resolve::Done {
             self.resolve_selected();
-            if self.completion.as_ref().is_some_and(|completion| {
-                completion.all[index].resolve == Resolve::Waiting
-            }) {
+            if self
+                .completion
+                .as_ref()
+                .is_some_and(|completion| completion.all[index].resolve == Resolve::Waiting)
+            {
                 self.accept_when_resolved = Some(index);
                 return;
             }

@@ -1,0 +1,74 @@
+#!/bin/sh
+# Formats the Rust that is about to be committed, so that CI's `cargo fmt
+# --check` is never the thing that tells you.
+#
+# Install with ./scripts/install-hooks.sh. Skip once with `git commit
+# --no-verify`.
+#
+# It formats the working file and stages the result, which is only the same
+# thing as formatting what you are committing when the two are the same. A
+# file staged in part — `git add -p`, or edited after staging — is checked
+# rather than rewritten: staging the rest of your working tree because a
+# comment was in the wrong column is not a thing a hook may do on its own.
+
+set -e
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
+[ -n "$staged" ] || exit 0
+
+command -v rustfmt >/dev/null 2>&1 || {
+	echo "pre-commit: no rustfmt — rustup component add rustfmt" >&2
+	exit 1
+}
+
+edition=$(sed -n 's/^edition *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+: "${edition:=2024}"
+
+formatted=
+unformatted=
+
+# Somewhere to format a copy of the staged bytes. Inside .git so that git and
+# cargo both ignore it, but still under the repository root, so that rustfmt
+# walking up for a rustfmt.toml finds the same one it would for a real file.
+scratch="$(git rev-parse --git-dir)/fmt-check"
+rm -rf "$scratch"
+mkdir -p "$scratch"
+trap 'rm -rf "$scratch"' EXIT
+
+for f in $staged; do
+	[ -f "$f" ] || continue
+
+	if git diff --quiet -- "$f"; then
+		# What is staged is what is on disk. Safe to rewrite in place.
+		before=$(git hash-object "$f")
+		rustfmt --edition "$edition" --quiet "$f"
+		after=$(git hash-object "$f")
+		if [ "$before" != "$after" ]; then
+			git add -- "$f"
+			formatted="$formatted $f"
+		fi
+	else
+		# Staged in part. Ask only whether the staged bytes are formatted, by
+		# formatting a copy of them and seeing whether anything moved.
+		# `rustfmt --check` on standard input is no use for this: it prints a
+		# diff and exits 0 either way.
+		git show ":$f" >"$scratch/staged.rs"
+		cp "$scratch/staged.rs" "$scratch/formatted.rs"
+		rustfmt --edition "$edition" --quiet "$scratch/formatted.rs" 2>/dev/null || true
+		if ! cmp -s "$scratch/staged.rs" "$scratch/formatted.rs"; then
+			unformatted="$unformatted $f"
+		fi
+	fi
+done
+
+if [ -n "$unformatted" ]; then
+	echo "pre-commit: staged in part and not formatted:" >&2
+	for f in $unformatted; do echo "  $f" >&2; done
+	echo "run: cargo fmt --all" >&2
+	exit 1
+fi
+
+if [ -n "$formatted" ]; then
+	echo "pre-commit: formatted and restaged:"
+	for f in $formatted; do echo "  $f"; done
+fi

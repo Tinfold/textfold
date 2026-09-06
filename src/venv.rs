@@ -258,7 +258,9 @@ impl Vars {
             // `java.configuration.runtimes` is however many JDKs this machine
             // turns out to have.
             Value::String(text) => match whole_placeholder(text) {
-                Some(name) => crate::jdk::value(name).or_else(|| self.fill(text).map(Value::String)),
+                Some(name) => {
+                    crate::jdk::value(name).or_else(|| self.fill(text).map(Value::String))
+                }
                 None => self.fill(text).map(Value::String),
             },
             Value::Array(items) => Some(Value::Array(

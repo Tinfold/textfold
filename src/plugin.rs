@@ -561,13 +561,22 @@ const RENAMED: &[(&str, &str)] = &[
     ("c/clangd", "clangd"),
     ("cpp/clangd", "clangd"),
     ("csharp/omnisharp", "omnisharp"),
-    ("css/css-language-server", "vscode-langservers/css-language-server"),
+    (
+        "css/css-language-server",
+        "vscode-langservers/css-language-server",
+    ),
     ("dockerfile/docker-langserver", "docker-langserver"),
     ("go/gopls", "gopls"),
-    ("html/html-language-server", "vscode-langservers/html-language-server"),
+    (
+        "html/html-language-server",
+        "vscode-langservers/html-language-server",
+    ),
     ("java/jdtls", "jdtls"),
     ("javascript/tsserver", "tsserver"),
-    ("json/json-language-server", "vscode-langservers/json-language-server"),
+    (
+        "json/json-language-server",
+        "vscode-langservers/json-language-server",
+    ),
     ("markdown/marksman", "marksman"),
     ("python/pyright", "pyright"),
     ("python/ruff", "ruff"),
@@ -740,8 +749,8 @@ fn load() -> Registry {
     };
 
     for (id, text) in LANGUAGES.iter() {
-        let mut file: FilePlugin = serde_json::from_str(text)
-            .expect("the plugins textfold ships are checked by a test");
+        let mut file: FilePlugin =
+            serde_json::from_str(text).expect("the plugins textfold ships are checked by a test");
         // What ships is settable too. There is no reason a language built into
         // the binary should be the one thing you cannot have an opinion about.
         let (said, problem) = read_override(id);
@@ -1023,8 +1032,9 @@ impl FileToolOverride {
 /// point of showing this is that it is the half you did *not* write.
 pub fn shipped_manifest(plugin: &Plugin) -> String {
     match &plugin.source {
-        Source::File(path) => std::fs::read_to_string(path)
-            .unwrap_or_else(|e| format!("{}: {e}\n", path.display())),
+        Source::File(path) => {
+            std::fs::read_to_string(path).unwrap_or_else(|e| format!("{}: {e}\n", path.display()))
+        }
         Source::BuiltIn => LANGUAGES
             .iter()
             .find(|(id, _)| *id == plugin.id)
@@ -1102,8 +1112,7 @@ pub fn settings_stub(plugin: &Plugin) -> String {
     let mut out = serde_json::Map::new();
     out.insert("_about".into(), serde_json::json!(about));
     out.extend(body);
-    serde_json::to_string_pretty(&serde_json::Value::Object(out))
-        .unwrap_or_else(|_| "{}".into())
+    serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap_or_else(|_| "{}".into())
         + "\n"
 }
 
@@ -1199,8 +1208,8 @@ pub fn read(
 ) -> Result<(Plugin, Vec<String>), String> {
     let text =
         std::fs::read_to_string(manifest).map_err(|e| format!("{}: {e}", manifest.display()))?;
-    let file: FilePlugin = serde_json::from_str(&text)
-        .map_err(|e| format!("{}: {}", manifest.display(), said(&e)))?;
+    let file: FilePlugin =
+        serde_json::from_str(&text).map_err(|e| format!("{}: {}", manifest.display(), said(&e)))?;
     Ok(file.into_plugin(id, Source::File(at)))
 }
 
@@ -1477,10 +1486,20 @@ impl FilePlugin {
         };
         for (language, def) in &self.languages {
             for server in def.servers.iter().flatten() {
-                gather(&mut servers, server.plugin_name(), &server.command, language);
+                gather(
+                    &mut servers,
+                    server.plugin_name(),
+                    &server.command,
+                    language,
+                );
             }
             for debugger in def.debuggers.iter().flatten() {
-                gather(&mut debuggers, debugger.plugin_name(), &debugger.runs(), language);
+                gather(
+                    &mut debuggers,
+                    debugger.plugin_name(),
+                    &debugger.runs(),
+                    language,
+                );
             }
         }
         let tools = self
@@ -1515,8 +1534,7 @@ impl FilePlugin {
                     builds: t.builds.unwrap_or(false),
                     // Only a formatter can be the last word on the layout;
                     // a linter saying so is a manifest saying nothing.
-                    instead_of_lsp: t.instead_of_lsp.unwrap_or(false)
-                        && output == Output::Replace,
+                    instead_of_lsp: t.instead_of_lsp.unwrap_or(false) && output == Output::Replace,
                     pattern: t.pattern,
                     output,
                     name,
@@ -1732,7 +1750,10 @@ mod tests {
                 plugin.servers.is_empty(),
                 "{id} still has a language server written into it"
             );
-            assert!(plugin.needs.is_empty(), "{id} needs a program to be a language");
+            assert!(
+                plugin.needs.is_empty(),
+                "{id} needs a program to be a language"
+            );
         }
     }
 
@@ -1784,8 +1805,7 @@ mod tests {
         // What an update is decided by. A plugin that declines to number
         // itself is one nothing is ever an update to, which is the safe
         // answer rather than reinstalling it forever.
-        let file: FilePlugin =
-            serde_json::from_str(r#"{"id":"zls","version":"1.2.0"}"#).unwrap();
+        let file: FilePlugin = serde_json::from_str(r#"{"id":"zls","version":"1.2.0"}"#).unwrap();
         let (plugin, _) = file.into_plugin("zls", Source::BuiltIn);
         assert_eq!(plugin.version.as_deref(), Some("1.2.0"));
         assert_eq!(plugin.version_label().as_deref(), Some("v1.2.0"));
@@ -1883,7 +1903,10 @@ mod tests {
         registry.add(ship.into_plugin("zig", Source::BuiltIn).0);
         let mine: FilePlugin =
             serde_json::from_str(r#"{"id":"zig","name":"My Zig","languages":{}}"#).unwrap();
-        registry.add(mine.into_plugin("zig", Source::File(PathBuf::from("/tmp/zig.json"))).0);
+        registry.add(
+            mine.into_plugin("zig", Source::File(PathBuf::from("/tmp/zig.json")))
+                .0,
+        );
         assert_eq!(registry.plugins.len(), 1);
         assert_eq!(registry.plugins[0].name, "My Zig");
     }
@@ -1960,7 +1983,10 @@ mod tests {
         )
         .unwrap();
         let (plugin, _) = file.into_plugin("p", Source::BuiltIn);
-        assert!(plugin.tools[0].wants("python"), "the case should not matter");
+        assert!(
+            plugin.tools[0].wants("python"),
+            "the case should not matter"
+        );
         assert!(!plugin.tools[0].wants("rust"));
     }
 
@@ -2014,7 +2040,9 @@ mod tests {
         .unwrap();
         let (plugin, _) = file.into_plugin(
             "p",
-            Source::File(PathBuf::from("/home/me/.config/textfold/plugins/p/plugin.json")),
+            Source::File(PathBuf::from(
+                "/home/me/.config/textfold/plugins/p/plugin.json",
+            )),
         );
         let host = plugin.host.expect("it brought a program");
         assert_eq!(
@@ -2116,7 +2144,10 @@ mod tests {
         let server = server.into_server("jdtls");
         let settings = server.settings.expect("settings");
         // What you said won.
-        assert_eq!(settings.pointer("/java/format/enabled"), Some(&json!(false)));
+        assert_eq!(
+            settings.pointer("/java/format/enabled"),
+            Some(&json!(false))
+        );
         // And what you did not say is still there — the point of merging key
         // by key rather than replacing the block.
         assert_eq!(
@@ -2125,7 +2156,10 @@ mod tests {
             "saying one thing threw away the rest: {settings}"
         );
         // The same for the environment, and for everything not mentioned.
-        assert_eq!(server.env.get("JDTLS_JVM_ARGS").map(String::as_str), Some("-Xmx2G"));
+        assert_eq!(
+            server.env.get("JDTLS_JVM_ARGS").map(String::as_str),
+            Some("-Xmx2G")
+        );
         assert_eq!(
             server.env.get("JAVA_HOME").map(String::as_str),
             Some("/usr/lib/jvm/21"),
@@ -2280,8 +2314,8 @@ mod tests {
         let shipped: Vec<Plugin> = LANGUAGES
             .iter()
             .map(|(id, text)| {
-                let file: FilePlugin = serde_json::from_str(text)
-                    .unwrap_or_else(|e| panic!("{id}: {}", said(&e)));
+                let file: FilePlugin =
+                    serde_json::from_str(text).unwrap_or_else(|e| panic!("{id}: {}", said(&e)));
                 file.into_plugin(id, Source::BuiltIn).0
             })
             .collect();
@@ -2326,8 +2360,8 @@ mod tests {
         let shipped: Vec<Plugin> = LANGUAGES
             .iter()
             .map(|(id, text)| {
-                let file: FilePlugin = serde_json::from_str(text)
-                    .unwrap_or_else(|e| panic!("{id}: {}", said(&e)));
+                let file: FilePlugin =
+                    serde_json::from_str(text).unwrap_or_else(|e| panic!("{id}: {}", said(&e)));
                 file.into_plugin(id, Source::BuiltIn).0
             })
             .collect();
@@ -2359,7 +2393,10 @@ mod tests {
             // because there was no repository is a `make` with no `Makefile`
             // in front of it.
             assert!(
-                build.roots.iter().any(|root| root.eq_ignore_ascii_case("makefile")),
+                build
+                    .roots
+                    .iter()
+                    .any(|root| root.eq_ignore_ascii_case("makefile")),
                 "{language} builds wherever the file happens to be: {:?}",
                 build.roots
             );
@@ -2464,7 +2501,9 @@ mod tests {
         .unwrap();
         let (plugin, problems) = file.into_plugin(
             "zig",
-            Source::File(PathBuf::from("/home/me/.config/textfold/plugins/zig/plugin.json")),
+            Source::File(PathBuf::from(
+                "/home/me/.config/textfold/plugins/zig/plugin.json",
+            )),
         );
         assert!(problems.is_empty(), "{problems:?}");
         let said = format!("{:?}", plugin.languages.get("zig").expect("the language"));
@@ -2476,7 +2515,10 @@ mod tests {
             said.contains("/home/me/.config/textfold/plugins/zig/highlights.scm"),
             "the highlights were not found: {said}"
         );
-        assert!(!said.contains("${plugin}"), "something was left unfilled: {said}");
+        assert!(
+            !said.contains("${plugin}"),
+            "something was left unfilled: {said}"
+        );
     }
 
     #[test]
@@ -2492,10 +2534,9 @@ mod tests {
 
     #[test]
     fn something_to_start_on_that_nobody_understands_is_a_complaint() {
-        let file: FilePlugin = serde_json::from_str(
-            r#"{"id":"p","host":{"command":"x","activate":["whenever"]}}"#,
-        )
-        .unwrap();
+        let file: FilePlugin =
+            serde_json::from_str(r#"{"id":"p","host":{"command":"x","activate":["whenever"]}}"#)
+                .unwrap();
         let (plugin, problems) = file.into_plugin("p", Source::BuiltIn);
         assert!(plugin.host.expect("still a host").activate.is_empty());
         assert_eq!(problems, [r#"p: "whenever" is not something to start on"#]);
@@ -2514,8 +2555,14 @@ mod tests {
         assert!(matches_glob("/home/**/main.c", path));
         // And `**/` finds one sitting at the top as well as one further down.
         assert!(matches_glob("**/*.c", std::path::Path::new("main.c")));
-        assert!(matches_glob("Cargo.toml", std::path::Path::new("/p/Cargo.toml")));
-        assert!(!matches_glob("/p/Cargo.toml", std::path::Path::new("/q/Cargo.toml")));
+        assert!(matches_glob(
+            "Cargo.toml",
+            std::path::Path::new("/p/Cargo.toml")
+        ));
+        assert!(!matches_glob(
+            "/p/Cargo.toml",
+            std::path::Path::new("/q/Cargo.toml")
+        ));
     }
 
     #[test]

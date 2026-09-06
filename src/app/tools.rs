@@ -72,9 +72,7 @@ impl App {
         // A buffer with no file of its own — a plugin's own output, say —
         // still belongs to the project you are working in, and that is the
         // project the command is about.
-        let from = path
-            .clone()
-            .unwrap_or_else(|| self.project.clone());
+        let from = path.clone().unwrap_or_else(|| self.project.clone());
         if command.opens_panel {
             // Opening a panel is not something the plugin does; it is
             // something the editor does, and then tells the plugin about so
@@ -219,7 +217,9 @@ impl App {
             ));
         }
 
-        let Some(doc) = self.doc(id) else { return false };
+        let Some(doc) = self.doc(id) else {
+            return false;
+        };
         let version = doc.version;
         let stdin = tool.stdin.then(|| doc.rope.to_string());
         let tx = self.tx.clone();
@@ -263,7 +263,9 @@ impl App {
                 name: tool.name.clone(),
                 ok: done.ok,
                 text: done.printed(),
-                note: (!done.ok).then(|| self.build_note(tool, done.doc)).flatten(),
+                note: (!done.ok)
+                    .then(|| self.build_note(tool, done.doc))
+                    .flatten(),
             });
         }
 
@@ -318,7 +320,12 @@ impl App {
     }
 
     /// What a formatter printed, put back into the buffer.
-    pub(super) fn take_tool_text(&mut self, tool: &'static Tool, done: crate::tool::Finished, why: &str) {
+    pub(super) fn take_tool_text(
+        &mut self,
+        tool: &'static Tool,
+        done: crate::tool::Finished,
+        why: &str,
+    ) {
         if !done.ok {
             return self.say_bad(match why.is_empty() {
                 true => format!("{} would not run", tool.name),
@@ -329,13 +336,19 @@ impl App {
             // The file moved on while it was thinking, so what came back is
             // about text that is no longer there. Putting it in would undo
             // whatever was typed in the meantime.
-            return self.say(format!("{} answered too late — the file has moved on", tool.name));
+            return self.say(format!(
+                "{} answered too late — the file has moved on",
+                tool.name
+            ));
         }
         if done.out.trim().is_empty() {
             // A tool that printed nothing has almost certainly failed in a way
             // it did not admit to, and emptying somebody's file over it is not
             // a recoverable kind of wrong.
-            return self.say_bad(format!("{} printed nothing — the file is untouched", tool.name));
+            return self.say_bad(format!(
+                "{} printed nothing — the file is untouched",
+                tool.name
+            ));
         }
         let Some(doc) = self.doc_mut(done.doc) else {
             return;
@@ -360,7 +373,11 @@ impl App {
     /// to go. The difference matters to whoever asked — a build that failed
     /// and put nothing anywhere visible has, from where the person is sitting,
     /// failed for no reason at all. See [`App::on_tool`].
-    pub(super) fn take_tool_problems(&mut self, tool: &'static Tool, done: &crate::tool::Finished) -> usize {
+    pub(super) fn take_tool_problems(
+        &mut self,
+        tool: &'static Tool,
+        done: &crate::tool::Finished,
+    ) -> usize {
         let Some(pattern) = &tool.pattern else {
             self.say_bad(format!(
                 "{} is set to find problems but says nothing about how to read them",
@@ -396,7 +413,9 @@ impl App {
                 // pointed at a whole project.
                 continue;
             };
-            let Some(doc) = self.doc_mut(id) else { continue };
+            let Some(doc) = self.doc_mut(id) else {
+                continue;
+            };
             let at = doc.char_at_lsp_point(problem.line, problem.column);
             let end = doc.char_at_lsp_point(problem.line, problem.column + 1);
             doc.diagnostics.push(crate::doc::Diagnostic {
@@ -459,8 +478,10 @@ impl App {
         if let Some(doc) = self.doc_mut(id) {
             let len = doc.len_chars();
             let sel = crate::text::Selections::single(Range::point(0));
-            let edits =
-                doc.apply_atomic(vec![crate::doc::Change::replace(0, len, text.to_string())], &sel);
+            let edits = doc.apply_atomic(
+                vec![crate::doc::Change::replace(0, len, text.to_string())],
+                &sel,
+            );
             doc.mark_saved();
             self.after_edit_to(id, edits, None);
         }
@@ -480,18 +501,13 @@ impl App {
 
     /// The tools a plugin asked to be run every time this file is saved.
     pub(super) fn tools_on_save(&mut self, doc: DocId) {
-        let Some(language) = self
-            .doc(doc)
-            .map(|d| lang::get(d.language).name.clone())
-        else {
+        let Some(language) = self.doc(doc).map(|d| lang::get(d.language).name.clone()) else {
             return;
         };
         let wanted: Vec<&'static Tool> = crate::cmd::all()
             .iter()
             .filter_map(|cmd| cmd.tool())
-            .filter(|tool| {
-                tool.on_save && tool.output != Output::Replace && tool.wants(&language)
-            })
+            .filter(|tool| tool.on_save && tool.output != Output::Replace && tool.wants(&language))
             .collect();
         for tool in wanted {
             self.start_tool(tool, doc);
@@ -514,7 +530,9 @@ impl App {
             Ok(()) => {
                 let name = doc.name.clone();
                 let lines = doc.len_lines();
-                let App { docs, lsp, hosts, .. } = self;
+                let App {
+                    docs, lsp, hosts, ..
+                } = self;
                 if let Some(doc) = docs.iter().find(|d| d.id == id) {
                     lsp.did_save(doc);
                     hosts.saved(doc);
@@ -558,7 +576,9 @@ impl App {
                 failed.push(format!("{e}"));
                 continue;
             }
-            let App { docs, lsp, hosts, .. } = self;
+            let App {
+                docs, lsp, hosts, ..
+            } = self;
             if let Some(doc) = docs.iter().find(|d| d.id == id) {
                 lsp.did_save(doc);
                 hosts.saved(doc);
@@ -638,10 +658,7 @@ impl App {
         // buffer ends up holding half a file forever: the stamp says it is up
         // to date, so nothing ever looks again.
         let Some((bytes, stamp)) = crate::doc::read_whole(&path)? else {
-            anyhow::bail!(
-                "{} is being written to — nothing was read",
-                path.display()
-            );
+            anyhow::bail!("{} is being written to — nothing was read", path.display());
         };
         // Text that is not valid UTF-8 comes in as replacement characters,
         // which is the right answer for a file you asked to open and the wrong

@@ -45,8 +45,7 @@ use serde::{Deserialize, Serialize};
 
 /// The repository textfold knows about when nobody has said otherwise.
 pub const DEFAULT_NAME: &str = "textfold-plugins";
-pub const DEFAULT_URL: &str =
-    "https://raw.githubusercontent.com/Tinfold/textfold-plugins/main";
+pub const DEFAULT_URL: &str = "https://raw.githubusercontent.com/Tinfold/textfold-plugins/main";
 
 /// The newest index format this textfold understands. An index that says a
 /// higher number is one written for a later textfold, and is left alone rather
@@ -75,7 +74,11 @@ impl Repository {
     fn url_of(&self, url: &str) -> String {
         match url.starts_with("http://") || url.starts_with("https://") {
             true => url.to_string(),
-            false => format!("{}/{}", self.url.trim_end_matches('/'), url.trim_start_matches('/')),
+            false => format!(
+                "{}/{}",
+                self.url.trim_end_matches('/'),
+                url.trim_start_matches('/')
+            ),
         }
     }
 }
@@ -145,10 +148,12 @@ fn index_path(name: &str) -> Option<PathBuf> {
     // A repository named `../x` would otherwise write outside the cache.
     let safe: String = name
         .chars()
-        .map(|c| match c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
-            true => c,
-            false => '_',
-        })
+        .map(
+            |c| match c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                true => c,
+                false => '_',
+            },
+        )
         .collect();
     let safe = safe.trim_matches('.').to_string();
     (!safe.is_empty()).then(|| cache_dir().map(|d| d.join(format!("{safe}.json"))))?
@@ -198,8 +203,7 @@ pub fn refresh(repository: &Repository) -> Result<usize, String> {
     download(&repository.index_url(), &temp)?;
     let read = std::fs::read_to_string(&temp).map_err(|e| format!("{}: {e}", temp.display()));
     let parsed = read.and_then(|text| {
-        serde_json::from_str::<Index>(&text)
-            .map_err(|e| format!("{}: {e}", repository.index_url()))
+        serde_json::from_str::<Index>(&text).map_err(|e| format!("{}: {e}", repository.index_url()))
     });
     let index = match parsed {
         Ok(index) => index,
@@ -223,7 +227,12 @@ pub fn refresh(repository: &Repository) -> Result<usize, String> {
 /// it at `to`.
 pub fn fetch(repository: &Repository, entry: &Entry, to: &Path) -> Result<(), String> {
     download(&repository.url_of(&entry.url), to)?;
-    let Some(want) = entry.sha256.as_deref().map(str::trim).filter(|s| !s.is_empty()) else {
+    let Some(want) = entry
+        .sha256
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
         return Ok(());
     };
     let got = sha256_of(to)?;
@@ -508,7 +517,10 @@ mod tests {
             name: "r".into(),
             url: "https://example.invalid/plugins/".into(),
         };
-        assert_eq!(repository.index_url(), "https://example.invalid/plugins/index.json");
+        assert_eq!(
+            repository.index_url(),
+            "https://example.invalid/plugins/index.json"
+        );
         assert_eq!(
             repository.url_of("dist/zls-1.0.0.tar.gz"),
             "https://example.invalid/plugins/dist/zls-1.0.0.tar.gz"
@@ -531,6 +543,9 @@ mod tests {
             cache_dir().as_deref(),
             "it wrote outside the cache"
         );
-        assert!(index_path("...").is_none(), "a name that is all dots is no name");
+        assert!(
+            index_path("...").is_none(),
+            "a name that is all dots is no name"
+        );
     }
 }

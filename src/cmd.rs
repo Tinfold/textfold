@@ -404,7 +404,10 @@ mod tests {
         assert!(Behaviour::Types.writes(), "typing changes the text");
         assert!(Behaviour::Types.joins());
         assert!(Behaviour::Edits.writes());
-        assert!(!Behaviour::Edits.joins(), "an edit stands on its own to undo");
+        assert!(
+            !Behaviour::Edits.joins(),
+            "an edit stands on its own to undo"
+        );
         assert!(!Behaviour::Passive.writes());
         assert!(!Behaviour::Passive.joins());
     }

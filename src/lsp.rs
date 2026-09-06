@@ -24,9 +24,9 @@ use serde_json::{Value, json};
 use crate::rpc::{self, Peer};
 
 use crate::doc::{AppliedEdit, Diagnostic, DocId, Document, Severity, Told};
-use crate::venv;
 use crate::lang;
 use crate::text::Range;
+use crate::venv;
 
 /// Which server, as everything outside holds onto one.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, PartialOrd, Ord)]
@@ -762,10 +762,7 @@ impl Servers {
         let Some(at) = self.servers.iter().position(|s| s.id == id) else {
             return;
         };
-        self.servers[at].capabilities = result
-            .get("capabilities")
-            .cloned()
-            .unwrap_or(Value::Null);
+        self.servers[at].capabilities = result.get("capabilities").cloned().unwrap_or(Value::Null);
         self.servers[at].state = State::Ready;
         self.servers[at].notify("initialized", json!({}));
 
@@ -901,7 +898,12 @@ impl Servers {
         Some(id)
     }
 
-    pub fn completion(&mut self, doc: &Document, at: usize, triggered: Option<char>) -> Option<ServerId> {
+    pub fn completion(
+        &mut self,
+        doc: &Document,
+        at: usize,
+        triggered: Option<char>,
+    ) -> Option<ServerId> {
         let context = match triggered {
             Some(c) => json!({ "triggerKind": 2, "triggerCharacter": c.to_string() }),
             None => json!({ "triggerKind": 1 }),
@@ -1552,9 +1554,7 @@ impl Servers {
                     .and_then(|v| v.get("title"))
                     .and_then(Value::as_str)
                     .unwrap_or("working");
-                let detail = value
-                    .and_then(|v| v.get("message"))
-                    .and_then(Value::as_str);
+                let detail = value.and_then(|v| v.get("message")).and_then(Value::as_str);
                 let percent = value
                     .and_then(|v| v.get("percentage"))
                     .and_then(Value::as_u64);
@@ -1650,7 +1650,8 @@ impl Servers {
         for per_server in self.published.values_mut() {
             per_server.remove(&id.0);
         }
-        self.published.retain(|_, per_server| !per_server.is_empty());
+        self.published
+            .retain(|_, per_server| !per_server.is_empty());
     }
 }
 
@@ -1974,7 +1975,10 @@ mod tests {
         // document replaced by the few characters you just typed, and
         // everything it says afterwards is about a file that does not exist.
         assert_eq!(sync_of(&json!({ "textDocumentSync": 1 })), Sync::Full);
-        assert_eq!(sync_of(&json!({ "textDocumentSync": 2 })), Sync::Incremental);
+        assert_eq!(
+            sync_of(&json!({ "textDocumentSync": 2 })),
+            Sync::Incremental
+        );
         assert_eq!(sync_of(&json!({ "textDocumentSync": 0 })), Sync::None);
 
         // The other shape it comes in. Both are in the specification and

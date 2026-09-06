@@ -24,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::SystemTime;
 
-use crate::doc::{Document, DocId};
+use crate::doc::{DocId, Document};
 
 /// A repository, found by walking up from a file.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -38,11 +38,7 @@ pub struct Repo {
 impl Repo {
     /// The repository a path is in, if it is in one.
     pub fn find(from: &Path) -> Option<Self> {
-        let start = if from.is_dir() {
-            from
-        } else {
-            from.parent()?
-        };
+        let start = if from.is_dir() { from } else { from.parent()? };
         for root in start.ancestors() {
             let marker = root.join(".git");
             if marker.is_dir() {
@@ -59,7 +55,11 @@ impl Repo {
                 && let Some(rest) = text.trim().strip_prefix("gitdir:")
             {
                 let dir = PathBuf::from(rest.trim());
-                let dir = if dir.is_absolute() { dir } else { root.join(dir) };
+                let dir = if dir.is_absolute() {
+                    dir
+                } else {
+                    root.join(dir)
+                };
                 return Some(Self {
                     root: root.to_path_buf(),
                     dir,
@@ -514,13 +514,7 @@ pub fn aligned(old: &str, new: &str) -> Vec<(usize, usize)> {
     out
 }
 
-fn align(
-    old: &[&str],
-    new: &[&str],
-    old_at: usize,
-    new_at: usize,
-    out: &mut Vec<(usize, usize)>,
-) {
+fn align(old: &[&str], new: &[&str], old_at: usize, new_at: usize, out: &mut Vec<(usize, usize)>) {
     // The same shape as `walk`: take the matching ends off, then line up the
     // middle on the lines that are unique to each side.
     let head = old
@@ -530,7 +524,13 @@ fn align(
         .count();
     if head > 0 {
         out.extend((0..head).map(|n| (old_at + n, new_at + n)));
-        return align(&old[head..], &new[head..], old_at + head, new_at + head, out);
+        return align(
+            &old[head..],
+            &new[head..],
+            old_at + head,
+            new_at + head,
+            out,
+        );
     }
     let tail = old
         .iter()
@@ -766,7 +766,10 @@ mod tests {
         let new = "one\ntwo\nTHREE\nfour\nfive\n";
         let hunk = hunks(old, new).into_iter().next().expect("one hunk");
         let patch = patch_for("file.txt", old, new, &hunk);
-        assert!(patch.starts_with("diff --git a/file.txt b/file.txt\n"), "{patch}");
+        assert!(
+            patch.starts_with("diff --git a/file.txt b/file.txt\n"),
+            "{patch}"
+        );
         assert!(patch.contains("@@ -1,5 +1,5 @@\n"), "{patch}");
         assert!(patch.contains("-three\n+THREE\n"), "{patch}");
         // The context is the lines either side, and they are the same on both
@@ -806,7 +809,8 @@ mod tests {
 
     #[test]
     fn conflict_markers_are_found_with_both_sides_of_each() {
-        let text = "before\n<<<<<<< HEAD\nmine\n=======\ntheirs\nalso theirs\n>>>>>>> other\nafter\n";
+        let text =
+            "before\n<<<<<<< HEAD\nmine\n=======\ntheirs\nalso theirs\n>>>>>>> other\nafter\n";
         let found = conflicts(text);
         assert_eq!(found.len(), 1);
         let it = found[0];
@@ -952,7 +956,6 @@ mod tests {
     }
 }
 
-
 /// What the editor keeps about git, for the files it has open.
 ///
 /// One repository — the project's — because two files from two repositories in
@@ -1027,7 +1030,10 @@ impl Tracker {
             .filter(|(n, at)| *n == 0 || file.marks[n - 1].0 + 1 != *at)
             .map(|(_, at)| at);
         if forwards {
-            starts.clone().find(|at| *at > from).or_else(|| starts.min())
+            starts
+                .clone()
+                .find(|at| *at > from)
+                .or_else(|| starts.min())
         } else {
             let before: Vec<usize> = starts.clone().filter(|at| *at < from).collect();
             before.last().copied().or_else(|| starts.max())

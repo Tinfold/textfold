@@ -246,7 +246,11 @@ impl Syntax {
     /// Returns spans in byte offsets, in order, covering only the parts that
     /// are coloured at all — the gaps between them are ordinary text and the
     /// drawing knows it.
-    pub fn highlights(&self, rope: &Rope, range: ByteRange<usize>) -> Vec<(ByteRange<usize>, Role)> {
+    pub fn highlights(
+        &self,
+        rope: &Rope,
+        range: ByteRange<usize>,
+    ) -> Vec<(ByteRange<usize>, Role)> {
         let range = range.start..range.end.min(rope.len_bytes());
         if range.is_empty() {
             return Vec::new();
@@ -437,7 +441,10 @@ impl Syntax {
     /// and the rest goes" is the caller's business, because that is a fact
     /// about the screen rather than about the syntax.
     pub fn foldable_at(&self, byte: usize, rope: &Rope) -> Option<(usize, usize)> {
-        let mut node = self.tree.root_node().descendant_for_byte_range(byte, byte)?;
+        let mut node = self
+            .tree
+            .root_node()
+            .descendant_for_byte_range(byte, byte)?;
         loop {
             let range = node.byte_range();
             if spans_lines(rope, &range) {
@@ -476,7 +483,11 @@ impl Syntax {
             .tree
             .root_node()
             .descendant_for_byte_range(byte, byte + 1)?;
-        if node.child_count() > 0 || !BRACKETS.iter().any(|(o, c)| node.kind() == *o || node.kind() == *c) {
+        if node.child_count() > 0
+            || !BRACKETS
+                .iter()
+                .any(|(o, c)| node.kind() == *o || node.kind() == *c)
+        {
             return None;
         }
         let parent = node.parent()?;
@@ -795,7 +806,10 @@ mod tests {
         assert_eq!(role_for("keyword"), Some(Role::Keyword));
         // `keyword.control` has a colour of its own, so a name below it lands
         // there rather than on plain `keyword`.
-        assert_eq!(role_for("keyword.control.repeat"), Some(Role::KeywordControl));
+        assert_eq!(
+            role_for("keyword.control.repeat"),
+            Some(Role::KeywordControl)
+        );
         // And a name below one that does not falls the rest of the way.
         assert_eq!(role_for("keyword.operator.overload"), Some(Role::Keyword));
         // A more specific name with its own meaning keeps it.
@@ -1014,4 +1028,3 @@ public class Widget extends Base {
         );
     }
 }
-

@@ -100,7 +100,11 @@ fn escape_waves_an_offer_away_without_taking_it() {
     suggesting(&mut app, " world");
     pressed(&mut app, "esc");
     assert!(app.here().hint.is_none());
-    assert_eq!(app.here().text(), "hello", "escape should not have taken it");
+    assert_eq!(
+        app.here().text(),
+        "hello",
+        "escape should not have taken it"
+    );
 }
 
 #[test]
@@ -112,11 +116,17 @@ fn what_two_servers_offer_ends_up_in_one_list() {
     let mut gathered = Gathered::new(DocId(1), 12, vec![linter, checker]);
     assert!(!gathered.settled(), "nobody has answered yet");
 
-    gathered.take(linter, serde_json::json!([offered("Remove unused import", "quickfix")]));
+    gathered.take(
+        linter,
+        serde_json::json!([offered("Remove unused import", "quickfix")]),
+    );
     assert!(!gathered.settled(), "the other one is still thinking");
     assert_eq!(gathered.len(), 1);
 
-    gathered.take(checker, serde_json::json!([offered("Add import os", "quickfix")]));
+    gathered.take(
+        checker,
+        serde_json::json!([offered("Add import os", "quickfix")]),
+    );
     assert!(gathered.settled());
     let titles: Vec<&str> = gathered
         .actions()
@@ -134,8 +144,14 @@ fn a_server_answering_twice_replaces_its_own_and_leaves_the_rest() {
     let (linter, checker) = (ServerId(0), ServerId(1));
     let mut gathered = Gathered::new(DocId(1), 0, vec![linter, checker]);
     gathered.take(linter, serde_json::json!([offered("First go", "quickfix")]));
-    gathered.take(checker, serde_json::json!([offered("From the checker", "quickfix")]));
-    gathered.take(linter, serde_json::json!([offered("Second go", "quickfix")]));
+    gathered.take(
+        checker,
+        serde_json::json!([offered("From the checker", "quickfix")]),
+    );
+    gathered.take(
+        linter,
+        serde_json::json!([offered("Second go", "quickfix")]),
+    );
     let titles: Vec<&str> = gathered
         .actions()
         .iter()
@@ -198,7 +214,10 @@ fn a_name_the_file_has_not_imported_shows_where_it_comes_from() {
 
     let item = app.completion.as_ref().expect("a list").selected().unwrap();
     assert_eq!(item.label, "HashMap");
-    assert_eq!(item.suffix.as_deref(), Some("(use std::collections::HashMap)"));
+    assert_eq!(
+        item.suffix.as_deref(),
+        Some("(use std::collections::HashMap)")
+    );
     assert_eq!(item.detail.as_deref(), Some("HashMap<K, V>"));
 }
 
@@ -388,11 +407,7 @@ fn pointing_at_a_problem_says_what_is_wrong_with_it() {
         data: None,
         told: crate::doc::Told::Server(0),
     }];
-    let said: Vec<String> = app
-        .problem_lines(4)
-        .into_iter()
-        .map(|l| l.text)
-        .collect();
+    let said: Vec<String> = app.problem_lines(4).into_iter().map(|l| l.text).collect();
     assert_eq!(
         said,
         vec![
@@ -428,8 +443,7 @@ fn the_worst_problem_at_a_spot_is_read_first() {
     assert!(said.contains(&"undefined".to_string()));
     assert!(said.contains(&"unused".to_string()));
     assert!(
-        said.iter().position(|l| l == "undefined")
-            < said.iter().position(|l| l == "unused"),
+        said.iter().position(|l| l == "undefined") < said.iter().position(|l| l == "unused"),
         "the hint came before the error: {said:?}"
     );
 }
@@ -722,7 +736,11 @@ fn what_a_server_says_about_a_file_survives_until_something_opens_it() {
     );
     // Nothing was open on it, so nothing landed in a buffer — and nothing
     // was thrown away either.
-    assert!(app.docs.iter().all(|d| d.path.as_deref() != Some(other.as_path())));
+    assert!(
+        app.docs
+            .iter()
+            .all(|d| d.path.as_deref() != Some(other.as_path()))
+    );
 
     // Now it is opened, and it arrives with what was already known about it.
     app.open_path(&other);

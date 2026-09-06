@@ -16,7 +16,9 @@ fn running_a_c_file_compiles_it_first() {
     // textfold ships. Somebody who has pointed their own C build at `make`
     // has a settings file, not a bug, and a test that failed for them
     // would be a test about their machine.
-    let shipped = app.build_for("c").is_some_and(|build| build.command == "cc");
+    let shipped = app
+        .build_for("c")
+        .is_some_and(|build| build.command == "cc");
     let path = scratch("run-me.c");
     std::fs::write(&path, "int main(void) { return 0; }\n").expect("written");
     app.open_path(&path);
@@ -39,12 +41,19 @@ fn running_a_c_file_compiles_it_first() {
     };
     let built = built.expect("the build never answered");
     if shipped {
-        assert!(built.ok, "cc would not compile an empty main: {}", built.err);
+        assert!(
+            built.ok,
+            "cc would not compile an empty main: {}",
+            built.err
+        );
         assert!(path.with_extension("").exists(), "nothing was built");
     }
     let ok = built.ok;
     app.handle(Event::Tool(built));
-    assert_eq!(app.after_build, None, "the build is over and still being waited on");
+    assert_eq!(
+        app.after_build, None,
+        "the build is over and still being waited on"
+    );
     // `gdb` is not on every machine, and this test is about the editor
     // rather than about the adapter — so what is checked is that it got as
     // far as trying, which is a session either way.
@@ -94,8 +103,11 @@ fn a_build_that_fails_in_a_way_the_margin_cannot_hold_still_says_why() {
     // Calls something that is never defined, so it compiles and does not
     // link — and a linker's complaint matches no `%f:%l:%c` pattern there
     // has ever been.
-    std::fs::write(&path, "int fizz(int);\nint main(void) { return fizz(1); }\n")
-        .expect("written");
+    std::fs::write(
+        &path,
+        "int fizz(int);\nint main(void) { return fizz(1); }\n",
+    )
+    .expect("written");
     app.open_path(&path);
     app.run(Cmd::BUILD);
 
@@ -134,7 +146,11 @@ fn a_build_that_fails_in_a_way_the_margin_cannot_hold_still_says_why() {
     // And the status line carries what the compiler said rather than the
     // count of nothing it used to: "cc found nothing it could read" is a
     // sentence about the parser, not about the program.
-    assert!(!app.status.text.contains("found nothing"), "{}", app.status.text);
+    assert!(
+        !app.status.text.contains("found nothing"),
+        "{}",
+        app.status.text
+    );
     assert_eq!(app.status.tone, Tone::Bad, "{}", app.status.text);
     let first = kept
         .text
@@ -195,7 +211,10 @@ fn the_panes_come_back_as_they_were() {
             },
         ],
         panes: vec![
-            crate::session::Pane { tab: 1, wrap: false },
+            crate::session::Pane {
+                tab: 1,
+                wrap: false,
+            },
             crate::session::Pane { tab: 0, wrap: true },
         ],
         focus: 1,
@@ -205,8 +224,14 @@ fn the_panes_come_back_as_they_were() {
     };
     app.apply_session(&session, false);
     assert_eq!(app.panes.len(), 2);
-    assert_eq!(app.doc(app.panes[0].doc).map(|d| d.name.clone()).unwrap(), "panes-two.rs");
-    assert_eq!(app.doc(app.panes[1].doc).map(|d| d.name.clone()).unwrap(), "panes-one.rs");
+    assert_eq!(
+        app.doc(app.panes[0].doc).map(|d| d.name.clone()).unwrap(),
+        "panes-two.rs"
+    );
+    assert_eq!(
+        app.doc(app.panes[1].doc).map(|d| d.name.clone()).unwrap(),
+        "panes-one.rs"
+    );
     assert!(app.panes[1].wrap, "the pane's own folding came back");
     assert_eq!(app.focus, 1);
     assert!(!app.side_by_side);
@@ -388,7 +413,11 @@ fn comparing_scrolls_the_other_pane_to_line_up() {
     app.run(Cmd::DIFF_PANES);
     let (left_pane, right_pane) = app.diff.as_ref().expect("compared").panes();
     let here = app.focus.min(app.panes.len() - 1);
-    let there = if here == left_pane { right_pane } else { left_pane };
+    let there = if here == left_pane {
+        right_pane
+    } else {
+        left_pane
+    };
 
     app.panes[here].top = 40;
     app.tick();
@@ -443,7 +472,10 @@ fn a_project_with_no_marker_in_it_is_still_the_project_you_opened() {
     // opened on, which is what everything else here already means by "the
     // project".
     let (mut app, _rx) = editor();
-    let root = scratch("no-marker").parent().expect("a directory").to_path_buf();
+    let root = scratch("no-marker")
+        .parent()
+        .expect("a directory")
+        .to_path_buf();
     let inside = root.join("src");
     std::fs::create_dir_all(&inside).expect("a place to work");
     let file = inside.join("main.c");
@@ -492,7 +524,10 @@ fn a_line_too_wide_for_the_box_folds_rather_than_being_cut_off() {
     let text: Vec<&str> = folded.iter().map(|l| l.text.as_str()).collect();
     assert_eq!(text, ["the quick brown fox", "jumps over the lazy", "dog"]);
     // Nothing was lost and nothing was added.
-    assert_eq!(text.join(" "), "the quick brown fox jumps over the lazy dog");
+    assert_eq!(
+        text.join(" "),
+        "the quick brown fox jumps over the lazy dog"
+    );
     for row in &folded {
         assert!(crate::text::str_width(&row.text) <= 20);
     }
@@ -525,7 +560,10 @@ fn a_word_with_no_spaces_in_it_is_broken_rather_than_left_hanging() {
     // character is not an improvement on eliding.
     let line = DocLine::prose("BTreeMap<String,Vec<Something::Awfully::Long>>");
     let text: Vec<String> = line.wrap(16).into_iter().map(|l| l.text).collect();
-    assert_eq!(text.concat(), "BTreeMap<String,Vec<Something::Awfully::Long>>");
+    assert_eq!(
+        text.concat(),
+        "BTreeMap<String,Vec<Something::Awfully::Long>>"
+    );
     for row in &text {
         assert!(crate::text::str_width(row) <= 16, "{row:?}");
     }
@@ -544,7 +582,10 @@ fn folding_carries_the_colours_and_the_names_across_to_where_they_now_sit() {
         lang::by_name("rust"),
     );
     let line = lines.first().expect("one line of code");
-    assert!(!line.spans.is_empty(), "the code was coloured to begin with");
+    assert!(
+        !line.spans.is_empty(),
+        "the code was coloured to begin with"
+    );
     for row in line.wrap(24) {
         for (span, _) in &row.spans {
             assert!(row.text.get(span.clone()).is_some(), "{row:?} {span:?}");
@@ -609,12 +650,19 @@ fn a_name_in_a_docstring_is_followed_and_the_prose_around_it_is_not() {
 fn in_code_the_names_are_followed_and_the_keywords_are_not() {
     let rust = lang::by_name("rust").expect("rust");
     let mut lines = Vec::new();
-    push_code(&mut lines, "let it: HashMap<String, u32> = HashMap::new();\n", Some(rust));
+    push_code(
+        &mut lines,
+        "let it: HashMap<String, u32> = HashMap::new();\n",
+        Some(rust),
+    );
     let line = lines.first().expect("a line");
     let names = followable(line);
     assert!(names.contains(&"HashMap".to_string()), "{names:?}");
     assert!(names.contains(&"String".to_string()), "{names:?}");
-    assert!(!names.contains(&"let".to_string()), "a keyword is not a name");
+    assert!(
+        !names.contains(&"let".to_string()),
+        "a keyword is not a name"
+    );
     assert!(!names.contains(&"it".to_string()), "a local is not a name");
 }
 
@@ -740,7 +788,11 @@ fn a_language_built_into_the_binary_cannot_be_uninstalled() {
     let (mut app, _rx) = editor();
     app.start_uninstall("rust");
     assert_eq!(app.status.tone, Tone::Bad);
-    assert!(app.status.text.contains("switch it off"), "{}", app.status.text);
+    assert!(
+        app.status.text.contains("switch it off"),
+        "{}",
+        app.status.text
+    );
 }
 
 #[test]
@@ -886,7 +938,11 @@ fn a_file_with_no_parse_tree_says_why_it_will_not_fold() {
     let (mut app, _rx) = editor();
     typed(&mut app, "just some words\nand more of them\n");
     app.run(Cmd::FOLD);
-    assert!(app.status.text.contains("no parse tree"), "{}", app.status.text);
+    assert!(
+        app.status.text.contains("no parse tree"),
+        "{}",
+        app.status.text
+    );
 }
 
 #[test]

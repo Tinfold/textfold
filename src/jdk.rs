@@ -91,10 +91,7 @@ fn said() -> &'static RwLock<Option<PathBuf>> {
 /// why what has been found is thrown away rather than kept: the whole point of
 /// changing it is that the answer should be different afterwards.
 pub fn configure(home: Option<&str>) {
-    let home = home
-        .map(str::trim)
-        .filter(|h| !h.is_empty())
-        .map(expand);
+    let home = home.map(str::trim).filter(|h| !h.is_empty()).map(expand);
     let mut said = said().write().unwrap_or_else(|e| e.into_inner());
     if *said == home {
         return;
@@ -135,7 +132,9 @@ pub fn all() -> &'static [Jdk] {
 /// saying what it wanted rather than nothing happening at all.
 pub fn newest(least: u32) -> Option<&'static Jdk> {
     let all = all();
-    all.iter().find(|j| j.version >= least).or_else(|| all.first())
+    all.iter()
+        .find(|j| j.version >= least)
+        .or_else(|| all.first())
 }
 
 /// What a `${…}` in a manifest means, where it is one of ours. `None` for a
@@ -251,7 +250,10 @@ fn searched() -> Vec<PathBuf> {
         }
     }
     if cfg!(windows) {
-        for base in ["C:\\Program Files\\Java", "C:\\Program Files\\Eclipse Adoptium"] {
+        for base in [
+            "C:\\Program Files\\Java",
+            "C:\\Program Files\\Eclipse Adoptium",
+        ] {
             dirs.push(base.into());
         }
     }
@@ -374,12 +376,14 @@ mod tests {
     fn eclipse_is_told_the_name_it_uses_for_a_version() {
         // jdtls silently ignores a runtime whose name is not one of these,
         // which is a failure with nothing at all to see.
-        let at = |version| Jdk {
-            home: PathBuf::from("/x"),
-            version,
-            compiles: true,
-        }
-        .execution_environment();
+        let at = |version| {
+            Jdk {
+                home: PathBuf::from("/x"),
+                version,
+                compiles: true,
+            }
+            .execution_environment()
+        };
         assert_eq!(at(8), "JavaSE-1.8");
         assert_eq!(at(11), "JavaSE-11");
         assert_eq!(at(21), "JavaSE-21");
@@ -400,8 +404,11 @@ mod tests {
         std::fs::create_dir_all(dir.join("bin")).expect("a place to work");
         std::fs::write(dir.join("bin/java"), "").expect("written");
         std::fs::write(dir.join("bin/javac"), "").expect("written");
-        std::fs::write(dir.join("release"), "JAVA_VERSION=\"17.0.9\"\nOS_ARCH=\"x86_64\"\n")
-            .expect("written");
+        std::fs::write(
+            dir.join("release"),
+            "JAVA_VERSION=\"17.0.9\"\nOS_ARCH=\"x86_64\"\n",
+        )
+        .expect("written");
         let jdk = read(&dir).expect("a JDK");
         assert_eq!(jdk.version, 17);
         // It can compile, so a project may be built against it.

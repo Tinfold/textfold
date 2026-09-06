@@ -15,7 +15,10 @@ fn a_list_a_plugin_put_up_answers_with_the_row_that_was_picked() {
         ]}),
         Some(&json!(1)),
     );
-    assert!(matches!(asked, Answer::Later), "the person has not answered yet");
+    assert!(
+        matches!(asked, Answer::Later),
+        "the person has not answered yet"
+    );
     assert!(app.plugin_waiting.is_some());
     match &app.overlay {
         Overlay::Picker(picker) => assert_eq!(picker.title(), "Which board?"),
@@ -62,7 +65,12 @@ fn a_plugins_second_question_does_not_leave_the_first_hanging() {
     let first = app.plugin_waiting.as_ref().map(|a| a.request.clone());
     assert_eq!(first, Some(json!(1)));
 
-    app.plugin_asked(HostId(0), "confirm", &json!({ "text": "sure?" }), Some(&json!(2)));
+    app.plugin_asked(
+        HostId(0),
+        "confirm",
+        &json!({ "text": "sure?" }),
+        Some(&json!(2)),
+    );
     assert_eq!(
         app.plugin_waiting.as_ref().map(|a| a.request.clone()),
         Some(json!(2)),
@@ -99,7 +107,10 @@ fn a_plugins_menu_opens_where_the_cursor_is_and_answers_what_was_picked() {
     }
 
     pressed(&mut app, "enter");
-    assert!(app.plugin_waiting.is_none(), "the plugin should have its answer");
+    assert!(
+        app.plugin_waiting.is_none(),
+        "the plugin should have its answer"
+    );
     assert!(matches!(app.overlay, Overlay::None));
 }
 
@@ -108,7 +119,12 @@ fn a_menu_with_nothing_to_choose_is_not_put_up_at_all() {
     // Dividers are rows but not choices. A menu of nothing but lines
     // would be a box you cannot get out of except by escaping it.
     let (mut app, _rx) = editor();
-    match app.plugin_asked(HostId(0), "menu", &json!({ "items": [null, null] }), Some(&json!(1))) {
+    match app.plugin_asked(
+        HostId(0),
+        "menu",
+        &json!({ "items": [null, null] }),
+        Some(&json!(1)),
+    ) {
         Answer::No(why) => assert!(why.contains("nothing")),
         _ => panic!("it should have been turned down"),
     }
@@ -156,7 +172,9 @@ fn a_panel_gets_the_keys_that_would_have_changed_the_text() {
 
     // But nothing anybody knows is taken. Every one of these still does
     // what it does everywhere else in the editor.
-    for text in ["ctrl-p", "ctrl-w", "ctrl-q", "down", "ctrl-f", "alt-,", "f8"] {
+    for text in [
+        "ctrl-p", "ctrl-w", "ctrl-q", "down", "ctrl-f", "alt-,", "f8",
+    ] {
         assert!(
             !app.panel_wants(key(text)),
             "{text} should still be the editor's"
@@ -196,7 +214,11 @@ fn the_list_still_has_enter_while_something_is_offered() {
     suggesting(&mut app, "p::new()");
 
     pressed(&mut app, "enter");
-    assert_eq!(app.here().text(), "HashMap", "Enter took the row that was lit");
+    assert_eq!(
+        app.here().text(),
+        "HashMap",
+        "Enter took the row that was lit"
+    );
 }
 
 #[test]
@@ -240,7 +262,12 @@ fn a_panels_colours_line_up_with_its_text() {
     assert_eq!(text, "USART2  TX PA2\n\nplain line\n");
 
     // Every span points at exactly the words it was given.
-    let at = |r: Range| text.chars().skip(r.start()).take(r.len()).collect::<String>();
+    let at = |r: Range| {
+        text.chars()
+            .skip(r.start())
+            .take(r.len())
+            .collect::<String>()
+    };
     assert_eq!(at(spans[0].0), "USART2");
     assert_eq!(at(spans[1].0), "  TX ");
     assert_eq!(at(spans[2].0), "PA2");
@@ -261,7 +288,10 @@ fn a_panel_is_counted_in_characters_and_not_in_bytes() {
     assert_eq!(text, "▸ ADC1\n");
     let second = spans[1].0;
     assert_eq!(
-        text.chars().skip(second.start()).take(second.len()).collect::<String>(),
+        text.chars()
+            .skip(second.start())
+            .take(second.len())
+            .collect::<String>(),
         "ADC1"
     );
 }
@@ -279,7 +309,10 @@ fn a_style_a_plugin_asks_for_is_the_themes_own() {
     );
     // ...and falling back along the dots when it goes further, the way a
     // grammar's capture does.
-    assert_eq!(panel_role("keyword.made.up"), Some(crate::theme::Role::Keyword));
+    assert_eq!(
+        panel_role("keyword.made.up"),
+        Some(crate::theme::Role::Keyword)
+    );
     // ...plus the couple a plugin author reaches for that no grammar has.
     assert_eq!(panel_role("muted"), Some(crate::theme::Role::Comment));
     // A name nobody knows is drawn as ordinary text rather than refused:
@@ -341,7 +374,11 @@ fn an_edit_worked_out_against_older_text_is_refused_rather_than_applied() {
     typed(&mut app, "hello");
     let stale = app.here().version;
     typed(&mut app, " there");
-    assert_ne!(app.here().version, stale, "typing should move the version on");
+    assert_ne!(
+        app.here().version,
+        stale,
+        "typing should move the version on"
+    );
 
     // A plugin holding an edit for text that is no longer there would
     // corrupt the file rather than fix it, so it is turned down and told
@@ -392,11 +429,17 @@ fn what_a_panel_offers_lights_up_under_the_pointer() {
     let on_plain = area.x + 2;
 
     let lit = app.panel_action_under(app.focus, on_button, area.y);
-    assert!(lit.is_some_and(|range| range.start() == 6 && range.end() == 14), "{lit:?}");
+    assert!(
+        lit.is_some_and(|range| range.start() == 6 && range.end() == 14),
+        "{lit:?}"
+    );
     // And the words beside it are words, not a button.
     assert_eq!(app.panel_action_under(app.focus, on_plain, area.y), None);
     // Nor is the blank line under it, which has no spans at all.
-    assert_eq!(app.panel_action_under(app.focus, on_button, area.y + 1), None);
+    assert_eq!(
+        app.panel_action_under(app.focus, on_button, area.y + 1),
+        None
+    );
 }
 
 #[test]
@@ -432,7 +475,10 @@ fn plugin_settings_open_beside_what_they_are_overriding() {
     assert_eq!(right.path.as_deref(), Some(path.as_path()));
     assert!(!right.read_only, "yours is the half you write in");
     // Made with the shape of the thing in it, rather than as a blank page.
-    assert!(right.rope.to_string().contains("_about"), "no stub was written");
+    assert!(
+        right.rope.to_string().contains("_about"),
+        "no stub was written"
+    );
 
     std::fs::remove_file(&path).ok();
 }
@@ -447,7 +493,10 @@ fn the_manifest_half_of_plugin_settings_shows_the_manifest_and_nothing_else() {
     };
     let shipped = app.panes[0].doc;
     assert!(app.panes[0].pinned, "the manifest half is not pinned");
-    assert!(app.doc(shipped).expect("it").read_only, "and it is read-only");
+    assert!(
+        app.doc(shipped).expect("it").read_only,
+        "and it is read-only"
+    );
 
     // Standing in it and opening something puts that something in the
     // other pane, and leaves the manifest where it was.
@@ -479,7 +528,10 @@ fn closing_either_half_of_plugin_settings_closes_both() {
         app.docs.iter().all(|d| d.id != shipped),
         "the manifest is still open with nothing to compare it to"
     );
-    assert!(app.panes.iter().all(|p| !p.pinned), "a pane is still pinned");
+    assert!(
+        app.panes.iter().all(|p| !p.pinned),
+        "a pane is still pinned"
+    );
 
     // And from the other side, which should behave the same.
     std::fs::remove_file(&path).ok();
@@ -517,7 +569,10 @@ fn a_docked_panel_opens_beside_the_code_rather_than_over_it() {
     // Its buffer belongs to the plugin and nothing types into it.
     let panel = app.doc(app.panes[0].doc).expect("a buffer");
     assert!(panel.read_only);
-    assert_eq!(panel.panel.as_ref().map(|p| p.id.as_str()), Some("files/tree"));
+    assert_eq!(
+        panel.panel.as_ref().map(|p| p.id.as_str()),
+        Some("files/tree")
+    );
 }
 
 #[test]
@@ -532,7 +587,10 @@ fn opening_a_file_from_a_sidebar_puts_it_beside_the_sidebar() {
 
     // Whatever the plugin asked to open goes in the middle.
     app.run(Cmd::NEW);
-    assert!(app.panes[0].dock.is_some(), "the sidebar is still a sidebar");
+    assert!(
+        app.panes[0].dock.is_some(),
+        "the sidebar is still a sidebar"
+    );
     assert_eq!(
         app.panes[0].doc, sidebar,
         "the sidebar was made to show something else"
@@ -683,7 +741,10 @@ fn a_plugin_that_is_one_server_gets_one_row_in_the_list() {
 
     // A server switched off says so, rather than sitting there looking on
     // and quietly doing nothing.
-    assert_eq!(server_rows(&vscode, |_| false)[0].tag.as_deref(), Some("off"));
+    assert_eq!(
+        server_rows(&vscode, |_| false)[0].tag.as_deref(),
+        Some("off")
+    );
 }
 
 #[test]

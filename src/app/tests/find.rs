@@ -164,7 +164,11 @@ fn a_buffer_is_not_rewritten_under_you_with_something_that_is_not_text() {
         app.take_from_disk(id, Reread::OnATimer).is_err(),
         "it should refuse"
     );
-    assert_eq!(app.here().rope.to_string(), "hello\n", "and leave the buffer alone");
+    assert_eq!(
+        app.here().rope.to_string(),
+        "hello\n",
+        "and leave the buffer alone"
+    );
 
     // Asked for outright, it still does its best — you can see the result
     // and undo it.
@@ -179,7 +183,10 @@ fn replacing_across_the_project_asks_first_and_then_changes_buffers() {
     // with a count in it, and agreeing to it changes buffers rather than
     // files — so it can be undone, looked at, and saved when you mean it.
     let (mut app, rx) = editor();
-    let dir = scratch("replace-project").parent().expect("a dir").to_path_buf();
+    let dir = scratch("replace-project")
+        .parent()
+        .expect("a dir")
+        .to_path_buf();
     std::fs::create_dir_all(&dir).expect("a place to work");
     let one = dir.join("one.txt");
     let two = dir.join("two.txt");
@@ -202,7 +209,11 @@ fn replacing_across_the_project_asks_first_and_then_changes_buffers() {
     let Overlay::Confirm(confirm) = &app.overlay else {
         panic!("it must ask before rewriting anybody's project");
     };
-    assert!(confirm.message.contains("2 places in 1 file"), "{}", confirm.message);
+    assert!(
+        confirm.message.contains("2 places in 1 file"),
+        "{}",
+        confirm.message
+    );
 
     pressed(&mut app, "r");
     let doc = app

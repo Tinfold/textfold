@@ -269,7 +269,9 @@ impl Hosts {
             return;
         };
         if !self.hosts[at].is_ready() {
-            return self.hosts[at].queued.push((method.to_string(), params, ask));
+            return self.hosts[at]
+                .queued
+                .push((method.to_string(), params, ask));
         }
         match ask {
             Some(ask) => self.hosts[at].request(method, params, ask),
@@ -322,12 +324,7 @@ impl Hosts {
     /// because a failure returns words rather than a half-made host — an id
     /// handed out for a host that never joined the list would name whichever
     /// host joined it next.
-    fn start(
-        &mut self,
-        plugin: &str,
-        config: &plugin::Host,
-        root: &Path,
-    ) -> Result<Host, String> {
+    fn start(&mut self, plugin: &str, config: &plugin::Host, root: &Path) -> Result<Host, String> {
         let id = HostId(self.hosts.len());
         let rpc = Peer::start(
             rpc::Spawn {

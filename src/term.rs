@@ -200,40 +200,75 @@ fn helpers() -> &'static (Option<Helper>, Option<Helper>) {
         // with no `DISPLAY` blocks rather than failing.
         if set("WAYLAND_DISPLAY") && have("wl-copy") && have("wl-paste") {
             return (
-                Some(Helper { command: "wl-copy", args: &[] }),
+                Some(Helper {
+                    command: "wl-copy",
+                    args: &[],
+                }),
                 // Without this, a copy made in another program comes back with
                 // a newline `wl-copy` added and nobody asked for.
-                Some(Helper { command: "wl-paste", args: &["--no-newline"] }),
+                Some(Helper {
+                    command: "wl-paste",
+                    args: &["--no-newline"],
+                }),
             );
         }
         if set("DISPLAY") && have("xclip") {
             return (
-                Some(Helper { command: "xclip", args: &["-selection", "clipboard"] }),
-                Some(Helper { command: "xclip", args: &["-selection", "clipboard", "-o"] }),
+                Some(Helper {
+                    command: "xclip",
+                    args: &["-selection", "clipboard"],
+                }),
+                Some(Helper {
+                    command: "xclip",
+                    args: &["-selection", "clipboard", "-o"],
+                }),
             );
         }
         if set("DISPLAY") && have("xsel") {
             return (
-                Some(Helper { command: "xsel", args: &["--clipboard", "--input"] }),
-                Some(Helper { command: "xsel", args: &["--clipboard", "--output"] }),
+                Some(Helper {
+                    command: "xsel",
+                    args: &["--clipboard", "--input"],
+                }),
+                Some(Helper {
+                    command: "xsel",
+                    args: &["--clipboard", "--output"],
+                }),
             );
         }
         if have("pbcopy") && have("pbpaste") {
             return (
-                Some(Helper { command: "pbcopy", args: &[] }),
-                Some(Helper { command: "pbpaste", args: &[] }),
+                Some(Helper {
+                    command: "pbcopy",
+                    args: &[],
+                }),
+                Some(Helper {
+                    command: "pbpaste",
+                    args: &[],
+                }),
             );
         }
         // Windows Subsystem for Linux, where the Windows clipboard is the one
         // that matters. `clip.exe` can only be written to.
         if have("clip.exe") {
-            return (Some(Helper { command: "clip.exe", args: &[] }), None);
+            return (
+                Some(Helper {
+                    command: "clip.exe",
+                    args: &[],
+                }),
+                None,
+            );
         }
         if have("termux-clipboard-set") {
             return (
-                Some(Helper { command: "termux-clipboard-set", args: &[] }),
-                have("termux-clipboard-get")
-                    .then_some(Helper { command: "termux-clipboard-get", args: &[] }),
+                Some(Helper {
+                    command: "termux-clipboard-set",
+                    args: &[],
+                }),
+                have("termux-clipboard-get").then_some(Helper {
+                    command: "termux-clipboard-get",
+                    args: &[],
+                }),
             );
         }
         (None, None)
@@ -314,7 +349,13 @@ fn understood_by(var: impl Fn(&str) -> Option<String>) -> bool {
     let term = var("TERM").unwrap_or_default().to_lowercase();
     // Written as `xterm-kitty`, `xterm-ghostty`, `wezterm`, `foot-extra`.
     const TERMS: &[&str] = &[
-        "kitty", "ghostty", "wezterm", "foot", "contour", "rio", "alacritty",
+        "kitty",
+        "ghostty",
+        "wezterm",
+        "foot",
+        "contour",
+        "rio",
+        "alacritty",
     ];
     if TERMS.iter().any(|name| term.contains(name)) {
         return true;
@@ -323,7 +364,13 @@ fn understood_by(var: impl Fn(&str) -> Option<String>) -> bool {
     // are somewhere else instead.
     let program = var("TERM_PROGRAM").unwrap_or_default().to_lowercase();
     const PROGRAMS: &[&str] = &[
-        "ghostty", "wezterm", "iterm.app", "vscode", "rio", "kitty", "contour",
+        "ghostty",
+        "wezterm",
+        "iterm.app",
+        "vscode",
+        "rio",
+        "kitty",
+        "contour",
     ];
     if PROGRAMS.contains(&program.as_str()) {
         return true;

@@ -84,7 +84,10 @@ impl App {
                     }
                 }
             }
-            Incoming::Response { id: request, result } => {
+            Incoming::Response {
+                id: request,
+                result,
+            } => {
                 let Some(ask) = self.hosts.get_mut(id).and_then(|h| h.claim(request)) else {
                     return;
                 };
@@ -190,7 +193,12 @@ impl App {
     }
 
     /// Put a plugin's question on the screen and remember who asked it.
-    pub(super) fn ask_for_plugin(&mut self, id: HostId, request: Option<&Value>, overlay: Overlay) -> Answer {
+    pub(super) fn ask_for_plugin(
+        &mut self,
+        id: HostId,
+        request: Option<&Value>,
+        overlay: Overlay,
+    ) -> Answer {
         let Some(request) = request.cloned() else {
             return Answer::No("that has to be asked, not told".into());
         };
@@ -199,10 +207,7 @@ impl App {
         // box is about to be replaced by this one.
         self.settle_plugin_question(Value::Null);
         self.overlay = overlay;
-        self.plugin_waiting = Some(Asked {
-            host: id,
-            request,
-        });
+        self.plugin_waiting = Some(Asked { host: id, request });
         Answer::Later
     }
 
@@ -300,9 +305,7 @@ impl App {
             params.get("line").and_then(Value::as_u64),
             params.get("column").and_then(Value::as_u64),
         ) {
-            (Some(line), column) => {
-                doc.char_at_point(line as usize, column.unwrap_or(0) as usize)
-            }
+            (Some(line), column) => doc.char_at_point(line as usize, column.unwrap_or(0) as usize),
             // Nothing said means where the cursor is, which is what an inline
             // suggestion nearly always means.
             _ => cursor,
@@ -338,7 +341,11 @@ impl App {
         };
         let count = self.apply_changes_to(
             id,
-            vec![crate::doc::Change::replace(hint.at, hint.at, hint.text.clone())],
+            vec![crate::doc::Change::replace(
+                hint.at,
+                hint.at,
+                hint.text.clone(),
+            )],
         );
         if count > 0 {
             // The cursor goes to the end of what was put in, which is where
@@ -445,10 +452,7 @@ impl App {
         let was = doc.len_chars();
         let sel = Selections::single(Range::point(0));
         let lines = text.lines().count();
-        let edits = doc.apply_atomic(
-            vec![crate::doc::Change::replace(0, was, text)],
-            &sel,
-        );
+        let edits = doc.apply_atomic(vec![crate::doc::Change::replace(0, was, text)], &sel);
         if let Some(panel) = &mut doc.panel {
             panel.spans = spans;
             panel.actions = actions;
@@ -537,10 +541,9 @@ impl App {
         match self.pane_showing_docked(doc) {
             // Already docked: change what was asked about and leave the rest.
             Some(at) => {
-                let dock = self.panes[at].dock.get_or_insert(crate::view::Dock::new(
-                    crate::view::Edge::Left,
-                    None,
-                ));
+                let dock = self.panes[at]
+                    .dock
+                    .get_or_insert(crate::view::Dock::new(crate::view::Edge::Left, None));
                 if let Some(edge) = edge {
                     // A dock that changes edge changes what its size means, so
                     // one that was not also given a size gets the default for
@@ -704,7 +707,9 @@ impl App {
         let Some(doc) = self.docs.iter().find(|d| d.id == self.view().doc) else {
             return false;
         };
-        let Some(panel) = &doc.panel else { return false };
+        let Some(panel) = &doc.panel else {
+            return false;
+        };
         let Some((_, action)) = panel
             .actions
             .iter()
@@ -714,9 +719,11 @@ impl App {
         };
         let (owner, id, action) = (panel.owner.clone(), panel.id.clone(), action.clone());
         match owner {
-            crate::doc::Owner::Plugin(plugin) => {
-                self.tell_panel(&plugin, "panel/action", json!({ "panel": id, "action": action }))
-            }
+            crate::doc::Owner::Plugin(plugin) => self.tell_panel(
+                &plugin,
+                "panel/action",
+                json!({ "panel": id, "action": action }),
+            ),
             crate::doc::Owner::Debugger => self.debug_action(&action),
         }
         true
@@ -785,7 +792,11 @@ impl App {
     ///
     /// Namespaced by plugin, so a fresh set from one replaces only its own
     /// findings. A plugin cannot clear clangd's, and clangd cannot clear its.
-    pub(super) fn plugin_diagnostics(&mut self, id: HostId, params: &Value) -> Result<Value, String> {
+    pub(super) fn plugin_diagnostics(
+        &mut self,
+        id: HostId,
+        params: &Value,
+    ) -> Result<Value, String> {
         let Some(plugin) = self
             .hosts
             .get(id)
@@ -804,7 +815,10 @@ impl App {
             .and_then(Value::as_str)
             .map(PathBuf::from);
         for doc in &mut self.docs {
-            if only.as_deref().is_none_or(|p| doc.path.as_deref() == Some(p)) {
+            if only
+                .as_deref()
+                .is_none_or(|p| doc.path.as_deref() == Some(p))
+            {
                 doc.diagnostics.retain(|d| d.told != told);
             }
         }
@@ -871,10 +885,7 @@ impl App {
                         .map(str::to_string)
                         .unwrap_or_else(|| name.clone()),
                 ),
-                code: item
-                    .get("code")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
+                code: item.get("code").and_then(Value::as_str).map(str::to_string),
                 data: None,
                 told,
             });
@@ -1004,10 +1015,8 @@ impl App {
                                     ));
                                 }
                                 let label = item.get("label").and_then(Value::as_str)?;
-                                let value = item
-                                    .get("value")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or(label);
+                                let value =
+                                    item.get("value").and_then(Value::as_str).unwrap_or(label);
                                 let mut row =
                                     Row::new(label, Choice::PluginItem(value.to_string()));
                                 if let Some(detail) = item.get("detail").and_then(Value::as_str) {
@@ -1077,22 +1086,20 @@ impl App {
                                 if let Some(label) = item.as_str() {
                                     return menu::Item::chosen(label, label);
                                 }
-                                let label =
-                                    item.get("label").and_then(Value::as_str).unwrap_or("");
-                                let value = item
-                                    .get("value")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or(label);
+                                let label = item.get("label").and_then(Value::as_str).unwrap_or("");
+                                let value =
+                                    item.get("value").and_then(Value::as_str).unwrap_or(label);
                                 menu::Item::chosen(label, value).enabled(
-                                    item.get("enabled")
-                                        .and_then(Value::as_bool)
-                                        .unwrap_or(true),
+                                    item.get("enabled").and_then(Value::as_bool).unwrap_or(true),
                                 )
                             })
                             .collect()
                     })
                     .unwrap_or_default();
-                if !items.iter().any(|item| matches!(item.action, menu::Action::Chosen(_))) {
+                if !items
+                    .iter()
+                    .any(|item| matches!(item.action, menu::Action::Chosen(_)))
+                {
                     return Answer::No("there was nothing in that menu".into());
                 }
                 // Where the cursor is on the screen. A click has already put
@@ -1219,7 +1226,8 @@ impl App {
         };
         // A server sends its complete opinion every time, so its old findings
         // go and everybody else's stay.
-        doc.diagnostics.retain(|d| d.told != crate::doc::Told::Server(id.0));
+        doc.diagnostics
+            .retain(|d| d.told != crate::doc::Told::Server(id.0));
         doc.diagnostics.extend(fresh);
 
         // What is wrong here has changed, so what could be done about it has
@@ -1269,7 +1277,12 @@ impl App {
         }
     }
 
-    pub(super) fn on_response(&mut self, id: ServerId, request: i64, result: Result<Value, String>) {
+    pub(super) fn on_response(
+        &mut self,
+        id: ServerId,
+        request: i64,
+        result: Result<Value, String>,
+    ) {
         let Some(ask) = self.lsp.get_mut(id).and_then(|s| s.claim(request)) else {
             return;
         };
@@ -1325,7 +1338,9 @@ impl App {
             Ask::PrepareRename { doc, at } => self.take_prepare_rename(doc, at, value),
             Ask::Highlights { doc, at, version } => self.take_highlights(doc, at, version, value),
             Ask::Lenses { doc, version } => self.take_lenses(doc, version, value),
-            Ask::PrepareCalls { doc, incoming } => self.take_prepare_calls(id, doc, incoming, value),
+            Ask::PrepareCalls { doc, incoming } => {
+                self.take_prepare_calls(id, doc, incoming, value)
+            }
             Ask::Calls { incoming } => self.take_calls(incoming, value),
             Ask::SemanticTokens {
                 doc,
@@ -1599,7 +1614,13 @@ impl App {
         self.signature = Some(Popup::new(lines, at));
     }
 
-    pub(super) fn take_goto(&mut self, doc: DocId, what: Goto, fallback: Option<String>, value: Value) {
+    pub(super) fn take_goto(
+        &mut self,
+        doc: DocId,
+        what: Goto,
+        fallback: Option<String>,
+        value: Value,
+    ) {
         if self.view().doc != doc {
             return;
         }
@@ -1665,7 +1686,13 @@ impl App {
     }
 
     /// Put the text of a class that lives inside a jar into a buffer.
-    pub(super) fn take_class_file(&mut self, uri: String, line: usize, column: usize, value: Value) {
+    pub(super) fn take_class_file(
+        &mut self,
+        uri: String,
+        line: usize,
+        column: usize,
+        value: Value,
+    ) {
         let Some(text) = value.as_str().filter(|t| !t.is_empty()) else {
             return self.say("the server had nothing to show for that");
         };
@@ -1772,7 +1799,9 @@ impl App {
         if self.view().doc != doc || self.view().cursor() != at {
             return;
         }
-        let Some(document) = self.doc(doc) else { return };
+        let Some(document) = self.doc(doc) else {
+            return;
+        };
         if document.version != version {
             return;
         }
@@ -1796,7 +1825,9 @@ impl App {
 
     /// The notes a server offers about the lines of this file.
     pub(super) fn take_lenses(&mut self, doc: DocId, version: i32, value: Value) {
-        let Some(document) = self.doc(doc) else { return };
+        let Some(document) = self.doc(doc) else {
+            return;
+        };
         if document.version != version {
             return;
         }
@@ -1827,7 +1858,13 @@ impl App {
     }
 
     /// The server named what is under the cursor; now ask who calls it.
-    pub(super) fn take_prepare_calls(&mut self, id: ServerId, doc: DocId, incoming: bool, value: Value) {
+    pub(super) fn take_prepare_calls(
+        &mut self,
+        id: ServerId,
+        doc: DocId,
+        incoming: bool,
+        value: Value,
+    ) {
         if self.view().doc != doc {
             return;
         }
@@ -1851,7 +1888,8 @@ impl App {
                 let item = call.get(if incoming { "from" } else { "to" })?;
                 let name = item.get("name")?.as_str()?.to_string();
                 let path = crate::lsp::path_of(item.get("uri")?.as_str()?)?;
-                let (line, column) = crate::lsp::point_of(item.get("selectionRange")?.get("start")?)?;
+                let (line, column) =
+                    crate::lsp::point_of(item.get("selectionRange")?.get("start")?)?;
                 Some(
                     Row::new(
                         name,
@@ -1884,8 +1922,16 @@ impl App {
     /// small number — which also means one bad number puts every colour after
     /// it in the wrong place, so anything that does not add up stops the walk
     /// rather than being guessed at.
-    pub(super) fn take_semantic_tokens(&mut self, doc: DocId, version: i32, legend: &[String], value: Value) {
-        let Some(document) = self.doc(doc) else { return };
+    pub(super) fn take_semantic_tokens(
+        &mut self,
+        doc: DocId,
+        version: i32,
+        legend: &[String],
+        value: Value,
+    ) {
+        let Some(document) = self.doc(doc) else {
+            return;
+        };
         if document.version != version {
             // The file has been typed in since it was asked. The positions
             // would be a few characters out, which is worse than the colours
@@ -1932,7 +1978,9 @@ impl App {
 
     /// The types and parameter names the file does not say.
     pub(super) fn take_inlay_hints(&mut self, doc: DocId, version: i32, value: Value) {
-        let Some(document) = self.doc(doc) else { return };
+        let Some(document) = self.doc(doc) else {
+            return;
+        };
         if document.version != version {
             return;
         }
@@ -2278,7 +2326,11 @@ impl App {
     /// Shared by the language servers and the plugins deliberately: the
     /// sorting, the overlap check, the panes and the undo step are the awkward
     /// parts, and having two of them would mean having one that is wrong.
-    pub(super) fn apply_changes_to(&mut self, id: DocId, mut changes: Vec<crate::doc::Change>) -> usize {
+    pub(super) fn apply_changes_to(
+        &mut self,
+        id: DocId,
+        mut changes: Vec<crate::doc::Change>,
+    ) -> usize {
         if changes.is_empty() {
             return 0;
         }
@@ -2346,7 +2398,11 @@ pub(crate) fn panel_lines(
             at += plain.chars().count() + 1;
             continue;
         }
-        for span in line.get("spans").and_then(Value::as_array).unwrap_or(&nothing) {
+        for span in line
+            .get("spans")
+            .and_then(Value::as_array)
+            .unwrap_or(&nothing)
+        {
             let words = span.get("text").and_then(Value::as_str).unwrap_or_default();
             if words.is_empty() {
                 continue;
@@ -2355,7 +2411,11 @@ pub(crate) fn panel_lines(
             // an accent in it must still line its colours up with its text.
             let end = at + words.chars().count();
             let range = Range::new(at, end);
-            if let Some(role) = span.get("style").and_then(Value::as_str).and_then(panel_role) {
+            if let Some(role) = span
+                .get("style")
+                .and_then(Value::as_str)
+                .and_then(panel_role)
+            {
                 spans.push((range, role));
             }
             if let Some(action) = span.get("action").and_then(Value::as_str) {
@@ -2614,9 +2674,8 @@ impl DocLine {
             .filter_map(|link| {
                 let start = link.start.max(range.start);
                 let end = link.end.min(range.start + body_chars);
-                (start < end).then(|| {
-                    start - range.start + lead_columns..end - range.start + lead_columns
-                })
+                (start < end)
+                    .then(|| start - range.start + lead_columns..end - range.start + lead_columns)
             })
             .collect();
         DocLine { text, spans, links }
@@ -3070,25 +3129,25 @@ pub(crate) fn strip_snippet(text: &str) -> String {
 /// already, and a theme that has been thought about is thought about here too.
 pub(crate) fn completion_role(n: u64) -> Role {
     match n {
-        2 | 3 => Role::Function,      // method, function
-        4 => Role::Constructor,       // constructor
-        5 | 10 => Role::Property,     // field, property
-        6 => Role::Variable,          // variable
-        7 | 22 => Role::Type,         // class, struct
-        8 => Role::Type,              // interface
-        9 => Role::Namespace,         // module
-        11 | 12 => Role::Constant,    // unit, value
-        13 => Role::Type,             // enum
-        14 => Role::Keyword,          // keyword
-        15 => Role::Macro,            // snippet
-        16 => Role::String,           // colour
-        17 | 19 => Role::String,      // file, folder
-        18 => Role::Variable,         // reference
-        20 => Role::Constant,         // enum member
-        21 => Role::Constant,         // constant
-        23 => Role::Attribute,        // event
-        24 => Role::Operator,         // operator
-        25 => Role::Type,             // type parameter
+        2 | 3 => Role::Function,   // method, function
+        4 => Role::Constructor,    // constructor
+        5 | 10 => Role::Property,  // field, property
+        6 => Role::Variable,       // variable
+        7 | 22 => Role::Type,      // class, struct
+        8 => Role::Type,           // interface
+        9 => Role::Namespace,      // module
+        11 | 12 => Role::Constant, // unit, value
+        13 => Role::Type,          // enum
+        14 => Role::Keyword,       // keyword
+        15 => Role::Macro,         // snippet
+        16 => Role::String,        // colour
+        17 | 19 => Role::String,   // file, folder
+        18 => Role::Variable,      // reference
+        20 => Role::Constant,      // enum member
+        21 => Role::Constant,      // constant
+        23 => Role::Attribute,     // event
+        24 => Role::Operator,      // operator
+        25 => Role::Type,          // type parameter
         // Plain text, and anything a later LSP invents. Neither is a thing
         // with a colour of its own, and guessing one would be worse than the
         // ordinary foreground.

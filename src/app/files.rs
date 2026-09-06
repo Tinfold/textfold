@@ -73,7 +73,7 @@ impl App {
             at: crate::session::now(),
             tabs,
             panes,
-            docks
+            docks,
         }
     }
 
@@ -119,7 +119,11 @@ impl App {
     /// Open what a session describes. Split from the reading so that a test
     /// can hand one over rather than going through the file every textfold on
     /// this machine shares.
-    pub(super) fn apply_session(&mut self, session: &crate::session::Session, asked: bool) -> usize {
+    pub(super) fn apply_session(
+        &mut self,
+        session: &crate::session::Session,
+        asked: bool,
+    ) -> usize {
         let already: Vec<PathBuf> = self.docs.iter().filter_map(|d| d.path.clone()).collect();
         let mut opened: Vec<Option<DocId>> = Vec::new();
         for tab in &session.tabs {
@@ -287,7 +291,8 @@ impl App {
             // looked at most recently" turns a sidebar into a second, sideways
             // copy of the file you are editing — which is what closing the
             // debugger's panel used to do.
-            self.panes.retain(|pane| pane.dock.is_none() || pane.doc != id);
+            self.panes
+                .retain(|pane| pane.dock.is_none() || pane.doc != id);
             self.focus = self.focus.min(self.panes.len().saturating_sub(1));
             // The rest move to whatever was looked at most recently.
             let fallback = self.most_recent().unwrap_or(self.docs[0].id);
@@ -316,7 +321,6 @@ impl App {
             .map(|d| d.id)
             .max_by_key(|id| self.seen.get(id).copied().unwrap_or(0))
     }
-
 
     /// Write the file, reformatting it first if that is what you have asked
     /// for.
@@ -382,7 +386,10 @@ impl App {
             return;
         }
         let id = self.view().doc;
-        let both = [SOURCE_FIX_ALL.to_string(), SOURCE_ORGANIZE_IMPORTS.to_string()];
+        let both = [
+            SOURCE_FIX_ALL.to_string(),
+            SOURCE_ORGANIZE_IMPORTS.to_string(),
+        ];
         let mut steps = self.fix_steps(id, &both);
         if steps.is_empty() {
             return self.format();
@@ -402,11 +409,7 @@ impl App {
         let servers = self.lsp.who_all_can(open, "codeActionProvider");
         kinds
             .iter()
-            .flat_map(|kind| {
-                servers
-                    .iter()
-                    .map(move |id| Step::Fix(kind.clone(), *id))
-            })
+            .flat_map(|kind| servers.iter().map(move |id| Step::Fix(kind.clone(), *id)))
             .collect()
     }
 
@@ -510,9 +513,7 @@ impl App {
         crate::cmd::all()
             .iter()
             .filter_map(|cmd| cmd.tool())
-            .filter(|tool| {
-                tool.on_save && tool.output == Output::Replace && tool.wants(&language)
-            })
+            .filter(|tool| tool.on_save && tool.output == Output::Replace && tool.wants(&language))
             .collect()
     }
 
@@ -586,7 +587,13 @@ impl App {
     /// server is certain enough about to have called `source.fixAll` — but
     /// they still cannot be stacked up and applied together, because each was
     /// worked out against the file as it was.
-    pub(super) fn take_source_actions(&mut self, server: ServerId, doc: DocId, version: i32, value: Value) {
+    pub(super) fn take_source_actions(
+        &mut self,
+        server: ServerId,
+        doc: DocId,
+        version: i32,
+        value: Value,
+    ) {
         let waiting = self.before_save.as_ref().is_some_and(|b| {
             b.doc == doc && matches!(b.doing, Some(Step::Fix(_, id)) if id == server)
         });

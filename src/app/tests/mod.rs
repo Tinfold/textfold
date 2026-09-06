@@ -37,8 +37,7 @@ fn editor() -> (App, mpsc::Receiver<Event>) {
 }
 
 fn scratch(name: &str) -> PathBuf {
-    let dir =
-        std::env::temp_dir().join(format!("textfold-app-{}-{}", std::process::id(), name));
+    let dir = std::env::temp_dir().join(format!("textfold-app-{}-{}", std::process::id(), name));
     std::fs::create_dir_all(&dir).expect("a place to work");
     dir.join(name)
 }
@@ -71,7 +70,9 @@ fn plugin_asks(app: &mut App, method: &str, params: serde_json::Value) -> Result
 /// afterwards — including noticing that a box has gone — happens too.
 fn pressed(app: &mut App, key: &str) {
     let key = Key::parse(key).expect("a key");
-    app.handle(Event::Term(TermEvent::Key(KeyEvent::new(key.code, key.mods))));
+    app.handle(Event::Term(TermEvent::Key(KeyEvent::new(
+        key.code, key.mods,
+    ))));
 }
 
 /// Everything one row of a panel says, run together, with the stretches
@@ -178,17 +179,26 @@ fn a_panel(app: &mut App) -> DocId {
 fn followable(line: &DocLine) -> Vec<String> {
     line.links
         .iter()
-        .map(|range| line.text.chars().skip(range.start).take(range.len()).collect())
+        .map(|range| {
+            line.text
+                .chars()
+                .skip(range.start)
+                .take(range.len())
+                .collect()
+        })
         .collect()
 }
 
 /// A panel a plugin declared, as a `&'static Command` the editor can be
 /// handed. Leaked, because that is what the registry hands out and the
 /// command tables hold.
-fn docked_panel(id: &str, edge: Option<&str>, size: Option<u16>) -> &'static crate::plugin::Command {
-    let dock = edge.map(|e| {
-        crate::view::Dock::new(crate::view::Edge::parse(e).expect("an edge"), size)
-    });
+fn docked_panel(
+    id: &str,
+    edge: Option<&str>,
+    size: Option<u16>,
+) -> &'static crate::plugin::Command {
+    let dock =
+        edge.map(|e| crate::view::Dock::new(crate::view::Edge::parse(e).expect("an edge"), size));
     Box::leak(Box::new(crate::plugin::Command {
         id: id.to_string(),
         name: id.split('/').next_back().unwrap_or(id).to_string(),

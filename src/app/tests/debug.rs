@@ -34,7 +34,10 @@ fn a_language_that_has_to_be_compiled_offers_that_where_you_are_looking() {
     std::fs::write(&c, "int main(void) { return 0; }\n").expect("written");
     app.open_path(&c);
     let buttons = row(&app.debug_panel_lines()[0]);
-    assert!(buttons.contains("→do:build"), "no way to build a C file: {buttons}");
+    assert!(
+        buttons.contains("→do:build"),
+        "no way to build a C file: {buttons}"
+    );
 
     // And a language with nothing to build says nothing about building.
     let py = scratch("buttons.py");
@@ -111,7 +114,10 @@ fn the_debug_panel_says_how_to_start_when_nothing_is_running() {
     let text = app.doc(id).expect("a buffer").rope.to_string();
     assert!(text.contains("Nothing is being debugged"), "{text}");
     assert!(text.contains("F5"), "it should say which key: {text}");
-    assert!(text.contains("F9"), "and which one sets a breakpoint: {text}");
+    assert!(
+        text.contains("F9"),
+        "and which one sets a breakpoint: {text}"
+    );
     // And it is docked along the bottom rather than opened as a tab.
     let at = app.pane_showing_docked(id).expect("docked");
     assert_eq!(
@@ -201,7 +207,10 @@ fn breakpoints_can_be_cleared_in_this_file_or_everywhere() {
     // reason there are two commands.
     app.run(Cmd::CLEAR_BREAKPOINTS);
     assert!(app.doc(second).expect("a buffer").breakpoints.is_empty());
-    assert_eq!(app.doc(first).expect("a buffer").breakpoint_lines(), vec![0, 2]);
+    assert_eq!(
+        app.doc(first).expect("a buffer").breakpoint_lines(),
+        vec![0, 2]
+    );
 
     app.run(Cmd::CLEAR_ALL_BREAKPOINTS);
     assert!(app.doc(first).expect("a buffer").breakpoints.is_empty());
@@ -215,7 +224,11 @@ fn clearing_breakpoints_says_which_file_it_was_about() {
     let (mut app, _rx) = editor();
     typed(&mut app, "one\ntwo\n");
     app.run(Cmd::CLEAR_BREAKPOINTS);
-    assert!(app.status.text.contains("there were none in"), "{}", app.status.text);
+    assert!(
+        app.status.text.contains("there were none in"),
+        "{}",
+        app.status.text
+    );
 }
 
 #[test]
@@ -241,7 +254,10 @@ fn attaching_over_a_port_asks_which_one_and_remembers_the_answer() {
     // than one number for everything: debugpy's is 5678, JDWP's is 5005,
     // and a default that is wrong for one of them is an edit every person
     // using it makes once, forever.
-    assert_eq!(asked, "127.0.0.1:5678", "not what debugpy's own examples use");
+    assert_eq!(
+        asked, "127.0.0.1:5678",
+        "not what debugpy's own examples use"
+    );
 
     // Answering it attaches, and is remembered against this project.
     let root = app.attach_root().display().to_string();
@@ -301,9 +317,9 @@ fn attaching_offers_the_projects_own_programs_first() {
     for _ in 0..120 {
         app.run(Cmd::DEBUG_ATTACH);
         rows = match &app.overlay {
-            Overlay::Picker(picker) => {
-                (0..picker.len()).filter_map(|at| picker.row(at).cloned()).collect()
-            }
+            Overlay::Picker(picker) => (0..picker.len())
+                .filter_map(|at| picker.row(at).cloned())
+                .collect(),
             _ => panic!("no list went up: {}", app.status.text),
         };
         let both = [ours.id(), theirs.id()].iter().all(|pid| {

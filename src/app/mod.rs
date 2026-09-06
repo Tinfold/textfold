@@ -24,17 +24,17 @@ use ratatui::layout::Rect;
 use serde_json::{Value, json};
 
 use crate::cmd::{self, Behaviour, Cmd, Group, Spec};
-use crate::plugin::{Output, Tool};
 use crate::config::{Config, LineNumbers};
 use crate::doc::{Diagnostic, DocId, Document, Indent, OnDisk, Severity};
 use crate::edit::{self, Motion};
 use crate::git::Tracker;
+use crate::host::{HostId, Hosts};
 use crate::keys::{Key, Keys};
 use crate::lang::{self, LangId};
-use crate::host::{HostId, Hosts};
 use crate::lsp::{Ask, Goto, Incoming, ServerId, Servers};
 use crate::menu::{self, Menu};
 use crate::picker::{Choice, Kind, Picker, Row};
+use crate::plugin::{Output, Tool};
 use crate::text::{self, Range, Selections};
 use crate::theme::{Role, Theme, Themes};
 use crate::view::{self, View};
@@ -788,7 +788,11 @@ impl Popup {
         // Which line of the unfolded text is on the top row now, so that it
         // can be put back on the top row afterwards.
         let was = self.unfolded_at(self.scroll);
-        self.lines = self.source.iter().flat_map(|line| line.wrap(width)).collect();
+        self.lines = self
+            .source
+            .iter()
+            .flat_map(|line| line.wrap(width))
+            .collect();
         self.folded_at = width;
         self.scroll = self.folded_at_line(was);
         // A selection is in the folded text's coordinates and there is no
@@ -927,7 +931,10 @@ impl Popup {
         if !chars.get(at).is_some_and(part) {
             return;
         }
-        let from = chars[..at].iter().rposition(|c| !part(c)).map_or(0, |n| n + 1);
+        let from = chars[..at]
+            .iter()
+            .rposition(|c| !part(c))
+            .map_or(0, |n| n + 1);
         let to = chars[at..]
             .iter()
             .position(|c| !part(c))
@@ -941,7 +948,13 @@ impl Popup {
     fn line_text(&self, line: usize) -> String {
         self.lines
             .get(line)
-            .map(|l| if l.text == RULE { String::new() } else { l.text.clone() })
+            .map(|l| {
+                if l.text == RULE {
+                    String::new()
+                } else {
+                    l.text.clone()
+                }
+            })
             .unwrap_or_default()
     }
 
@@ -960,7 +973,11 @@ impl Popup {
             let text = self.line_text(line);
             let width = text.chars().count();
             let from = if line == start.0 { start.1 } else { 0 };
-            let to = if line == end.0 { end.1.min(width) } else { width };
+            let to = if line == end.0 {
+                end.1.min(width)
+            } else {
+                width
+            };
             if to > from {
                 out.extend(text.chars().skip(from).take(to - from));
             }
@@ -1910,7 +1927,8 @@ impl App {
             return;
         }
         let Some((_, to)) = self
-            .hits.nudges
+            .hits
+            .nudges
             .iter()
             .find(|(area, _)| hits(*area, at.0, at.1))
         else {
@@ -2139,7 +2157,12 @@ impl App {
         if !self.fixes.about(doc, at) {
             return;
         }
-        let Some(gathered) = self.fixes.found.as_mut().filter(|g| g.doc == doc && g.at == at) else {
+        let Some(gathered) = self
+            .fixes
+            .found
+            .as_mut()
+            .filter(|g| g.doc == doc && g.at == at)
+        else {
             return;
         };
         gathered.take(server, value);
@@ -2626,7 +2649,9 @@ impl App {
             self.debug.send_breakpoints(&where_);
         }
 
-        let App { docs, lsp, hosts, .. } = self;
+        let App {
+            docs, lsp, hosts, ..
+        } = self;
         if let Some(doc) = docs.iter().find(|d| d.id == id) {
             lsp.did_change(doc, &edits);
             hosts.changed(doc, &edits);
@@ -2642,12 +2667,19 @@ impl App {
         // edit computed against an old version gets, arrived at from the other
         // side.
         if self.doc(id).is_some_and(|d| d.hint.is_some()) {
-            let plugin = self.doc(id).and_then(|d| d.hint.as_ref()).map(|h| h.plugin.clone());
+            let plugin = self
+                .doc(id)
+                .and_then(|d| d.hint.as_ref())
+                .map(|h| h.plugin.clone());
             if let Some(doc) = self.doc_mut(id) {
                 doc.hint = None;
             }
             if let Some(plugin) = plugin {
-                self.tell_panel(&plugin, "hint/dropped", json!({ "why": "the text changed" }));
+                self.tell_panel(
+                    &plugin,
+                    "hint/dropped",
+                    json!({ "why": "the text changed" }),
+                );
             }
         }
         self.hover = None;

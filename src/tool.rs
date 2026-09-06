@@ -223,7 +223,10 @@ mod tests {
 
     #[test]
     fn a_line_a_compiler_would_print_is_read_as_a_problem() {
-        let found = problems("%f:%l:%c: %m", "src/main.py:12:5: F401 'os' imported but unused");
+        let found = problems(
+            "%f:%l:%c: %m",
+            "src/main.py:12:5: F401 'os' imported but unused",
+        );
         assert_eq!(
             found,
             [Problem {

@@ -1,7 +1,6 @@
-# What a pull request has to survive: it builds, the tests pass, and clippy has
-# nothing to say. Formatting is deliberately not checked — the source is
-# hand-set in places rustfmt would undo, and a robot rewriting a comment block
-# it does not understand is not an improvement.
+# What a pull request has to survive: it is formatted, it builds, the tests
+# pass, and clippy has nothing to say. Formatting is rustfmt's own defaults,
+# checked here so that nobody has to have an opinion about it in review.
 
 name: ci
 
@@ -24,7 +23,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: The toolchain the crate asks for
-        run: rustup toolchain install stable --profile minimal --component clippy
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+
+      # First, because it is the cheapest thing that can fail and needs no
+      # build. `cargo fmt` on the branch is the whole of the fix.
+      - run: cargo fmt --all --check
 
       # The grammars are C and are compiled in, so a cold build is minutes.
       # Keyed on the lockfile: the dependencies are what takes the time, and
