@@ -250,17 +250,54 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+
     #[test]
     fn what_is_running_includes_something_we_started_and_never_ourselves() {
         let mut child = std::process::Command::new("sleep")
             .arg("30")
             .spawn()
             .expect("sleep is on every machine there is");
-        let found = running();
+
+        // `spawn` comes back when the child *exists*, which is before it has
+        // become `sleep`. In between it has no command line at all, and a
+        // process with no command line is one `running` leaves out on purpose
+        // — that filter is what keeps every kernel thread off the list, and a
+        // process that has not exec'd yet is not something to attach a
+        // debugger to either.
+        //
+        // How wide that window is has nothing to do with this editor. The
+        // child has to be given a timeslice before it can exec, so on an idle
+        // machine it is tens of microseconds and on one building a hundred
+        // crates it is several moments — which is why this passed on every
+        // desk it was written at and failed on CI five runs running.
+        //
+        // So the list is asked for again rather than once, the same way
+        // `attaching_offers_the_projects_own_programs_first` does and for the
+        // same reason. A child that never arrives still fails the assertion
+        // below; it is only given time to turn up.
+        let mut found = Vec::new();
+        for _ in 0..120 {
+            found = running();
+            let up = found
+                .iter()
+                .any(|p| p.pid == child.id() && p.command.contains("sleep"));
+            if up {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+
         let ours = found.iter().find(|p| p.pid == child.id());
         assert!(
             ours.is_some_and(|p| p.command.contains("sleep")),
-            "a process we started a moment ago was not in the list"
+            // What it was instead, because "not in the list" on a machine
+            // nobody can log into is the message that made this take a day.
+            "a process we started a moment ago was not in the list of {}: {}",
+            found.len(),
+            match ours {
+                None => "it is not there at all".to_string(),
+                Some(p) => format!("it is there, running {:?}", p.command),
+            }
         );
         // Newest first, so the thing started a moment ago is near the top
         // rather than under two hundred daemons that have been up since boot.
