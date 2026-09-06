@@ -308,6 +308,18 @@ impl Lang {
                 } => {
                     let language = match load_library_grammar(path, symbol) {
                         Some(language) => language,
+                        // Told apart, because they are different afternoons.
+                        // A library that is not there has not been built — a
+                        // plugin brings the recipe and `--install` runs it —
+                        // and saying the symbol is wrong sends whoever reads
+                        // it looking through a file that does not exist.
+                        None if !path.exists() => {
+                            return complain(format!(
+                                "{} has not been built — `textfold --install` \
+                                 the plugin that brings it",
+                                path.display()
+                            ));
+                        }
                         None => {
                             return complain(format!(
                                 "no {symbol} in {} — is that the right symbol?",
