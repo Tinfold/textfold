@@ -1,14 +1,24 @@
 {
   "id": "git",
   "name": "Git files",
-  "about": "Commit messages, .gitignore, and the rest",
+  "about": "Commit messages, rebase plans, .gitignore, and the rest",
   "languages": {
     "git": {
       "filenames": [
         "COMMIT_EDITMSG",
         "MERGE_MSG",
+        "SQUASH_MSG",
+        "TAG_EDITMSG",
+        "NOTES_EDITMSG",
         ".gitignore",
         ".gitattributes"
+      ],
+      "line_comment": "#"
+    },
+    "git-rebase": {
+      "filenames": [
+        "git-rebase-todo",
+        "git-rebase-todo.backup"
       ],
       "line_comment": "#"
     }

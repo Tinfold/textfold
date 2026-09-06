@@ -1307,6 +1307,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_files_git_opens_an_editor_on_are_recognised_by_name() {
+        // Every one of these is a file with no extension that git hands to
+        // `$EDITOR` and waits on, so every one of them is a file textfold is
+        // expected to be able to be the editor for.
+        let rope = Rope::from_str("pick c0ffee a commit\n");
+        let rebase = by_name("git-rebase").expect("the plugin ships");
+        for name in ["git-rebase-todo", "git-rebase-todo.backup"] {
+            assert_eq!(detect(Path::new(name), &rope), rebase, "{name} is a rebase plan");
+        }
+        let git = by_name("git").expect("the plugin ships");
+        for name in ["COMMIT_EDITMSG", "MERGE_MSG", "SQUASH_MSG", "TAG_EDITMSG"] {
+            assert_eq!(detect(Path::new(name), &rope), git, "{name} is a git file");
+        }
+    }
+
+    #[test]
     fn a_dockerfile_is_a_dockerfile_whatever_it_is_called_after_the_dot() {
         // `Dockerfile.dev` and `prod.Dockerfile` are the two ways everybody
         // writes a second one, and neither is a whole name or an extension.
@@ -1633,6 +1649,21 @@ mod tests {
         std::fs::write(dir.join("crate/Cargo.toml"), "").unwrap();
         let root = project_root(&deep.join("thing.rs"), &["Cargo.toml".into()]);
         assert_eq!(root, dir.join("crate"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_file_inside_dot_git_belongs_to_the_repository_around_it() {
+        // A rebase plan lives in `.git/rebase-merge/`, which is the one place
+        // a file textfold is asked to edit is *below* the marker rather than
+        // above it. A plugin rooted at `.git` has to be started on the
+        // repository all the same — one started on `.git/rebase-merge` could
+        // not see the project it is rebasing.
+        let dir = std::env::temp_dir().join(format!("textfold-inside-{}", std::process::id()));
+        let inside = dir.join(".git/rebase-merge");
+        std::fs::create_dir_all(&inside).unwrap();
+        let root = project_root(&inside.join("git-rebase-todo"), &[".git".into()]);
+        assert_eq!(root, dir);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

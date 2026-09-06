@@ -1806,6 +1806,27 @@ saying how many lines each side has, and **`take-ours`** and **`take-theirs`**
 settle the one the cursor is in: the side you kept stays, the markers go, and
 the whole thing is one edit to undo if you meant the other one.
 
+### Being the editor git asks for
+
+git opens `$EDITOR` on a handful of files with no extension between them, and
+textfold knows all of them by name: `COMMIT_EDITMSG`, `MERGE_MSG`,
+`SQUASH_MSG`, `TAG_EDITMSG`, and the `git-rebase-todo` an interactive rebase
+writes. So
+
+```
+git config --global core.editor textfold
+git config --global sequence.editor textfold
+```
+
+is enough for a message or a rebase plan to open coloured, with `#` known to be
+a comment, rather than as text of no particular kind.
+
+The [`rebase` plugin](#plugins) is what makes the plan worth opening in an
+editor rather than anywhere else: the commit under the cursor as a diff beside
+it, the plan checked in the margin when you save, and a `continue` that stages
+what you resolved instead of telling you the file still needs merging. The
+rebase is still git's — textfold is the editor it stopped in.
+
 ---
 
 ## Reading what a language server says
