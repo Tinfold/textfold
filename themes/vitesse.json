@@ -1,0 +1,62 @@
+{
+  "name": "vitesse",
+  "about": "Vitesse Dark, from antfu — leans green, and keeps its punctuation deliberately almost out of the way.",
+
+  "ui": {
+    "background": "#121212",
+    "foreground": "#dbd7ca",
+    "muted":      "#bfbaaa",
+    "faint":      "#758575",
+    "accent":     "#4d9375",
+    "on_accent":  "#121212",
+    "success":    "#80a665",
+    "warning":    "#e6cc77",
+    "error":      "#cb7676",
+    "info":       "#5eaab5"
+  },
+
+  "editor": {
+    "selection":      "#2c2c2c",
+    "current_line":   "#1c1c1c",
+    "gutter":         "#5c6360",
+    "gutter_current": "#dbd7ca",
+    "cursor":         "#4d9375",
+    "bracket_match":  "#e6cc77",
+    "whitespace":     "#333333",
+    "ruler":          "#262626"
+  },
+
+  "syntax": {
+    "keyword":          "#4d9375",
+    "keyword_control":  "#cb7676",
+    "function":         "#80a665",
+    "function_builtin": "#80a665",
+    "method":           "#80a665",
+    "macro":            "#5eaab5",
+    "type":             "#5da994",
+    "type_builtin":     "#5da994",
+    "constructor":      "#5da994",
+    "string":           "#c98a7d",
+    "string_escape":    "#d4976c",
+    "string_special":   "#d4976c",
+    "character":        "#c98a7d",
+    "number":           "#4c9a91",
+    "boolean":          "#4c9a91",
+    "comment":          "#758575",
+    "comment_doc":      "#93a393",
+    "constant":         "#c99076",
+    "variable":         "#dbd7ca",
+    "variable_builtin": "#cb7676",
+    "parameter":        "#bd976a",
+    "property":         "#b8a965",
+    "operator":         "#cb7676",
+    "punctuation":      "#666666",
+    "bracket":          "#666666",
+    "delimiter":        "#666666",
+    "attribute":        "#b8a965",
+    "namespace":        "#d3869b",
+    "tag":              "#4d9375",
+    "label":            "#d4976c",
+    "error":            "#cb7676"
+  }
+}

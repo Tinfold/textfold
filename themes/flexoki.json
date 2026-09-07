@@ -1,0 +1,62 @@
+{
+  "name": "flexoki",
+  "about": "Flexoki, from Steph Ango — an ink-and-paper palette measured in perceptual lightness rather than picked by eye.",
+
+  "ui": {
+    "background": "#100f0f",
+    "foreground": "#cecdc3",
+    "muted":      "#878580",
+    "faint":      "#575653",
+    "accent":     "#4385be",
+    "on_accent":  "#100f0f",
+    "success":    "#879a39",
+    "warning":    "#d0a215",
+    "error":      "#d14d41",
+    "info":       "#3aa99f"
+  },
+
+  "editor": {
+    "selection":      "#282726",
+    "current_line":   "#1c1b1a",
+    "gutter":         "#403e3c",
+    "gutter_current": "#cecdc3",
+    "cursor":         "#da702c",
+    "bracket_match":  "#3aa99f",
+    "whitespace":     "#343331",
+    "ruler":          "#1c1b1a"
+  },
+
+  "syntax": {
+    "keyword":          "#8b7ec8",
+    "keyword_control":  "#d14d41",
+    "function":         "#4385be",
+    "function_builtin": "#4385be",
+    "method":           "#4385be",
+    "macro":            "#3aa99f",
+    "type":             "#d0a215",
+    "type_builtin":     "#d0a215",
+    "constructor":      "#d0a215",
+    "string":           "#879a39",
+    "string_escape":    "#da702c",
+    "string_special":   "#da702c",
+    "character":        "#879a39",
+    "number":           "#da702c",
+    "boolean":          "#da702c",
+    "comment":          "#575653",
+    "comment_doc":      "#878580",
+    "constant":         "#da702c",
+    "variable":         "#cecdc3",
+    "variable_builtin": "#ce5d97",
+    "parameter":        "#cecdc3",
+    "property":         "#cecdc3",
+    "operator":         "#878580",
+    "punctuation":      "#878580",
+    "bracket":          "#cecdc3",
+    "delimiter":        "#878580",
+    "attribute":        "#d0a215",
+    "namespace":        "#3aa99f",
+    "tag":              "#4385be",
+    "label":            "#ce5d97",
+    "error":            "#d14d41"
+  }
+}

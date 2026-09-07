@@ -564,6 +564,35 @@ const BUILT_IN: &[(&str, &str)] = &[
     ("material.json", include_str!("../themes/material.json")),
     ("zenburn.json", include_str!("../themes/zenburn.json")),
     ("contrast.json", include_str!("../themes/contrast.json")),
+    ("nightowl.json", include_str!("../themes/nightowl.json")),
+    (
+        "oceanicnext.json",
+        include_str!("../themes/oceanicnext.json"),
+    ),
+    ("palenight.json", include_str!("../themes/palenight.json")),
+    ("cobalt2.json", include_str!("../themes/cobalt2.json")),
+    ("synthwave.json", include_str!("../themes/synthwave.json")),
+    ("moonfly.json", include_str!("../themes/moonfly.json")),
+    ("iceberg.json", include_str!("../themes/iceberg.json")),
+    ("melange.json", include_str!("../themes/melange.json")),
+    ("oxocarbon.json", include_str!("../themes/oxocarbon.json")),
+    ("poimandres.json", include_str!("../themes/poimandres.json")),
+    (
+        "tomorrownight.json",
+        include_str!("../themes/tomorrownight.json"),
+    ),
+    ("jellybeans.json", include_str!("../themes/jellybeans.json")),
+    ("apprentice.json", include_str!("../themes/apprentice.json")),
+    ("gotham.json", include_str!("../themes/gotham.json")),
+    (
+        "challengerdeep.json",
+        include_str!("../themes/challengerdeep.json"),
+    ),
+    ("flexoki.json", include_str!("../themes/flexoki.json")),
+    ("sonokai.json", include_str!("../themes/sonokai.json")),
+    ("edge.json", include_str!("../themes/edge.json")),
+    ("vitesse.json", include_str!("../themes/vitesse.json")),
+    ("horizon.json", include_str!("../themes/horizon.json")),
     // The light ones last, since most terminals have a dark background and a
     // list you step through should start where you probably want to be.
     (

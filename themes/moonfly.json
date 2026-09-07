@@ -1,0 +1,62 @@
+{
+  "name": "moonfly",
+  "about": "Moonfly, from bluz71 — near-black, and the colours on it bright enough to read at midnight.",
+
+  "ui": {
+    "background": "#080808",
+    "foreground": "#c6c6c6",
+    "muted":      "#949494",
+    "faint":      "#6c6c6c",
+    "accent":     "#80a0ff",
+    "on_accent":  "#080808",
+    "success":    "#8cc85f",
+    "warning":    "#e3c78a",
+    "error":      "#ff5454",
+    "info":       "#79dac8"
+  },
+
+  "editor": {
+    "selection":      "#2f3239",
+    "current_line":   "#1c1c1c",
+    "gutter":         "#626262",
+    "gutter_current": "#c6c6c6",
+    "cursor":         "#9e9e9e",
+    "bracket_match":  "#79dac8",
+    "whitespace":     "#3a3a3a",
+    "ruler":          "#2c2c2c"
+  },
+
+  "syntax": {
+    "keyword":          "#cf87e8",
+    "keyword_control":  "#ff5189",
+    "function":         "#74b2ff",
+    "function_builtin": "#74b2ff",
+    "method":           "#74b2ff",
+    "macro":            "#79dac8",
+    "type":             "#79dac8",
+    "type_builtin":     "#79dac8",
+    "constructor":      "#79dac8",
+    "string":           "#8cc85f",
+    "string_escape":    "#de935f",
+    "string_special":   "#de935f",
+    "character":        "#8cc85f",
+    "number":           "#f09479",
+    "boolean":          "#ff5189",
+    "comment":          "#949494",
+    "comment_doc":      "#b2b2b2",
+    "constant":         "#ff5189",
+    "variable":         "#c6c6c6",
+    "variable_builtin": "#d183e8",
+    "parameter":        "#c6c6c6",
+    "property":         "#c6c6c6",
+    "operator":         "#cf87e8",
+    "punctuation":      "#bdbdbd",
+    "bracket":          "#bdbdbd",
+    "delimiter":        "#bdbdbd",
+    "attribute":        "#e3c78a",
+    "namespace":        "#79dac8",
+    "tag":              "#80a0ff",
+    "label":            "#c2c292",
+    "error":            "#ff5454"
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "name": "poimandres",
+  "about": "Poimandres, from drcmda — mint and haze, and almost no red at all.",
+
+  "ui": {
+    "background": "#1b1e28",
+    "foreground": "#e4f0fb",
+    "muted":      "#a6accd",
+    "faint":      "#767c9d",
+    "accent":     "#5de4c7",
+    "on_accent":  "#1b1e28",
+    "success":    "#5fb3a1",
+    "warning":    "#fffac2",
+    "error":      "#d0679d",
+    "info":       "#add7ff"
+  },
+
+  "editor": {
+    "selection":      "#303340",
+    "current_line":   "#252837",
+    "gutter":         "#506477",
+    "gutter_current": "#e4f0fb",
+    "cursor":         "#add7ff",
+    "bracket_match":  "#5de4c7",
+    "whitespace":     "#3a3f52",
+    "ruler":          "#2a2e3d"
+  },
+
+  "syntax": {
+    "keyword":          "#5de4c7",
+    "keyword_control":  "#5de4c7",
+    "function":         "#add7ff",
+    "function_builtin": "#add7ff",
+    "method":           "#add7ff",
+    "macro":            "#89ddff",
+    "type":             "#5fb3a1",
+    "type_builtin":     "#5fb3a1",
+    "constructor":      "#5fb3a1",
+    "string":           "#5fb3a1",
+    "string_escape":    "#fffac2",
+    "string_special":   "#fffac2",
+    "character":        "#5fb3a1",
+    "number":           "#fffac2",
+    "boolean":          "#fffac2",
+    "comment":          "#767c9d",
+    "comment_doc":      "#8d93b0",
+    "constant":         "#fffac2",
+    "variable":         "#e4f0fb",
+    "variable_builtin": "#d0679d",
+    "parameter":        "#e4f0fb",
+    "property":         "#add7ff",
+    "operator":         "#91b4d5",
+    "punctuation":      "#a6accd",
+    "bracket":          "#a6accd",
+    "delimiter":        "#a6accd",
+    "attribute":        "#91b4d5",
+    "namespace":        "#add7ff",
+    "tag":              "#d0679d",
+    "label":            "#fae4fc",
+    "error":            "#d0679d"
+  }
+}

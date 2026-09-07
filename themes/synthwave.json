@@ -1,0 +1,62 @@
+{
+  "name": "synthwave",
+  "about": "SynthWave '84, from robb0wen — neon on a night drive. The one theme here that would rather glow than sit quietly.",
+
+  "ui": {
+    "background": "#262335",
+    "foreground": "#ffffff",
+    "muted":      "#848bbd",
+    "faint":      "#495495",
+    "accent":     "#ff7edb",
+    "on_accent":  "#262335",
+    "success":    "#72f1b8",
+    "warning":    "#fede5d",
+    "error":      "#fe4450",
+    "info":       "#36f9f6"
+  },
+
+  "editor": {
+    "selection":      "#463465",
+    "current_line":   "#241b2f",
+    "gutter":         "#495495",
+    "gutter_current": "#ff7edb",
+    "cursor":         "#f97e72",
+    "bracket_match":  "#36f9f6",
+    "whitespace":     "#3f3555",
+    "ruler":          "#34294f"
+  },
+
+  "syntax": {
+    "keyword":          "#fede5d",
+    "keyword_control":  "#fede5d",
+    "function":         "#36f9f6",
+    "function_builtin": "#36f9f6",
+    "method":           "#36f9f6",
+    "macro":            "#72f1b8",
+    "type":             "#fe4450",
+    "type_builtin":     "#fe4450",
+    "constructor":      "#fe4450",
+    "string":           "#ff8b39",
+    "string_escape":    "#fede5d",
+    "string_special":   "#fede5d",
+    "character":        "#ff8b39",
+    "number":           "#f97e72",
+    "boolean":          "#f97e72",
+    "comment":          "#495495",
+    "comment_doc":      "#848bbd",
+    "constant":         "#f97e72",
+    "variable":         "#ffffff",
+    "variable_builtin": "#ff7edb",
+    "parameter":        "#ffffff",
+    "property":         "#ff7edb",
+    "operator":         "#fede5d",
+    "punctuation":      "#ffffff",
+    "bracket":          "#ffffff",
+    "delimiter":        "#ffffff",
+    "attribute":        "#fede5d",
+    "namespace":        "#36f9f6",
+    "tag":              "#fe4450",
+    "label":            "#72f1b8",
+    "error":            "#fe4450"
+  }
+}

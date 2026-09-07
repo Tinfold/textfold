@@ -1,0 +1,62 @@
+{
+  "name": "cobalt2",
+  "about": "Cobalt2, Wes Bos's — blue that means it, and yellow for everything that matters. The greys between the two are worked out from its own background, since it names none.",
+
+  "ui": {
+    "background": "#193549",
+    "foreground": "#ffffff",
+    "muted":      "#e1efff",
+    "faint":      "#5a7d9a",
+    "accent":     "#ffc600",
+    "on_accent":  "#193549",
+    "success":    "#3ad900",
+    "warning":    "#ff9d00",
+    "error":      "#ff628c",
+    "info":       "#9effff"
+  },
+
+  "editor": {
+    "selection":      "#0050a4",
+    "current_line":   "#1f4662",
+    "gutter":         "#4b6b85",
+    "gutter_current": "#ffc600",
+    "cursor":         "#ffc600",
+    "bracket_match":  "#ffc600",
+    "whitespace":     "#35516a",
+    "ruler":          "#24455c"
+  },
+
+  "syntax": {
+    "keyword":          "#ff9d00",
+    "keyword_control":  "#ff9d00",
+    "function":         "#ffc600",
+    "function_builtin": "#ffc600",
+    "method":           "#ffc600",
+    "macro":            "#9effff",
+    "type":             "#80ffbb",
+    "type_builtin":     "#80ffbb",
+    "constructor":      "#80ffbb",
+    "string":           "#3ad900",
+    "string_escape":    "#ffc600",
+    "string_special":   "#ffc600",
+    "character":        "#3ad900",
+    "number":           "#ff628c",
+    "boolean":          "#ff628c",
+    "comment":          "#0088ff",
+    "comment_doc":      "#66b3ff",
+    "constant":         "#ff628c",
+    "variable":         "#ffffff",
+    "variable_builtin": "#ff628c",
+    "parameter":        "#ffffff",
+    "property":         "#9effff",
+    "operator":         "#ff9d00",
+    "punctuation":      "#e1efff",
+    "bracket":          "#e1efff",
+    "delimiter":        "#e1efff",
+    "attribute":        "#ffc600",
+    "namespace":        "#80ffbb",
+    "tag":              "#9effff",
+    "label":            "#ffc600",
+    "error":            "#ff628c"
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "name": "jellybeans",
+  "about": "Jellybeans, from nanotech — a dark grey nobody has ever mistaken for black.",
+
+  "ui": {
+    "background": "#151515",
+    "foreground": "#e8e8d3",
+    "muted":      "#a0a08b",
+    "faint":      "#888888",
+    "accent":     "#8fbfdc",
+    "on_accent":  "#151515",
+    "success":    "#99ad6a",
+    "warning":    "#fad07a",
+    "error":      "#cf6a4c",
+    "info":       "#8197bf"
+  },
+
+  "editor": {
+    "selection":      "#404040",
+    "current_line":   "#1c1c1c",
+    "gutter":         "#605958",
+    "gutter_current": "#e8e8d3",
+    "cursor":         "#b0d0f0",
+    "bracket_match":  "#8fbfdc",
+    "whitespace":     "#4a4a4a",
+    "ruler":          "#2a2a2a"
+  },
+
+  "syntax": {
+    "keyword":          "#8197bf",
+    "keyword_control":  "#8197bf",
+    "function":         "#fad07a",
+    "function_builtin": "#fad07a",
+    "method":           "#fad07a",
+    "macro":            "#8fbfdc",
+    "type":             "#ffb964",
+    "type_builtin":     "#ffb964",
+    "constructor":      "#ffb964",
+    "string":           "#99ad6a",
+    "string_escape":    "#dad085",
+    "string_special":   "#dad085",
+    "character":        "#99ad6a",
+    "number":           "#cf6a4c",
+    "boolean":          "#cf6a4c",
+    "comment":          "#888888",
+    "comment_doc":      "#a5a5a5",
+    "constant":         "#cf6a4c",
+    "variable":         "#e8e8d3",
+    "variable_builtin": "#c6b6ee",
+    "parameter":        "#e8e8d3",
+    "property":         "#e8e8d3",
+    "operator":         "#8fbfdc",
+    "punctuation":      "#e8e8d3",
+    "bracket":          "#e8e8d3",
+    "delimiter":        "#e8e8d3",
+    "attribute":        "#ffb964",
+    "namespace":        "#ffb964",
+    "tag":              "#8197bf",
+    "label":            "#799d6a",
+    "error":            "#cf6a4c"
+  }
+}

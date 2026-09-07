@@ -1,0 +1,62 @@
+{
+  "name": "palenight",
+  "about": "Palenight, the Material Theme variant everyone means when they say purple.",
+
+  "ui": {
+    "background": "#292d3e",
+    "foreground": "#a6accd",
+    "muted":      "#959dcb",
+    "faint":      "#676e95",
+    "accent":     "#82aaff",
+    "on_accent":  "#292d3e",
+    "success":    "#c3e88d",
+    "warning":    "#ffcb6b",
+    "error":      "#f07178",
+    "info":       "#89ddff"
+  },
+
+  "editor": {
+    "selection":      "#444267",
+    "current_line":   "#32374d",
+    "gutter":         "#4e5579",
+    "gutter_current": "#a6accd",
+    "cursor":         "#ffcc00",
+    "bracket_match":  "#89ddff",
+    "whitespace":     "#4a4f6a",
+    "ruler":          "#3a3f58"
+  },
+
+  "syntax": {
+    "keyword":          "#c792ea",
+    "keyword_control":  "#c792ea",
+    "function":         "#82aaff",
+    "function_builtin": "#82aaff",
+    "method":           "#82aaff",
+    "macro":            "#89ddff",
+    "type":             "#ffcb6b",
+    "type_builtin":     "#ffcb6b",
+    "constructor":      "#ffcb6b",
+    "string":           "#c3e88d",
+    "string_escape":    "#f78c6c",
+    "string_special":   "#f78c6c",
+    "character":        "#c3e88d",
+    "number":           "#f78c6c",
+    "boolean":          "#f78c6c",
+    "comment":          "#676e95",
+    "comment_doc":      "#8a90b8",
+    "constant":         "#f78c6c",
+    "variable":         "#a6accd",
+    "variable_builtin": "#f07178",
+    "parameter":        "#a6accd",
+    "property":         "#f07178",
+    "operator":         "#89ddff",
+    "punctuation":      "#89ddff",
+    "bracket":          "#a6accd",
+    "delimiter":        "#89ddff",
+    "attribute":        "#ffcb6b",
+    "namespace":        "#ffcb6b",
+    "tag":              "#f07178",
+    "label":            "#ffcb6b",
+    "error":            "#f07178"
+  }
+}

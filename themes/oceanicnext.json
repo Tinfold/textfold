@@ -1,0 +1,62 @@
+{
+  "name": "oceanicnext",
+  "about": "Oceanic Next, from voronianski by way of base16 — slate and sea.",
+
+  "ui": {
+    "background": "#1b2b34",
+    "foreground": "#c0c5ce",
+    "muted":      "#a7adba",
+    "faint":      "#65737e",
+    "accent":     "#6699cc",
+    "on_accent":  "#1b2b34",
+    "success":    "#99c794",
+    "warning":    "#fac863",
+    "error":      "#ec5f67",
+    "info":       "#5fb3b3"
+  },
+
+  "editor": {
+    "selection":      "#4f5b66",
+    "current_line":   "#22323d",
+    "gutter":         "#4f5b66",
+    "gutter_current": "#d8dee9",
+    "cursor":         "#6699cc",
+    "bracket_match":  "#5fb3b3",
+    "whitespace":     "#3f4b54",
+    "ruler":          "#343d46"
+  },
+
+  "syntax": {
+    "keyword":          "#c594c5",
+    "keyword_control":  "#c594c5",
+    "function":         "#6699cc",
+    "function_builtin": "#6699cc",
+    "method":           "#6699cc",
+    "macro":            "#5fb3b3",
+    "type":             "#fac863",
+    "type_builtin":     "#fac863",
+    "constructor":      "#fac863",
+    "string":           "#99c794",
+    "string_escape":    "#ab7967",
+    "string_special":   "#ab7967",
+    "character":        "#99c794",
+    "number":           "#f99157",
+    "boolean":          "#f99157",
+    "comment":          "#65737e",
+    "comment_doc":      "#8794a0",
+    "constant":         "#f99157",
+    "variable":         "#c0c5ce",
+    "variable_builtin": "#ec5f67",
+    "parameter":        "#c0c5ce",
+    "property":         "#c0c5ce",
+    "operator":         "#5fb3b3",
+    "punctuation":      "#c0c5ce",
+    "bracket":          "#c0c5ce",
+    "delimiter":        "#c0c5ce",
+    "attribute":        "#fac863",
+    "namespace":        "#fac863",
+    "tag":              "#ec5f67",
+    "label":            "#f99157",
+    "error":            "#ec5f67"
+  }
+}

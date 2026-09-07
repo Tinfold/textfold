@@ -1,0 +1,62 @@
+{
+  "name": "gotham",
+  "about": "Gotham, from whatyouhide — very dark, very blue, and lower in contrast than anything else here. That is what it is for.",
+
+  "ui": {
+    "background": "#0c1014",
+    "foreground": "#99d1ce",
+    "muted":      "#599cab",
+    "faint":      "#4e5166",
+    "accent":     "#2aa889",
+    "on_accent":  "#0c1014",
+    "success":    "#2aa889",
+    "warning":    "#edb443",
+    "error":      "#c23127",
+    "info":       "#599cab"
+  },
+
+  "editor": {
+    "selection":      "#245361",
+    "current_line":   "#11151c",
+    "gutter":         "#245361",
+    "gutter_current": "#d3ebe9",
+    "cursor":         "#2aa889",
+    "bracket_match":  "#edb443",
+    "whitespace":     "#245361",
+    "ruler":          "#091f2e"
+  },
+
+  "syntax": {
+    "keyword":          "#2aa889",
+    "keyword_control":  "#2aa889",
+    "function":         "#edb443",
+    "function_builtin": "#edb443",
+    "method":           "#edb443",
+    "macro":            "#d26937",
+    "type":             "#888ca6",
+    "type_builtin":     "#888ca6",
+    "constructor":      "#888ca6",
+    "string":           "#599cab",
+    "string_escape":    "#d26937",
+    "string_special":   "#d26937",
+    "character":        "#599cab",
+    "number":           "#c23127",
+    "boolean":          "#c23127",
+    "comment":          "#4e5166",
+    "comment_doc":      "#599cab",
+    "constant":         "#c23127",
+    "variable":         "#99d1ce",
+    "variable_builtin": "#c23127",
+    "parameter":        "#99d1ce",
+    "property":         "#99d1ce",
+    "operator":         "#599cab",
+    "punctuation":      "#d3ebe9",
+    "bracket":          "#d3ebe9",
+    "delimiter":        "#d3ebe9",
+    "attribute":        "#edb443",
+    "namespace":        "#888ca6",
+    "tag":              "#2aa889",
+    "label":            "#d26937",
+    "error":            "#c23127"
+  }
+}

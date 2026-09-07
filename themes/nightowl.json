@@ -1,0 +1,62 @@
+{
+  "name": "nightowl",
+  "about": "Night Owl, from sdras/night-owl-vscode-theme — a palette picked for reading code at four in the morning.",
+
+  "ui": {
+    "background": "#011627",
+    "foreground": "#d6deeb",
+    "muted":      "#80a4c2",
+    "faint":      "#637777",
+    "accent":     "#82aaff",
+    "on_accent":  "#011627",
+    "success":    "#22da6e",
+    "warning":    "#ecc48d",
+    "error":      "#ef5350",
+    "info":       "#7fdbca"
+  },
+
+  "editor": {
+    "selection":      "#1d3b53",
+    "current_line":   "#0b2942",
+    "gutter":         "#4b6479",
+    "gutter_current": "#c5e4fd",
+    "cursor":         "#80a4c2",
+    "bracket_match":  "#7fdbca",
+    "whitespace":     "#3b5364",
+    "ruler":          "#12354a"
+  },
+
+  "syntax": {
+    "keyword":          "#c792ea",
+    "keyword_control":  "#c792ea",
+    "function":         "#82aaff",
+    "function_builtin": "#82aaff",
+    "method":           "#82aaff",
+    "macro":            "#7fdbca",
+    "type":             "#ffcb8b",
+    "type_builtin":     "#ffcb8b",
+    "constructor":      "#ffcb8b",
+    "string":           "#ecc48d",
+    "string_escape":    "#f78c6c",
+    "string_special":   "#f78c6c",
+    "character":        "#ecc48d",
+    "number":           "#f78c6c",
+    "boolean":          "#ff5874",
+    "comment":          "#637777",
+    "comment_doc":      "#7c9cad",
+    "constant":         "#82aaff",
+    "variable":         "#d6deeb",
+    "variable_builtin": "#ff5874",
+    "parameter":        "#d7dbe0",
+    "property":         "#addb67",
+    "operator":         "#c792ea",
+    "punctuation":      "#7fdbca",
+    "bracket":          "#d6deeb",
+    "delimiter":        "#7fdbca",
+    "attribute":        "#addb67",
+    "namespace":        "#ffcb8b",
+    "tag":              "#7fdbca",
+    "label":            "#addb67",
+    "error":            "#ef5350"
+  }
+}

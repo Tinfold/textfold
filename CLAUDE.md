@@ -78,7 +78,7 @@ src/
     mouse.rs · debug.rs · files.rs · panes.rs · settings.rs · tools.rs · typing.rs
     tests/       buffers, debug, editing, find, mouse, plugins, servers
   ui/          drawing: mod, pane, bars, floating, tests
-themes/        the 24 themes that ship, compiled in
+themes/        the 44 themes that ship, compiled in
 docs/manual.md the user manual
 ```
 

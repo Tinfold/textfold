@@ -1,0 +1,62 @@
+{
+  "name": "apprentice",
+  "about": "Apprentice, from romainl — low-contrast greens and greys, written for the 256-colour cube and spelled out here in hex.",
+
+  "ui": {
+    "background": "#262626",
+    "foreground": "#bcbcbc",
+    "muted":      "#a8a8a8",
+    "faint":      "#6c6c6c",
+    "accent":     "#5f8787",
+    "on_accent":  "#262626",
+    "success":    "#87af87",
+    "warning":    "#ffaf00",
+    "error":      "#af5f5f",
+    "info":       "#87afd7"
+  },
+
+  "editor": {
+    "selection":      "#444444",
+    "current_line":   "#303030",
+    "gutter":         "#585858",
+    "gutter_current": "#bcbcbc",
+    "cursor":         "#ffaf00",
+    "bracket_match":  "#87afd7",
+    "whitespace":     "#444444",
+    "ruler":          "#333333"
+  },
+
+  "syntax": {
+    "keyword":          "#87afd7",
+    "keyword_control":  "#87afd7",
+    "function":         "#87af87",
+    "function_builtin": "#87af87",
+    "method":           "#87af87",
+    "macro":            "#5f8787",
+    "type":             "#8787af",
+    "type_builtin":     "#8787af",
+    "constructor":      "#8787af",
+    "string":           "#afaf5f",
+    "string_escape":    "#af875f",
+    "string_special":   "#af875f",
+    "character":        "#afaf5f",
+    "number":           "#af5f5f",
+    "boolean":          "#af5f5f",
+    "comment":          "#6c6c6c",
+    "comment_doc":      "#949494",
+    "constant":         "#af5f5f",
+    "variable":         "#bcbcbc",
+    "variable_builtin": "#8787af",
+    "parameter":        "#bcbcbc",
+    "property":         "#bcbcbc",
+    "operator":         "#8a8a8a",
+    "punctuation":      "#a8a8a8",
+    "bracket":          "#a8a8a8",
+    "delimiter":        "#a8a8a8",
+    "attribute":        "#afaf5f",
+    "namespace":        "#87afd7",
+    "tag":              "#87afd7",
+    "label":            "#af875f",
+    "error":            "#af5f5f"
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "name": "iceberg",
+  "about": "Iceberg, from cocopon — a blue so consistent it reads as one colour until you look.",
+
+  "ui": {
+    "background": "#161821",
+    "foreground": "#c6c8d1",
+    "muted":      "#818596",
+    "faint":      "#6b7089",
+    "accent":     "#84a0c6",
+    "on_accent":  "#161821",
+    "success":    "#b4be82",
+    "warning":    "#e2a478",
+    "error":      "#e27878",
+    "info":       "#89b8c2"
+  },
+
+  "editor": {
+    "selection":      "#272c42",
+    "current_line":   "#1e2132",
+    "gutter":         "#444b71",
+    "gutter_current": "#c6c8d1",
+    "cursor":         "#84a0c6",
+    "bracket_match":  "#89b8c2",
+    "whitespace":     "#363a4d",
+    "ruler":          "#2a2e42"
+  },
+
+  "syntax": {
+    "keyword":          "#84a0c6",
+    "keyword_control":  "#84a0c6",
+    "function":         "#84a0c6",
+    "function_builtin": "#84a0c6",
+    "method":           "#84a0c6",
+    "macro":            "#89b8c2",
+    "type":             "#84a0c6",
+    "type_builtin":     "#84a0c6",
+    "constructor":      "#84a0c6",
+    "string":           "#89b8c2",
+    "string_escape":    "#e2a478",
+    "string_special":   "#e2a478",
+    "character":        "#89b8c2",
+    "number":           "#a093c7",
+    "boolean":          "#a093c7",
+    "comment":          "#6b7089",
+    "comment_doc":      "#848da5",
+    "constant":         "#a093c7",
+    "variable":         "#c6c8d1",
+    "variable_builtin": "#a093c7",
+    "parameter":        "#c6c8d1",
+    "property":         "#c6c8d1",
+    "operator":         "#89b8c2",
+    "punctuation":      "#c6c8d1",
+    "bracket":          "#c6c8d1",
+    "delimiter":        "#c6c8d1",
+    "attribute":        "#b4be82",
+    "namespace":        "#84a0c6",
+    "tag":              "#84a0c6",
+    "label":            "#b4be82",
+    "error":            "#e27878"
+  }
+}

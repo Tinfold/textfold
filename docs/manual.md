@@ -1551,8 +1551,8 @@ writes it back for you.
 ## Colours
 
 A theme is a small JSON file in three parts, and the parts are the three things
-textfold puts on a screen. The twenty-four it ships are built into the binary; any
-file dropped in `~/.config/textfold/themes/` is loaded beside them, and one
+textfold puts on a screen. The forty-four it ships are built into the binary;
+any file dropped in `~/.config/textfold/themes/` is loaded beside them, and one
 taking a name textfold already uses replaces it — which is how you rewrite one
 of ours without forking anything.
 
@@ -1638,8 +1638,12 @@ file listing nor a terminal. The names above win where a file uses both.
 Shipped, dark first because most terminals are: `terminal`, `catppuccin`,
 `dracula`, `nord`, `tokyonight`, `gruvbox`, `everforest`, `solarized`,
 `onedark`, `monokai`, `kanagawa`, `rosepine`, `mariana`, `afterglow`,
-`darcula`, `ayu`, `github`, `material`, `zenburn`, `contrast`, and then the
-light ones: `solarized-light`, `latte`, `github-light`, `gruvbox-light`.
+`darcula`, `ayu`, `github`, `material`, `zenburn`, `contrast`, `nightowl`,
+`oceanicnext`, `palenight`, `cobalt2`, `synthwave`, `moonfly`, `iceberg`,
+`melange`, `oxocarbon`, `poimandres`, `tomorrownight`, `jellybeans`,
+`apprentice`, `gotham`, `challengerdeep`, `flexoki`, `sonokai`, `edge`,
+`vitesse`, `horizon`, and then the light ones: `solarized-light`, `latte`,
+`github-light`, `gruvbox-light`.
 
 **`contrast`** is the one to reach for when the others are too quiet: black,
 bright, and picked for how far apart the colours are rather than for how they

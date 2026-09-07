@@ -1,0 +1,62 @@
+{
+  "name": "edge",
+  "about": "Edge, from sainnhe — the soft one: every colour a step back from the ground it sits on.",
+
+  "ui": {
+    "background": "#2b2d3a",
+    "foreground": "#c5cdd9",
+    "muted":      "#7e8294",
+    "faint":      "#5c6370",
+    "accent":     "#6cb6eb",
+    "on_accent":  "#2b2d3a",
+    "success":    "#a0c980",
+    "warning":    "#deb974",
+    "error":      "#ec7279",
+    "info":       "#5dbbc1"
+  },
+
+  "editor": {
+    "selection":      "#3f445b",
+    "current_line":   "#333648",
+    "gutter":         "#5c6370",
+    "gutter_current": "#c5cdd9",
+    "cursor":         "#6cb6eb",
+    "bracket_match":  "#5dbbc1",
+    "whitespace":     "#393e53",
+    "ruler":          "#363a4e"
+  },
+
+  "syntax": {
+    "keyword":          "#d38aea",
+    "keyword_control":  "#d38aea",
+    "function":         "#6cb6eb",
+    "function_builtin": "#6cb6eb",
+    "method":           "#6cb6eb",
+    "macro":            "#5dbbc1",
+    "type":             "#deb974",
+    "type_builtin":     "#deb974",
+    "constructor":      "#deb974",
+    "string":           "#a0c980",
+    "string_escape":    "#5dbbc1",
+    "string_special":   "#5dbbc1",
+    "character":        "#a0c980",
+    "number":           "#ec7279",
+    "boolean":          "#ec7279",
+    "comment":          "#5c6370",
+    "comment_doc":      "#7e8294",
+    "constant":         "#ec7279",
+    "variable":         "#c5cdd9",
+    "variable_builtin": "#ec7279",
+    "parameter":        "#c5cdd9",
+    "property":         "#c5cdd9",
+    "operator":         "#5dbbc1",
+    "punctuation":      "#c5cdd9",
+    "bracket":          "#c5cdd9",
+    "delimiter":        "#c5cdd9",
+    "attribute":        "#deb974",
+    "namespace":        "#deb974",
+    "tag":              "#ec7279",
+    "label":            "#5dbbc1",
+    "error":            "#ec7279"
+  }
+}

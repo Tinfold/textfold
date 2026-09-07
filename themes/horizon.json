@@ -1,0 +1,62 @@
+{
+  "name": "horizon",
+  "about": "Horizon, from horizon-theme — plum and coral, and warmer than any of the other dark ones.",
+
+  "ui": {
+    "background": "#1c1e26",
+    "foreground": "#d5d8da",
+    "muted":      "#9da0a2",
+    "faint":      "#6c6f93",
+    "accent":     "#26bbd9",
+    "on_accent":  "#1c1e26",
+    "success":    "#29d398",
+    "warning":    "#fab795",
+    "error":      "#e95678",
+    "info":       "#59e1e3"
+  },
+
+  "editor": {
+    "selection":      "#2e303e",
+    "current_line":   "#232530",
+    "gutter":         "#6c6f93",
+    "gutter_current": "#d5d8da",
+    "cursor":         "#e95678",
+    "bracket_match":  "#fac29a",
+    "whitespace":     "#2e303e",
+    "ruler":          "#262837"
+  },
+
+  "syntax": {
+    "keyword":          "#b877db",
+    "keyword_control":  "#e95678",
+    "function":         "#26bbd9",
+    "function_builtin": "#26bbd9",
+    "method":           "#26bbd9",
+    "macro":            "#59e1e3",
+    "type":             "#fab795",
+    "type_builtin":     "#fab795",
+    "constructor":      "#fab795",
+    "string":           "#29d398",
+    "string_escape":    "#fac29a",
+    "string_special":   "#fac29a",
+    "character":        "#29d398",
+    "number":           "#f09483",
+    "boolean":          "#f09483",
+    "comment":          "#6c6f93",
+    "comment_doc":      "#8b8eae",
+    "constant":         "#f09483",
+    "variable":         "#d5d8da",
+    "variable_builtin": "#e95678",
+    "parameter":        "#d5d8da",
+    "property":         "#d5d8da",
+    "operator":         "#59e1e3",
+    "punctuation":      "#9da0a2",
+    "bracket":          "#d5d8da",
+    "delimiter":        "#9da0a2",
+    "attribute":        "#fac29a",
+    "namespace":        "#fab795",
+    "tag":              "#e95678",
+    "label":            "#ee64ac",
+    "error":            "#e95678"
+  }
+}

@@ -1,0 +1,62 @@
+{
+  "name": "melange",
+  "about": "Melange, from savq — warm greys, as if the screen were paper left out in the sun.",
+
+  "ui": {
+    "background": "#292522",
+    "foreground": "#ece1d7",
+    "muted":      "#c1a78e",
+    "faint":      "#867462",
+    "accent":     "#a3a9ce",
+    "on_accent":  "#292522",
+    "success":    "#85b695",
+    "warning":    "#ebc06d",
+    "error":      "#d47766",
+    "info":       "#89b3b6"
+  },
+
+  "editor": {
+    "selection":      "#403a36",
+    "current_line":   "#34302c",
+    "gutter":         "#5a524c",
+    "gutter_current": "#ece1d7",
+    "cursor":         "#a3a9ce",
+    "bracket_match":  "#ebc06d",
+    "whitespace":     "#453e39",
+    "ruler":          "#37312d"
+  },
+
+  "syntax": {
+    "keyword":          "#cf9bc2",
+    "keyword_control":  "#cf9bc2",
+    "function":         "#a3a9ce",
+    "function_builtin": "#a3a9ce",
+    "method":           "#a3a9ce",
+    "macro":            "#89b3b6",
+    "type":             "#ebc06d",
+    "type_builtin":     "#ebc06d",
+    "constructor":      "#ebc06d",
+    "string":           "#85b695",
+    "string_escape":    "#d47766",
+    "string_special":   "#d47766",
+    "character":        "#85b695",
+    "number":           "#e49b5d",
+    "boolean":          "#e49b5d",
+    "comment":          "#867462",
+    "comment_doc":      "#a1907d",
+    "constant":         "#e49b5d",
+    "variable":         "#ece1d7",
+    "variable_builtin": "#d47766",
+    "parameter":        "#ece1d7",
+    "property":         "#ece1d7",
+    "operator":         "#89b3b6",
+    "punctuation":      "#c1a78e",
+    "bracket":          "#c1a78e",
+    "delimiter":        "#c1a78e",
+    "attribute":        "#ebc06d",
+    "namespace":        "#ebc06d",
+    "tag":              "#cf9bc2",
+    "label":            "#b380b0",
+    "error":            "#d47766"
+  }
+}

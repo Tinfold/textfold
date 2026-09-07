@@ -1,0 +1,62 @@
+{
+  "name": "tomorrownight",
+  "about": "Tomorrow Night, Chris Kempson's — the theme most of the others were measured against.",
+
+  "ui": {
+    "background": "#1d1f21",
+    "foreground": "#c5c8c6",
+    "muted":      "#b4b7b4",
+    "faint":      "#969896",
+    "accent":     "#81a2be",
+    "on_accent":  "#1d1f21",
+    "success":    "#b5bd68",
+    "warning":    "#f0c674",
+    "error":      "#cc6666",
+    "info":       "#8abeb7"
+  },
+
+  "editor": {
+    "selection":      "#373b41",
+    "current_line":   "#282a2e",
+    "gutter":         "#5a5d60",
+    "gutter_current": "#c5c8c6",
+    "cursor":         "#81a2be",
+    "bracket_match":  "#8abeb7",
+    "whitespace":     "#3a3d40",
+    "ruler":          "#2c2f31"
+  },
+
+  "syntax": {
+    "keyword":          "#b294bb",
+    "keyword_control":  "#b294bb",
+    "function":         "#81a2be",
+    "function_builtin": "#81a2be",
+    "method":           "#81a2be",
+    "macro":            "#8abeb7",
+    "type":             "#f0c674",
+    "type_builtin":     "#f0c674",
+    "constructor":      "#f0c674",
+    "string":           "#b5bd68",
+    "string_escape":    "#de935f",
+    "string_special":   "#de935f",
+    "character":        "#b5bd68",
+    "number":           "#de935f",
+    "boolean":          "#de935f",
+    "comment":          "#969896",
+    "comment_doc":      "#a8aaa8",
+    "constant":         "#de935f",
+    "variable":         "#c5c8c6",
+    "variable_builtin": "#cc6666",
+    "parameter":        "#c5c8c6",
+    "property":         "#cc6666",
+    "operator":         "#8abeb7",
+    "punctuation":      "#c5c8c6",
+    "bracket":          "#c5c8c6",
+    "delimiter":        "#c5c8c6",
+    "attribute":        "#f0c674",
+    "namespace":        "#f0c674",
+    "tag":              "#cc6666",
+    "label":            "#de935f",
+    "error":            "#cc6666"
+  }
+}

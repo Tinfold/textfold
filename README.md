@@ -74,7 +74,7 @@ the position, the colours. Every one of those is also a button.
   Everything you can do with the keyboard you can do with the mouse.
 - **Sessions.** Close with thirty tabs open, come back to thirty tabs, per
   project.
-- **Themes.** 24 built in, `Alt-T` to try them on, drop a JSON file in
+- **Themes.** 44 built in, `Alt-T` to try them on, drop a JSON file in
   `~/.config/textfold/themes/` for your own.
 
 ## Language servers

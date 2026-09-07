@@ -1,0 +1,62 @@
+{
+  "name": "sonokai",
+  "about": "Sonokai, from sainnhe — Monokai Pro's colours, turned up and given a softer ground.",
+
+  "ui": {
+    "background": "#2c2e34",
+    "foreground": "#e2e2e3",
+    "muted":      "#7f8490",
+    "faint":      "#595f6f",
+    "accent":     "#76cce0",
+    "on_accent":  "#2c2e34",
+    "success":    "#9ed072",
+    "warning":    "#e7c664",
+    "error":      "#fc5d7c",
+    "info":       "#b39df3"
+  },
+
+  "editor": {
+    "selection":      "#414550",
+    "current_line":   "#33353f",
+    "gutter":         "#7f8490",
+    "gutter_current": "#e2e2e3",
+    "cursor":         "#f39660",
+    "bracket_match":  "#e7c664",
+    "whitespace":     "#3b3e48",
+    "ruler":          "#363944"
+  },
+
+  "syntax": {
+    "keyword":          "#fc5d7c",
+    "keyword_control":  "#fc5d7c",
+    "function":         "#9ed072",
+    "function_builtin": "#9ed072",
+    "method":           "#9ed072",
+    "macro":            "#76cce0",
+    "type":             "#76cce0",
+    "type_builtin":     "#76cce0",
+    "constructor":      "#76cce0",
+    "string":           "#e7c664",
+    "string_escape":    "#f39660",
+    "string_special":   "#f39660",
+    "character":        "#e7c664",
+    "number":           "#b39df3",
+    "boolean":          "#b39df3",
+    "comment":          "#7f8490",
+    "comment_doc":      "#9aa0ac",
+    "constant":         "#b39df3",
+    "variable":         "#e2e2e3",
+    "variable_builtin": "#f39660",
+    "parameter":        "#e2e2e3",
+    "property":         "#e2e2e3",
+    "operator":         "#f39660",
+    "punctuation":      "#e2e2e3",
+    "bracket":          "#e2e2e3",
+    "delimiter":        "#e2e2e3",
+    "attribute":        "#9ed072",
+    "namespace":        "#76cce0",
+    "tag":              "#fc5d7c",
+    "label":            "#b39df3",
+    "error":            "#fc5d7c"
+  }
+}

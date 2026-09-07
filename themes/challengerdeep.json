@@ -1,0 +1,62 @@
+{
+  "name": "challengerdeep",
+  "about": "Challenger Deep, from challenger-deep-theme — indigo, and colours that do not apologise for being bright.",
+
+  "ui": {
+    "background": "#1e1c31",
+    "foreground": "#cbe3e7",
+    "muted":      "#a6b3cc",
+    "faint":      "#565575",
+    "accent":     "#906cff",
+    "on_accent":  "#100e23",
+    "success":    "#62d196",
+    "warning":    "#ffb378",
+    "error":      "#ff5458",
+    "info":       "#65b2ff"
+  },
+
+  "editor": {
+    "selection":      "#3b3355",
+    "current_line":   "#262441",
+    "gutter":         "#565575",
+    "gutter_current": "#cbe3e7",
+    "cursor":         "#ffb378",
+    "bracket_match":  "#63f2f1",
+    "whitespace":     "#3b3355",
+    "ruler":          "#2a2745"
+  },
+
+  "syntax": {
+    "keyword":          "#906cff",
+    "keyword_control":  "#ff5458",
+    "function":         "#65b2ff",
+    "function_builtin": "#65b2ff",
+    "method":           "#65b2ff",
+    "macro":            "#63f2f1",
+    "type":             "#ffb378",
+    "type_builtin":     "#ffb378",
+    "constructor":      "#ffb378",
+    "string":           "#95ffa4",
+    "string_escape":    "#ffe9aa",
+    "string_special":   "#ffe9aa",
+    "character":        "#95ffa4",
+    "number":           "#ff8080",
+    "boolean":          "#ff8080",
+    "comment":          "#565575",
+    "comment_doc":      "#7a799e",
+    "constant":         "#ff8080",
+    "variable":         "#cbe3e7",
+    "variable_builtin": "#c991e1",
+    "parameter":        "#cbe3e7",
+    "property":         "#a6b3cc",
+    "operator":         "#63f2f1",
+    "punctuation":      "#a6b3cc",
+    "bracket":          "#cbe3e7",
+    "delimiter":        "#a6b3cc",
+    "attribute":        "#ffe9aa",
+    "namespace":        "#91ddff",
+    "tag":              "#ff8080",
+    "label":            "#aaffe4",
+    "error":            "#ff5458"
+  }
+}

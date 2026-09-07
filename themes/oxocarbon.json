@@ -1,0 +1,62 @@
+{
+  "name": "oxocarbon",
+  "about": "Oxocarbon, from nyoom-engineering — IBM's Carbon brought to a terminal. Its own sixteen have no yellow, so what warns you here is Carbon's alert orange.",
+
+  "ui": {
+    "background": "#161616",
+    "foreground": "#f2f4f8",
+    "muted":      "#dde1e6",
+    "faint":      "#525252",
+    "accent":     "#78a9ff",
+    "on_accent":  "#161616",
+    "success":    "#42be65",
+    "warning":    "#ff832b",
+    "error":      "#fa4d56",
+    "info":       "#33b1ff"
+  },
+
+  "editor": {
+    "selection":      "#393939",
+    "current_line":   "#262626",
+    "gutter":         "#525252",
+    "gutter_current": "#f2f4f8",
+    "cursor":         "#78a9ff",
+    "bracket_match":  "#3ddbd9",
+    "whitespace":     "#393939",
+    "ruler":          "#262626"
+  },
+
+  "syntax": {
+    "keyword":          "#ee5396",
+    "keyword_control":  "#ee5396",
+    "function":         "#78a9ff",
+    "function_builtin": "#78a9ff",
+    "method":           "#78a9ff",
+    "macro":            "#3ddbd9",
+    "type":             "#ff7eb6",
+    "type_builtin":     "#ff7eb6",
+    "constructor":      "#ff7eb6",
+    "string":           "#42be65",
+    "string_escape":    "#3ddbd9",
+    "string_special":   "#3ddbd9",
+    "character":        "#42be65",
+    "number":           "#be95ff",
+    "boolean":          "#be95ff",
+    "comment":          "#525252",
+    "comment_doc":      "#6f6f6f",
+    "constant":         "#be95ff",
+    "variable":         "#f2f4f8",
+    "variable_builtin": "#ee5396",
+    "parameter":        "#f2f4f8",
+    "property":         "#dde1e6",
+    "operator":         "#3ddbd9",
+    "punctuation":      "#dde1e6",
+    "bracket":          "#dde1e6",
+    "delimiter":        "#dde1e6",
+    "attribute":        "#82cfff",
+    "namespace":        "#33b1ff",
+    "tag":              "#ff7eb6",
+    "label":            "#82cfff",
+    "error":            "#fa4d56"
+  }
+}
